@@ -34,10 +34,23 @@ nulang out.nbc                          # VM runs the compiled program → 7
 The Rust host (`nulang`) runs `compile_hex.nula`; the hex output is converted
 to `.nbc` binary (RFC 0001) by `fixup_hex.py` + `hex2nbc.py`.
 
-### Stage 2 (Planned — Self-compiling)
+### Stage 2 (In Progress — Self-compiling)
 A full Nulang Core parser + type-checker + code generator, written in Nulang
-Core, that compiles itself. Stage 2 compiles Stage 2 source → `.nbc`, and the
-output (run on the Rust host) compiles the same source → identical `.nbc`.
+Core, that compiles itself. `verify.sh` check 6 proves the bootstrap handles
+whole **multi-fn programs** end-to-end: `desugar_fns.py` lowers top-level
+`fn` definitions into a let-binding chain, `compile_hex.nula` compiles it to
+hex, and the VM runs the resulting `.nbc`. Recursion (fib) works through the
+pipeline (check 5).
+
+**Known blocker:** the 3-argument `nperform` path (`String.charAt`, which
+takes 2 args) emits a corrupted effect-name constant — `compile_hex.nula`'s
+`comp` function has 178 locals, so the host compiler's MIR register
+allocator spills and clobbers live string values (`"const "` literal reads
+empty, `eff_name` gains a leading quote). This is the documented
+`src/mir_codegen.rs` register-spill bug class (see
+`bootstrap/spill_bug_repro.nula`); the existing repro passes, but the
+3-arg-`nperform`-inside-`comp` shape is a residual manifestation not yet
+captured by a repro. `String.length` (1-arg) and `IO.print` work.
 
 ### Stage 3 (Planned — Independence)
 The Stage 2 `.nbc` is run on a minimal Core VM (pure interpreter, no JIT, no
@@ -66,7 +79,8 @@ bootstrap/
 ## Build & Test
 
 ```bash
-# Run the self-hosted pipeline end-to-end (checks 1–4 + self-hosting check 5)
+# Run the self-hosted pipeline end-to-end (11 checks: eval, round-trip,
+# single-expression pipeline, recursion, and multi-fn Stage 2)
 bash bootstrap/verify.sh
 
 # Single expression through the self-hosting pipeline:

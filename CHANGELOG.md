@@ -396,6 +396,18 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **Bootstrap Stage 2: multi-fn programs + recursion through the
+  self-hosting pipeline** (Experimental, `bootstrap/`): `verify.sh` check 6
+  proves whole-program compilation — `desugar_fns.py` lowers top-level `fn`
+  definitions into a let-binding chain, `compile_hex.nula` compiles it to
+  hex, and the VM runs the resulting `.nbc` (multi-fn `add(double(3))` → 7).
+  Recursion also works through the pipeline (`let fib = fn(n) => ... in
+  fib(10)` → 55). 11/11 checks pass. Documented remaining blocker: the
+  3-argument `nperform` path (`String.charAt`, 2 args) corrupts its
+  effect-name constant due to the host compiler's MIR register-spill bug
+  (`compile_hex.nula`'s `comp` has 178 locals; `src/mir_codegen.rs`).
+  `String.length` (1-arg) and `IO.print` work.
+
 - **Bootstrap self-hosting pipeline verified end-to-end** (Experimental,
   `bootstrap/`): `compile_hex.nula` (a Nulang Core program) compiles Core
   source → hex bytecode; `fixup_hex.py` patches jump/constant/closure

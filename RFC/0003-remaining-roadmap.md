@@ -67,17 +67,27 @@ plan. Do not skip the artifact entirely.
   and closure frame indices in the emitted hex.
 - `bootstrap/hex2nbc.py` — converts patched hex to a runnable `.nbc` binary.
 - `bootstrap/self_test.nula` — minimal Core test program (fib(10) = 55).
-- `bootstrap/verify.sh` — 5 checks: self_test eval, compiler_core eval,
-  host shim, Rust `.nbc` round-trip, and the **self-hosting pipeline**
-  (`compile_hex.nula` → `fixup_hex.py` → `hex2nbc.py` → VM run). The
-  pipeline check is the Stage 1→2 bridge: a Nulang Core program compiles
-  Core source to `.nbc` with no Rust compiler in the loop.
+- `bootstrap/verify.sh` — 11 checks: self_test eval, compiler_core eval,
+  host shim, Rust `.nbc` round-trip, single-expression self-hosting
+  pipeline (arithmetic, `let`, `if`, `not`, closure application, **fib
+  recursion** = 55), and **multi-fn Stage 2** (desugar_fns.py → compile_hex
+  → fixup → hex2nbc → VM). The pipeline checks are the Stage 1→2 bridge:
+  a Nulang Core program compiles Core source to `.nbc` with no Rust
+  compiler in the loop.
 - Fixed (2026-08-09): `false` keyword hash bug — `read_ident` returns the
   low-16 hash, but `false` (full hash 79251) was compared unmasked, so the
   `false` literal was never recognized (bare `false` → nil, `not false` →
   false). Correct constant is 13715. Verified: 20-expression oracle
   comparison against the Rust compiler, all matching.
-- Remaining: Stage 2 self-compiling parser (compile `compiler_core.nula`
+- Verified (2026-08-09): multi-fn programs and recursion work through the
+  pipeline end-to-end. Remaining blocker: the **3-argument `nperform` path**
+  (`String.charAt`, 2 args) emits a corrupted effect-name constant because
+  `compile_hex.nula`'s `comp` (178 locals) triggers the host compiler's MIR
+  register-spill bug (`src/mir_codegen.rs`; see `spill_bug_repro.nula`). The
+  existing repro passes; the 3-arg-inside-`comp` shape is a residual
+  manifestation. `String.length` (1-arg) and `IO.print` work.
+- Remaining: fix the residual register-spill manifestation so `String.charAt`
+  compiles; Stage 2 self-compiling parser (compile `compiler_core.nula`
   through the pipeline and compare against the Rust compiler's output);
   Stage 3 minimal Core VM.
 
