@@ -158,6 +158,19 @@ impl FlightRecorder {
         self.next_seq = 0;
     }
 }
+/// Serialized hibernation state for an actor.
+#[derive(Debug, Clone)]
+pub struct HibernationState {
+    /// Serialized VM continuation and handler stack.
+    pub continuation_bytes: Vec<u8>,
+    /// Module hash at time of hibernation.
+    pub module_hash: [u8; 32],
+    /// Timestamp when hibernated (milliseconds since epoch).
+    pub hibernated_at_ms: u64,
+    /// Actor's state fields at time of hibernation.
+    pub state_fields: HashMap<String, Value>,
+}
+
 /// An actor: independent unit of computation with isolated state and mailbox.
 pub struct Actor {
     pub id: u64,
@@ -250,6 +263,10 @@ pub struct Actor {
     /// Flight recorder ring buffer for deterministic replay debugging.
     /// Records the N most recent messages delivered to this actor.
     pub flight_recorder: FlightRecorder,
+    /// Hibernation state: None = active, Some = hibernated with serialized bytes.
+    pub hibernation_state: Option<HibernationState>,
+    /// Time (in milliseconds) since last activity. Used for hibernation timeout.
+    pub idle_ms: u64,
     /// Fields modified since the last checkpoint (incremental persistence).
     /// Cleared after each successful snapshot. Empty on a freshly spawned
     /// actor (all fields are serialized on the first checkpoint).
@@ -342,7 +359,72 @@ impl Actor {
             retry_config: None,
             flight_recorder: FlightRecorder::new(1000),
             fallback_config: Vec::new(),
+            hibernation_state: None,
+            idle_ms: 0,
         }
+    }
+
+    /// Hibernate this actor: serialize its state and VM continuation,
+    /// store in hibernation_state, and return the serialized bytes.
+    pub fn hibernate(
+        &mut self,
+        vm: &mut crate::vm::VM,
+        module_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, String> {
+        if self.hibernation_state.is_some() {
+            return Err("Actor already hibernated".to_string());
+        }
+        // Capture current VM continuation
+        let cont = crate::vm::Continuation::capture(vm, 0).ok_or("No active frame")?;
+        let bytes = crate::runtime::heap_serialize::serialize_continuation(
+            &cont,
+            &vm.handler_stack,
+            vm,
+            module_hash,
+        )?;
+        self.hibernation_state = Some(HibernationState {
+            continuation_bytes: bytes.clone(),
+            module_hash: *module_hash,
+            hibernated_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            state_fields: self.state_data.clone(),
+        });
+        Ok(bytes)
+    }
+
+    /// Wake this actor from hibernation: deserialize and restore VM state.
+    pub fn wake_from_hibernation(
+        &mut self,
+        vm: &mut crate::vm::VM,
+    ) -> Result<(), String> {
+        let hibernation = self.hibernation_state.take().ok_or("Not hibernated")?;
+        let (cont, handlers) = crate::runtime::heap_serialize::deserialize_continuation(
+            &hibernation.continuation_bytes,
+            vm,
+        )?;
+        // Restore VM state
+        cont.restore(vm, crate::vm::Value::unit());
+        // Restore handler stack
+        vm.handler_stack = handlers;
+        Ok(())
+    }
+
+    /// Check if this actor is currently hibernated.
+    pub fn is_hibernated(&self) -> bool {
+        self.hibernation_state.is_some()
+    }
+
+    /// Increment idle time; returns true if hibernation threshold exceeded.
+    pub fn increment_idle(&mut self, ms: u64) -> bool {
+        self.idle_ms += ms;
+        self.idle_ms >= 30000 // 30 second default threshold
+    }
+
+    /// Reset idle timer on activity.
+    pub fn reset_idle(&mut self) {
+        self.idle_ms = 0;
     }
 
     /// Return the cycle-detector sentinel header for this actor.

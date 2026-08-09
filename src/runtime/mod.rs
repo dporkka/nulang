@@ -4271,7 +4271,6 @@ impl Runtime {
         constants: &[crate::bytecode::Constant],
         regs: &[Value],
     ) -> Option<Value> {
-        use crate::backends::ForeignInterop;
         let string_arg = |idx: usize| -> Option<String> {
             let id = regs.get(idx)?.as_string_id()?;
             match constants.get(id as usize) {

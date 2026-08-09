@@ -482,9 +482,9 @@ impl Repl {
                             if let Err(e) = self.save_session(rest) { self.print_error(&e); }
                         }
                     }
-                    "load" => {
+                    "load-session" => {
                         if rest.is_empty() {
-                            eprintln!("Usage: %load <file>");
+                            eprintln!("Usage: %load-session <file>");
                         } else {
                             if let Err(e) = self.load_session(rest) { self.print_error(&e); }
                         }
@@ -614,7 +614,7 @@ impl Repl {
             let ty_str = type_to_string(expr_ty);
             println!("{} : {}", val_str, ty_str);
         // Inline effect row and capability hints for the evaluated expression
-        if let Some(ref expr) = main_expr {
+        if let Some(ref _expr) = main_expr {
             let effect_str = if let Type::Function { effect, .. } = &module_type {
                 let eff_str = if effect.effects().is_empty() {
                     String::new()
@@ -972,7 +972,7 @@ impl Repl {
             name: "effectcheck".to_string(),
             decls: combined_decls,
         };
-        let ty = self.type_checker.check_module(&module)?;
+        let _ty = self.type_checker.check_module(&module)?;
         let mut ec = EffectChecker::new();
         ec.register_function_rows(&flatten_decls(&module.decls))?;
         if let Some(row) = ec.function_row("__main") {

@@ -1627,7 +1627,7 @@ pub struct VM {
     /// Index of the currently executing frame in `frames`.
     current_frame_idx: Option<usize>,
     /// Handler stack for algebraic effects.
-    handler_stack: Vec<HandlerFrame>,
+    pub handler_stack: Vec<HandlerFrame>,
     /// Step counter (for debugging / limits).
     step_count: usize,
     /// Set by try_jit_execute when a JIT safepoint triggers a yield.
