@@ -252,7 +252,8 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                     } else (0 << 16) + p
                 } else if h == 18036 then {
                     (1 << 16) + q
-                } else if h == 79251 then {
+                } else if h == 13715 then {
+                    // false (low16 of hash 79251)
                     (0 << 16) + q
                 } else if h == 3421 then {
                     let inner = parse_pratt(src, q, len, no_left, 0, e0, e1, e2, e3, elen);
@@ -515,7 +516,8 @@ fn tc_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, t0: Int, 
                     }
                 } else if h == 18036 then {
                     (1 << 16) + q
-                } else if h == 79251 then {
+                } else if h == 13715 then {
+                    // false (low16 of hash 79251)
                     (1 << 16) + q
                 } else if h == 3421 then {
                     let inner = tc_pratt(src, q, len, no_left, 0, t0, t1, t2, t3, tlen);

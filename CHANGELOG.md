@@ -396,6 +396,20 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **Bootstrap self-hosting pipeline verified end-to-end** (Experimental,
+  `bootstrap/`): `compile_hex.nula` (a Nulang Core program) compiles Core
+  source → hex bytecode; `fixup_hex.py` patches jump/constant/closure
+  offsets; `hex2nbc.py` emits a runnable `.nbc`; the VM executes it — a
+  Nulang program compiling Nulang Core with no Rust compiler in the loop
+  (RFC 0003 Item 3, Stage 1→2 bridge). `bootstrap/verify.sh` gained a
+  pipeline check (5 expressions: arithmetic, `let`, `if`, `not`, closure
+  application) and now supports `NULANG_BIN=` to skip the `cargo run`
+  rebuild. Fixed the `false` keyword hash bug in `compiler_core.nula` and
+  `compile_hex.nula` (`read_ident` returns the low-16 hash; `false` = 13715,
+  not 79251, so the literal was never recognized — bare `false` → nil,
+  `not false` → false). Verified: 20-expression oracle comparison against
+  the Rust compiler, all matching; `verify.sh` 9/9 checks pass.
+
 - **Debug Adapter Protocol server** (Experimental, `src/dap/`, `--dap`).
   `nulang --dap` speaks DAP over stdio (the same `Content-Length` framing as
   the LSP) so editors such as VS Code can debug `.nula` programs: source

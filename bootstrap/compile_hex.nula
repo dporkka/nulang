@@ -463,8 +463,8 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                     // true
                     emit_hex(instr(0x04, nr, 0, 0));
                     (nr << 18) + q
-                } else if h == 79251 then {
-                    // false
+                } else if h == 13715 then {
+                    // false (low16 of hash 79251)
                     emit_hex(instr(0x03, nr, 0, 0));
                     (nr << 18) + q
                 } else if h == 3421 then {

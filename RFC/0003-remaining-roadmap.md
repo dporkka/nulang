@@ -57,16 +57,29 @@ plan. Do not skip the artifact entirely.
   bootstrap/self_test.nula` produces identical output to `cargo run --
   bootstrap/self_test.nula`.
 
-**Status (2026-08-09):** Stage 1 seeded.
-- `bootstrap/README.md` — strategy document.
-- `bootstrap/emitter.nula` — Core program that produces structured JSON for
-  a minimal program (`fn main() { 42 }`). Type-checks and runs.
-- `bootstrap/self_test.nula` — minimal Core test program.
-- `test_bootstrap_emitter_nbc_roundtrip` — integration test verifying `.nbc`
-  roundtrip for the emitter's instruction sequence (ConstU + RetVal). Passes.
-- Remaining: generalize emitter from hardcoded instructions to a
-  parameterized code generator; write host converter (JSON → `.nbc` binary);
-  Stage 2 self-compiling parser.
+**Status (2026-08-09):** Stage 1 working end-to-end; Stage 2 parser seed.
+- `bootstrap/README.md` — strategy document (updated to actual state).
+- `bootstrap/compiler_core.nula` — Core Pratt parser + type-checker
+  (evaluates a Core expression subset; stdin-driven).
+- `bootstrap/compile_hex.nula` — Core → hex bytecode emitter (arithmetic,
+  comparisons, booleans, if/else, let, closures, application, effects).
+- `bootstrap/fixup_hex.py` — patches jump offsets, constant-pool indices,
+  and closure frame indices in the emitted hex.
+- `bootstrap/hex2nbc.py` — converts patched hex to a runnable `.nbc` binary.
+- `bootstrap/self_test.nula` — minimal Core test program (fib(10) = 55).
+- `bootstrap/verify.sh` — 5 checks: self_test eval, compiler_core eval,
+  host shim, Rust `.nbc` round-trip, and the **self-hosting pipeline**
+  (`compile_hex.nula` → `fixup_hex.py` → `hex2nbc.py` → VM run). The
+  pipeline check is the Stage 1→2 bridge: a Nulang Core program compiles
+  Core source to `.nbc` with no Rust compiler in the loop.
+- Fixed (2026-08-09): `false` keyword hash bug — `read_ident` returns the
+  low-16 hash, but `false` (full hash 79251) was compared unmasked, so the
+  `false` literal was never recognized (bare `false` → nil, `not false` →
+  false). Correct constant is 13715. Verified: 20-expression oracle
+  comparison against the Rust compiler, all matching.
+- Remaining: Stage 2 self-compiling parser (compile `compiler_core.nula`
+  through the pipeline and compare against the Rust compiler's output);
+  Stage 3 minimal Core VM.
 
 
 ## Item 5: Decouple LLM (and All Transient Tech) from the Language Vocabulary (Stable) — NON-BREAKING PHASE IMPLEMENTED 2026-07-19

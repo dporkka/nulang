@@ -42,3 +42,6 @@ lake-manifest.json
 
 # Backup files
 *.baknode_modules/
+
+# Local bootstrap build cache
+.target-bootstrap/
