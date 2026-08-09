@@ -583,6 +583,30 @@ impl StdLib {
                     description: "Return the n-th command-line argument (0-based), or nil if out of range. Includes the program name at index 0.",
                 },
                 BuiltinOp {
+                    name: "Python.import",
+                    effect: "Python",
+                    op: "import",
+                    signature: "import(module: String) -> Unit",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Import a Python module.",
+                },
+                BuiltinOp {
+                    name: "Python.call",
+                    effect: "Python",
+                    op: "call",
+                    signature: "call(module: String, function: String, ...args) -> a",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Call a Python function with arguments.",
+                },
+                BuiltinOp {
+                    name: "Python.get_attr",
+                    effect: "Python",
+                    op: "get_attr",
+                    signature: "get_attr(module: String, attr: String) -> a",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Get an attribute from a Python module.",
+                },
+                BuiltinOp {
                     name: "Random.int",
                     effect: "Random",
                     op: "int",
@@ -849,11 +873,11 @@ mod tests {
                 "Env",
                 "Process",
                 "System",
+                "Python",
                 "Random",
             ]
         );
     }
-
     #[test]
     fn lookup_unknown_returns_none() {
         let lib = StdLib::new();

@@ -260,6 +260,10 @@ pub struct Runtime {
     /// Started via [`Runtime::enable_metrics_server`]; periodically
     /// updated via [`Runtime::publish_metrics`].
     pub metrics: Option<metrics::MetricsServer>,
+    /// Python foreign-interop bridge (feature `python`).  Lazily initialised
+    /// on first `Python.*` builtin effect invocation.
+    #[cfg(feature = "python")]
+    pub foreign_interop: Option<Box<dyn crate::backends::ForeignInterop>>,
     // LLM subsystem (v0.9 AI Runtime): client, worker thread, token budget,
     // completion channel, and non-blocking suspension state.
     #[cfg(feature = "ai-runtime")]
@@ -390,6 +394,22 @@ pub enum DeterministicRunResult {
     StepLimitExceeded { steps: u64 },
 }
 
+/// No-op foreign-interop bridge used when `DefaultForeignInterop` fails
+/// to initialise (e.g. missing Python runtime).  Every call returns an
+/// error, causing `perform_python_builtin` to emit a nil result.
+#[cfg(feature = "python")]
+struct NoOpForeignInterop;
+
+#[cfg(feature = "python")]
+impl crate::backends::ForeignInterop for NoOpForeignInterop {
+    fn call(&mut self, _module: &str, _function: &str, _args: &[Value]) -> Result<Value, String> {
+        Err("Python bridge not available".to_string())
+    }
+    fn import(&mut self, _name: &str) -> Result<(), String> {
+        Err("Python bridge not available".to_string())
+    }
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Runtime {
@@ -418,6 +438,8 @@ impl Runtime {
             crdt_manager: None,
             virtual_clock: None,
             metrics: None,
+            #[cfg(feature = "python")]
+            foreign_interop: None,
             crdt_sync_rounds: 0,
             timer_wheel: TimerWheel::new(),
             registry: ActorRegistry::new(),
@@ -559,6 +581,7 @@ impl Runtime {
             .and_then(|handler| handler(regs))
     }
 
+    #[tracing::instrument(level = "trace", skip(self, init))]
     pub fn spawn_actor(&mut self, init: Box<dyn FnOnce() -> Vec<(String, Value)>>) -> u64 {
         spawn::spawn_actor_with_models(self, init, HashMap::new(), false, None)
     }
@@ -1593,6 +1616,7 @@ impl Runtime {
             .position(|b| b.name == behavior || b.name.ends_with(&suffix))
             .map(|idx| idx as u16)
     }
+    #[tracing::instrument(level = "trace", skip(self, args))]
     pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
         // Forwarding for migrated actors: if this actor has been relocated
         // to another node, route the message there instead of bouncing it.
@@ -1759,6 +1783,7 @@ impl Runtime {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     pub fn process_gc_ops(&mut self) {
         let ops = std::mem::take(&mut self.coordinator.pending_ops);
         for op in ops {
@@ -2011,6 +2036,21 @@ impl Runtime {
         self.process_deferred_all();
     }
 
+    /// Run a distributed node: process network packets and execute the
+    /// local scheduler in an infinite loop.  This method never returns
+    /// under normal circumstances; the node terminates on SIGINT/SIGTERM.
+    pub fn run_distributed_node(&mut self) {
+        loop {
+            self.process_network();
+            self.run_scheduler();
+            // run_scheduler returns when the local queue is quiescent.
+            // Network packets may have arrived while we ran, so loop
+            // again after a brief pause to avoid busy-waiting when
+            // truly idle.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// Pick the next actor to step, deterministically: the SORTED set of
     /// ready (non-empty-mailbox) actor ids, indexed by `rng`. `None` if no
     /// actor currently has a pending message.
@@ -2211,6 +2251,7 @@ impl Runtime {
             .retain(|heap| Self::heap_has_outstanding_foreign_refs(heap));
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     pub fn step_actor(&mut self, actor_id: u64) {
         self.current_actor = Some(actor_id);
 
@@ -4220,6 +4261,72 @@ impl Runtime {
         }
     }
 
+    /// Dispatch a built-in `Python.*` effect performed from bytecode.
+    /// Returns `None` for unknown op names so the caller can fall through
+    /// to other built-in handlers.
+    #[cfg(feature = "python")]
+    fn perform_python_builtin(
+        &mut self,
+        op_name: Option<&str>,
+        constants: &[crate::bytecode::Constant],
+        regs: &[Value],
+    ) -> Option<Value> {
+        use crate::backends::ForeignInterop;
+        let string_arg = |idx: usize| -> Option<String> {
+            let id = regs.get(idx)?.as_string_id()?;
+            match constants.get(id as usize) {
+                Some(crate::bytecode::Constant::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        };
+        let fi = self.foreign_interop.get_or_insert_with(|| {
+            match crate::backends::DefaultForeignInterop::new() {
+                Ok(f) => Box::new(f) as Box<dyn crate::backends::ForeignInterop>,
+                Err(e) => {
+                    eprintln!("Python bridge init error: {}", e);
+                    Box::new(NoOpForeignInterop) as Box<dyn crate::backends::ForeignInterop>
+                }
+            }
+        });
+        match op_name {
+            Some("import") => {
+                let module = string_arg(0)?;
+                match fi.import(&module) {
+                    Ok(()) => Some(Value::unit()),
+                    Err(e) => {
+                        eprintln!("Python import error: {}", e);
+                        Some(Value::nil())
+                    }
+                }
+            }
+            Some("call") => {
+                let module = string_arg(0)?;
+                let function = string_arg(1)?;
+                let args: Vec<Value> = regs.iter().skip(2).copied().collect();
+                match fi.call(&module, &function, &args) {
+                    Ok(result) => Some(result),
+                    Err(e) => {
+                        eprintln!("Python call error: {}", e);
+                        Some(Value::nil())
+                    }
+                }
+            }
+            Some("get_attr") => {
+                let module = string_arg(0)?;
+                let attr = string_arg(1)?;
+                let args: Vec<Value> = vec![];
+                match fi.call(&module, &attr, &args) {
+                    Ok(result) => Some(result),
+                    Err(e) => {
+                        eprintln!("Python get_attr error: {}", e);
+                        Some(Value::nil())
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
     // -- Builtin OTP Supervisor Effects (Otp.*) --
 
     /// Dispatch a built-in `Otp.*` supervisor effect performed from
@@ -4580,6 +4687,7 @@ impl Runtime {
         distribution::send_distributed(self, target, behavior, args)
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     pub fn process_network(&mut self) {
         distribution::process_network(self)
     }

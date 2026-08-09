@@ -466,6 +466,11 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 return Some(crate::vm::Value::unit());
             }
         }
+        #[cfg(feature = "python")]
+        if effect_name == "Python" {
+            let mut rt = self.runtime.borrow_mut();
+            return rt.perform_python_builtin(op_name, constants, regs);
+        }
         self.perform_effect(effect_name, regs)
     }
 

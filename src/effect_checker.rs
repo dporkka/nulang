@@ -91,6 +91,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Event" => Effect::Event,
         "FFI" => Effect::FFI,
         "DB" => Effect::DB,
+        "Python" => Effect::Python,
         "Process" => Effect::Process,
         "System" => Effect::System,
         other => Effect::UserDefined(other.to_string()),

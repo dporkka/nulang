@@ -195,6 +195,16 @@ fn main() {
         }
         return;
     }
+    // `nulang node --listen <ADDR> [--seed <ADDR>] ...` — run a distributed
+    // actor node (shard 0, network-enabled).
+    if args[1] == "node" {
+        if let Err(e) = run_node_cmd(&args[2..]) {
+            print_error(&e, true);
+            std::process::exit(exit_code(&e));
+        }
+        return;
+    }
+
     if args[1] == "nula" {
         if let Err(e) = nulang::package::commands::run(&args[2..]) {
             print_error(&e, true);
@@ -756,6 +766,7 @@ fn print_help() {
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
     println!("       nulang fmt [--check] [<file>]");
+    println!("       nulang node --listen <ADDR> [--seed <ADDR>] [--expected-nodes <N>]");
     println!("       nulang --doc");
     println!();
     println!("Options:");
@@ -869,6 +880,170 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
         file.write_all(page.as_bytes())
             .map_err(|e| format!("Cannot write '{}': {}", filename.display(), e))?;
     }
+    Ok(())
+}
+
+/// Run a distributed Nulang node: parse arguments, create a Runtime,
+/// enable distribution, join a seed cluster if requested, and run forever.
+fn run_node_cmd(args: &[String]) -> NuResult<()> {
+    let mut listen_addr = "127.0.0.1:9000".to_string();
+    let mut seed_addr: Option<String> = None;
+    let mut expected_nodes: Option<usize> = None;
+    let mut tls_cert: Option<String> = None;
+    let mut tls_key: Option<String> = None;
+    let mut tls_ca: Option<String> = None;
+    let mut plaintext = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--listen" => {
+                if i + 1 < args.len() {
+                    listen_addr = args[i + 1].clone();
+                    i += 1;
+                } else {
+                    eprintln!("Error: --listen requires an address argument");
+                    std::process::exit(1);
+                }
+            }
+            "--seed" => {
+                if i + 1 < args.len() {
+                    seed_addr = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --seed requires an address argument");
+                    std::process::exit(1);
+                }
+            }
+            "--expected-nodes" => {
+                if i + 1 < args.len() {
+                    expected_nodes = Some(args[i + 1].parse().unwrap_or(1));
+                    i += 1;
+                } else {
+                    eprintln!("Error: --expected-nodes requires a count argument");
+                    std::process::exit(1);
+                }
+            }
+            "--tls-cert" => {
+                if i + 1 < args.len() {
+                    tls_cert = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --tls-cert requires a path argument");
+                    std::process::exit(1);
+                }
+            }
+            "--tls-key" => {
+                if i + 1 < args.len() {
+                    tls_key = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --tls-key requires a path argument");
+                    std::process::exit(1);
+                }
+            }
+            "--tls-ca" => {
+                if i + 1 < args.len() {
+                    tls_ca = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --tls-ca requires a path argument");
+                    std::process::exit(1);
+                }
+            }
+            "--plaintext" => plaintext = true,
+            "-h" | "--help" => {
+                println!("Usage: nulang node [OPTIONS]");
+                println!();
+                println!("Options:");
+                println!("  --listen <ADDR>       Bind address (default: 127.0.0.1:9000)");
+                println!("  --seed <ADDR>         Seed node to join (optional)");
+                println!("  --expected-nodes <N>  Expected cluster size for split-brain quorum");
+                println!("  --tls-cert <PATH>     Server certificate (PEM)");
+                println!("  --tls-key <PATH>      Server private key (PEM)");
+                println!("  --tls-ca <PATH>       CA certificate for mutual TLS");
+                println!("  --plaintext           Disable TLS (insecure, dev only)");
+                println!("  -h, --help            Show this help message");
+                return Ok(());
+            }
+            arg => {
+                eprintln!("Error: Unknown node option: {}", arg);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let bind_addr: std::net::SocketAddr = listen_addr
+        .parse()
+        .map_err(|e| NuError::RuntimeError {
+            msg: format!("invalid bind address: {e}"),
+            span: Span::default(),
+        })?;
+
+    let tls_config = if plaintext {
+        nulang::runtime::TlsConfig::PlaintextInsecure
+    } else {
+        let cert = tls_cert
+            .as_ref()
+            .map(|p| std::fs::read_to_string(p).ok())
+            .flatten()
+            .unwrap_or_default();
+        let key = tls_key
+            .as_ref()
+            .map(|p| std::fs::read_to_string(p).ok())
+            .flatten()
+            .unwrap_or_default();
+        let ca = tls_ca
+            .as_ref()
+            .map(|p| std::fs::read_to_string(p).ok())
+            .flatten()
+            .unwrap_or_default();
+        if cert.is_empty() && key.is_empty() && ca.is_empty() {
+            eprintln!("Warning: no TLS certificates provided; using plaintext transport");
+            nulang::runtime::TlsConfig::PlaintextInsecure
+        } else {
+            nulang::runtime::TlsConfig::MutualTls {
+                ca_cert_pem: ca.into_bytes(),
+                server_cert_pem: cert.into_bytes(),
+                server_key_pem: key.into_bytes(),
+                server_name: None,
+            }
+        }
+    };
+
+    let mut runtime = nulang::runtime::Runtime::new();
+
+    if let Some(n) = expected_nodes {
+        runtime.cluster_config = nulang::runtime::ClusterConfig {
+            split_brain: nulang::runtime::SplitBrainConfig::StaticQuorum { expected_nodes: n },
+            probe_interval: std::time::Duration::from_secs(5),
+        };
+    }
+
+    if let Err(e) = runtime.enable_distribution(bind_addr, tls_config) {
+        return Err(NuError::RuntimeError {
+            msg: format!("failed to enable distribution: {e}"),
+            span: Span::default(),
+        });
+    }
+
+    if let Some(seed) = seed_addr {
+        let seed_socket: std::net::SocketAddr = seed
+            .parse()
+            .map_err(|e| NuError::RuntimeError {
+                msg: format!("invalid seed address: {e}"),
+                span: Span::default(),
+            })?;
+        runtime.join_cluster(seed_socket);
+    }
+
+    eprintln!(
+        "Nulang node listening on {} (node_id: {:?})",
+        bind_addr,
+        runtime.distributed.node_id
+    );
+    runtime.run_distributed_node();
     Ok(())
 }
 
