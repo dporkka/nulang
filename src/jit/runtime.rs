@@ -775,8 +775,8 @@ pub unsafe extern "C" fn nulang_rec_copy(obj: u64) -> u64 {
 /// Returns tagged bool.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_str_eq(a: u64, b: u64) -> u64 {
-    let sa = resolve_string(a);
-    let sb = resolve_string(b);
+    let sa = resolve_string_coerce(a);
+    let sb = resolve_string_coerce(b);
     let eq = match (sa, sb) {
         (Some(sa), Some(sb)) => sa == sb,
         _ => false,
@@ -787,9 +787,41 @@ pub unsafe extern "C" fn nulang_str_eq(a: u64, b: u64) -> u64 {
 /// String concatenation: allocate a new heap string.
 /// Returns tagged pointer or nil.
 #[no_mangle]
+pub fn resolve_string_coerce(raw: u64) -> Option<String> {
+    let val = crate::vm::Value::from_raw(raw);
+    if val.is_int() {
+        return Some(val.as_int().unwrap().to_string());
+    }
+    if val.is_float() {
+        return Some(val.as_float().unwrap().to_string());
+    }
+    if val.is_bool() {
+        return Some(val.as_bool().unwrap().to_string());
+    }
+    if (raw & TAG_MASK) == TAG_PTR {
+        let ptr = (raw & PAYLOAD_MASK) as *mut u8;
+        if ptr.is_null() {
+            return None;
+        }
+        unsafe {
+            let header = &*ActorHeap::header_of(ptr);
+            if header.type_tag != HeapTypeTag::String {
+                return None;
+            }
+            return Some(
+                std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    None
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
-    let sa = resolve_string(a);
-    let sb = resolve_string(b);
+    let sa = resolve_string_coerce(a);
+    let sb = resolve_string_coerce(b);
     let result = match (sa, sb) {
         (Some(sa), Some(sb)) => format!("{}{}", sa, sb),
         (Some(s), None) => s,

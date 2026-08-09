@@ -1013,6 +1013,11 @@ impl NulangLanguageServer {
                     self.refs_expr(e, word, locs);
                 }
             }
+            Expr::Par { exprs, .. } => {
+                for e in exprs {
+                    self.refs_expr(e, word, locs);
+                }
+            }
             Expr::App { func, args, .. } => {
                 self.refs_expr(func, word, locs);
                 for a in args {
@@ -1793,6 +1798,7 @@ impl NulangLanguageServer {
     fn extract_expr_types(expr: &crate::ast::Expr, source: &str, map: &mut HashMap<usize, String>) {
         use crate::ast::Expr;
         match expr {
+            Expr::FString(parts, _) => { for part in parts { Self::extract_expr_types(part, source, map); } }
             Expr::Let {
                 name,
                 ty,
@@ -1816,6 +1822,11 @@ impl NulangLanguageServer {
                 Self::extract_expr_types(body, source, map);
             }
             Expr::Block { exprs, .. } => {
+                for e in exprs {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
+            Expr::Par { exprs, .. } => {
                 for e in exprs {
                     Self::extract_expr_types(e, source, map);
                 }

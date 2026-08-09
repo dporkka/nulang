@@ -635,6 +635,22 @@ pub struct ForeignFunctionDef {
 // Code Module
 // ---------------------------------------------------------------------------
 
+/// Per-function debug metadata for the DAP server: how to name a stack frame
+/// (by code range) and which registers hold which local variables. Register
+/// index = `mir::FunctionBuilder::LOCAL_BASE` + MIR local id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DebugFunctionInfo {
+    pub name: String,
+    /// Byte offset of the first instruction of this function.
+    pub code_offset: usize,
+    /// Number of instructions in the function (for code-range lookup).
+    pub code_len: usize,
+    /// Register indices of the function parameters.
+    pub params: Vec<usize>,
+    /// `(register index, optional local name)` for every local.
+    pub locals: Vec<(usize, Option<String>)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeModule {
     pub name: String,
@@ -661,6 +677,15 @@ pub struct CodeModule {
     pub spawn_init_overrides: Vec<(usize, Vec<(String, Constant)>)>,
     #[serde(default)]
     pub remote_spawn_init_fields: Vec<(usize, Vec<String>)>,
+    /// Sorted (bytecode pc -> 1-indexed source line) for the DAP server's
+    /// breakpoint resolution and stepping. One entry per source statement
+    /// (the pc of its first instruction).
+    #[serde(default)]
+    pub line_table: Vec<(usize, u32)>,
+    /// Per-function debug info (name / code-range / locals) for the DAP
+    /// server. Includes actor behaviors (compiled as functions).
+    #[serde(default)]
+    pub debug_functions: Vec<DebugFunctionInfo>,
 }
 
 impl CodeModule {
@@ -679,6 +704,8 @@ impl CodeModule {
             actor_metadata: Vec::new(),
             foreign_functions: Vec::new(),
             tools: Vec::new(),
+            line_table: Vec::new(),
+            debug_functions: Vec::new(),
         }
     }
 
@@ -700,6 +727,29 @@ impl CodeModule {
             instr.op1 = (abs_offset >> 8) as u8;
             instr.op2 = (abs_offset & 0xFF) as u8;
         }
+    }
+
+    /// Source line for a bytecode pc (greatest line-table pc <= `pc`), or
+    /// `None` if `pc` precedes every recorded statement. `line_table` is
+    /// sorted by pc and non-decreasing in line.
+    pub fn line_at(&self, pc: usize) -> Option<u32> {
+        match self.line_table.binary_search_by_key(&pc, |&(p, _)| p) {
+            Ok(i) => Some(self.line_table[i].1),
+            Err(0) => None,
+            Err(i) => Some(self.line_table[i - 1].1),
+        }
+    }
+
+    /// Resolve a requested source `line` to a bytecode pc for breakpoint
+    /// placement: exact match when the line is executable, otherwise the
+    /// next executable line after it (the common "snap to next statement"
+    /// behaviour). Returns `(pc, actual_line)` or `None` when no executable
+    /// line at or after `line` exists.
+    pub fn resolve_line(&self, line: u32) -> Option<(usize, u32)> {
+        self.line_table
+            .iter()
+            .find(|&&(_, l)| l >= line)
+            .map(|&(pc, l)| (pc, l))
     }
 
     pub fn add_constant(&mut self, c: Constant) -> usize {

@@ -14,6 +14,7 @@ pub enum TokenKind {
     IntLit(i64),
     FloatLit(f64),
     StringLit(String),
+    FStringLit(String),
     BoolLit(bool),
     NilLit,
     UnitLit,
@@ -58,6 +59,7 @@ pub enum TokenKind {
     Effect,
     Perform,
     Handle,
+    Par,
     Resume,
     Extern,
     Module,
@@ -169,6 +171,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::IntLit(n) => write!(f, "integer {}", n),
             TokenKind::FloatLit(n) => write!(f, "float {}", n),
             TokenKind::StringLit(s) => write!(f, "\"{}\"", s),
+            TokenKind::FStringLit(s) => write!(f, "f\"{}\"", s),
             TokenKind::BoolLit(b) => write!(f, "{}", b),
             TokenKind::NilLit => write!(f, "nil"),
             TokenKind::UnitLit => write!(f, "unit"),
@@ -212,6 +215,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Effect => write!(f, "effect"),
             TokenKind::Perform => write!(f, "perform"),
             TokenKind::Handle => write!(f, "handle"),
+            TokenKind::Par => write!(f, "par"),
             TokenKind::Resume => write!(f, "resume"),
             TokenKind::Extern => write!(f, "extern"),
             TokenKind::Module => write!(f, "module"),
@@ -411,7 +415,27 @@ impl<'a> Lexer<'a> {
                     self.read_operator()?
                 }
             }
-            b'a'..=b'z' | b'_' => self.read_identifier(),
+            b'a'..=b'e' | b'g'..=b'z' | b'_' => self.read_identifier(),
+            b'f' => {
+                if self.bytes.get(self.pos + 1) == Some(&b'"') {
+                    let f_start = self.pos;
+                    self.advance(); // consume 'f'
+                    let mut tok = if self.bytes.get(self.pos + 1) == Some(&b'"')
+                        && self.bytes.get(self.pos + 2) == Some(&b'"')
+                    {
+                        self.read_triple_string().unwrap()
+                    } else {
+                        self.read_string().unwrap()
+                    };
+                    if let TokenKind::StringLit(s) = tok.kind {
+                        tok.kind = TokenKind::FStringLit(s);
+                        tok.span = crate::types::Span::new(f_start as u32, self.pos as u32);
+                    }
+                    tok
+                } else {
+                    self.read_identifier()
+                }
+            }
             b'A'..=b'Z' => self.read_identifier(),
             b'0'..=b'9' => self.read_number()?,
             b'"' => {
@@ -1244,6 +1268,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "database" => Some(TokenKind::Database),
         "agent" => Some(TokenKind::Agent),
         "receive" => Some(TokenKind::Receive),
+        "par" => Some(TokenKind::Par),
         _ => None,
     }
 }

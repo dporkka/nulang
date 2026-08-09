@@ -81,6 +81,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
+                &opts.target,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -249,6 +250,7 @@ fn main() {
                 return;
             }
             "--lsp" => opts.lsp = true,
+            "--dap" => opts.dap = true,
             "--doc" => opts.doc = true,
             "--backend" => {
                 if i + 1 < args.len() {
@@ -263,6 +265,15 @@ fn main() {
                             ""
                         }
                     );
+                    std::process::exit(1);
+                }
+            }
+            "--target" => {
+                if i + 1 < args.len() {
+                    opts.target = args[i + 1].clone();
+                    i += 1;
+                } else {
+                    eprintln!("Error: --target requires an argument (native | ptx | riscv64)");
                     std::process::exit(1);
                 }
             }
@@ -493,6 +504,9 @@ fn main() {
             std::process::exit(1);
         }
     }
+    if opts.dap {
+        nulang::dap::run_dap_server();
+    }
 
     if let Some(n) = &opts.init {
         let d = std::path::PathBuf::from(n);
@@ -550,7 +564,7 @@ fn main() {
                 lm = cm;
                 eprintln!("\n--- {} ---", p);
                 if let Ok(s) = std::fs::read_to_string(&p) {
-                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None) {
+                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None, &opts.target) {
                         print_error(&e, uc);
                     }
                 }
@@ -584,6 +598,7 @@ fn main() {
                         &opts.backend,
                         opts.out_file.as_deref(),
                         opts.metrics_port,
+                        &opts.target,
                     )
                 },
                 n,
@@ -599,6 +614,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
+                &opts.target,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -686,6 +702,7 @@ fn main() {
                         backend,
                         out_file,
                         opts.metrics_port,
+                        &opts.target,
                     )
                 },
                 n,
@@ -701,6 +718,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
+                &opts.target,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -721,6 +739,7 @@ fn main() {
             &opts.backend,
             opts.out_file.as_deref(),
             opts.metrics_port,
+            &opts.target,
         ) {
             print_error(&e, use_color);
             std::process::exit(exit_code(&e));
@@ -736,6 +755,7 @@ struct Options {
     eval_code: Option<String>,
     check_file: Option<String>,
     lsp: bool,
+    dap: bool,
     doc: bool,
     verbose: bool,
     backend: String,
@@ -759,8 +779,9 @@ struct Options {
     ffi_sandbox: bool,
     ffi_allow: Vec<String>,
     profile: Option<String>,
+    /// Target ISA for AOT compilation: native (default), ptx, riscv64
+    target: String,
 }
-
 impl Default for Options {
     fn default() -> Self {
         Options {
@@ -768,6 +789,7 @@ impl Default for Options {
             eval_code: None,
             check_file: None,
             lsp: false,
+            dap: false,
             doc: false,
             verbose: false,
             backend: "bytecode".to_string(),
@@ -785,10 +807,10 @@ impl Default for Options {
             ffi_sandbox: false,
             ffi_allow: Vec::new(),
             profile: None,
+            target: "native".to_string(),
         }
     }
 }
-
 fn print_help() {
     println!("Usage: nulang [OPTIONS] <FILE>");
     println!("       nulang --repl");
@@ -818,10 +840,10 @@ fn print_help() {
         println!("                   wasm*: IO.print/read only (no user-defined effect");
         println!("                   handlers, no actor mailbox)");
     }
+    println!("  --target <t>     Target ISA for native backend: native (default) | ptx | riscv64");
     if cfg!(feature = "wasm-backend") {
         println!("  --out <file>     Output file for WASM backends (default: out.wasm)");
     }
-    println!("  --emit-nbc       Compile <FILE> (or --eval <CODE>) to a .nbc artifact; don't run");
     println!("  --out <file>     Output path for --emit-nbc (default: <FILE> with .nbc extension)");
     println!("  <FILE>.nbc       Run a pre-compiled .nbc artifact directly (no compiler invoked)");
     println!(
@@ -1369,6 +1391,7 @@ fn run_source(
     backend: &str,
     out_file: Option<&str>,
     metrics_port: Option<u16>,
+    target: &str,
 ) -> NuResult<()> {
     let ast = run_frontend(source, file_path, verbose)?;
 
@@ -1450,7 +1473,7 @@ fn run_source(
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             if verbose {
-                println!("=== AOT native compilation ===");
+                println!("=== AOT native compilation (target: {}) ===", target);
                 for func in &mir.functions {
                     println!(
                         "  fn {} ({} locals, {} blocks)",
@@ -1460,7 +1483,19 @@ fn run_source(
                     );
                 }
             }
-            let aot_module = nulang::aot::AotModule::compile(&mir)?;
+            let aot_module = nulang::aot::AotModule::compile_for_target(&mir, target)?;
+            
+            // If --out is specified, write assembly to file
+            if let Some(out_file) = out_file {
+                let assembly = aot_module.emit_assembly();
+                std::fs::write(out_file, assembly).map_err(|e| nulang::types::NuError::VMError {
+                    msg: format!("failed to write assembly to {}: {}", out_file, e),
+                    span: Span::default(),
+                })?;
+                println!("Wrote assembly to {}", out_file);
+                return Ok(());
+            }
+            
             let result_raw = aot_module.run()?;
             let result = nulang::vm::Value::from_raw(result_raw);
             let result_str = result.to_string_repr();

@@ -73,6 +73,10 @@ pub struct Function {
     pub handler_tables: Vec<HandlerTableDef>,
     /// Compile-time type metadata for each local (by register index).
     pub type_metadata: crate::type_metadata::TypeMetadata,
+    /// Source-line map for the debugger: each MIR statement (identified by
+    /// `(block id, index-within-block)`) that carries a source line, in
+    /// emission order. `mir_codegen` translates these to bytecode PCs.
+    pub line_table: Vec<((BlockId, usize), u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,6 +363,11 @@ pub struct FunctionBuilder {
     current: BlockId,
     next_local: u32,
     next_block: u32,
+    /// Source line of the statement currently being lowered (from
+    /// `hir::Stmt::span`). Attached to each emitted statement until the
+    /// next `set_line`.
+    current_line: Option<u32>,
+    line_table: Vec<((BlockId, usize), u32)>,
 }
 
 impl FunctionBuilder {
@@ -374,6 +383,8 @@ impl FunctionBuilder {
             current: BlockId(0),
             next_local: 0,
             next_block: 0,
+            current_line: None,
+            line_table: Vec::new(),
         };
         builder.create_block(); // entry block
         builder
@@ -443,7 +454,18 @@ impl FunctionBuilder {
     }
 
     pub fn emit(&mut self, stmt: Stmt) {
+        if let Some(line) = self.current_line {
+            let si = self.blocks[self.current.0 as usize].stmts.len();
+            self.line_table.push(((self.current, si), line));
+        }
         self.blocks[self.current.0 as usize].stmts.push(stmt);
+    }
+
+    /// Set the source line (1-indexed) of the HIR statement being lowered.
+    /// Recorded against every MIR statement emitted until the next
+    /// `set_line` call.
+    pub fn set_line(&mut self, line: u32) {
+        self.current_line = Some(line);
     }
 
     pub fn assign(&mut self, dst: LocalId, op: RValue) {
@@ -481,6 +503,7 @@ impl FunctionBuilder {
             entry: BlockId(0),
             handler_tables: self.handler_tables,
             type_metadata,
+            line_table: self.line_table,
         }
     }
 }

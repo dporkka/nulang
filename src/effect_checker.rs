@@ -120,6 +120,7 @@ pub fn flatten_decls(decls: &[Decl]) -> Vec<&Decl> {
 fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
     match expr {
         Expr::Literal(_, _) => {}
+        Expr::FString(parts, _) => { for part in parts { free_vars(part, bound, acc); } }
         Expr::Var(name, _) => {
             if !bound.contains(name) && !acc.contains(name) {
                 acc.push(name.clone());
@@ -195,6 +196,12 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             }
         }
         Expr::Block { exprs, .. } => {
+            let mut block_bound = bound.clone();
+            for e in exprs {
+                free_vars(e, &mut block_bound, acc);
+            }
+        }
+        Expr::Par { exprs, .. } => {
             let mut block_bound = bound.clone();
             for e in exprs {
                 free_vars(e, &mut block_bound, acc);
@@ -486,6 +493,7 @@ impl EffectChecker {
         match expr {
             // Literals and variables are pure.
             Expr::Literal(_, _) => Ok(EffectRow::empty()),
+            Expr::FString(parts, _) => { let mut merged = EffectRow::empty(); for part in parts { merged = merged.combine(self.infer_effects(ctx, part)?); } Ok(merged) }
             Expr::Var(_, _) => Ok(EffectRow::empty()),
 
             // Lambda: effects are given by its annotation, or inferred from the
@@ -587,6 +595,15 @@ impl EffectChecker {
 
             // Block: union of all sub-expression effects.
             Expr::Block { exprs, .. } => {
+                let mut row = EffectRow::empty();
+                for e in exprs {
+                    row = effect_row_union(&row, &self.infer_effects(ctx, e)?);
+                }
+                Ok(row)
+            }
+
+            // Par: independence annotation, sequential effect union.
+            Expr::Par { exprs, .. } => {
                 let mut row = EffectRow::empty();
                 for e in exprs {
                     row = effect_row_union(&row, &self.infer_effects(ctx, e)?);
@@ -1300,6 +1317,7 @@ impl CapabilityAnalyzer {
         match expr {
             // Literals are immutable values.
             Expr::Literal(_, _) => Ok(Capability::Val),
+            Expr::FString(parts, _) => { let mut cap = Capability::Val; for part in parts { let c = self.infer_cap_tracked(ctx, part, consumed)?; if c == Capability::Iso || c == Capability::Trn { cap = c; } } Ok(cap) }
 
             Expr::Var(name, span) => {
                 let cap = ctx.lookup(name);
@@ -1525,6 +1543,24 @@ impl CapabilityAnalyzer {
 
             // Block: capability of the last expression (or Unit/Val if empty).
             Expr::Block { exprs, .. } => {
+                if exprs.is_empty() {
+                    Ok(Capability::Val)
+                } else {
+                    let block_ctx = ctx.clone();
+                    for (i, e) in exprs.iter().enumerate() {
+                        if i == exprs.len() - 1 {
+                            return self.infer_cap_tracked(&block_ctx, e, consumed);
+                        }
+                        // Intermediate expressions may bind variables.
+                        // We don't track those for now; just infer.
+                        let _ = self.infer_cap_tracked(&block_ctx, e, consumed)?;
+                    }
+                    Ok(Capability::Val)
+                }
+            }
+
+            // Par: independence annotation, sequential block semantics.
+            Expr::Par { exprs, .. } => {
                 if exprs.is_empty() {
                     Ok(Capability::Val)
                 } else {
@@ -1996,6 +2032,7 @@ impl Default for CapabilityAnalyzer {
 fn expr_span(expr: &Expr) -> Span {
     match expr {
         Expr::Literal(_, s) => *s,
+        Expr::FString(_, s) => *s,
         Expr::Var(_, s) => *s,
         Expr::Lambda { span, .. } => *span,
         Expr::App { span, .. } => *span,
@@ -2004,6 +2041,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::If { span, .. } => *span,
         Expr::Match { span, .. } => *span,
         Expr::Block { span, .. } => *span,
+        Expr::Par { span, .. } => *span,
         Expr::Tuple(_, s) => *s,
         Expr::Record(_, s) => *s,
         Expr::FieldAccess { span, .. } => *span,

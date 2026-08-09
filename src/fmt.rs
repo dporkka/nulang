@@ -212,6 +212,7 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
 fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bool) {
     let sp = " ".repeat(indent);
     match expr {
+        Expr::FString(parts, _) => { out.push_str("f\""); for _ in parts { out.push_str("{...}"); } out.push_str("\""); }
         Expr::Literal(lit, _) => match lit {
             Literal::Int(n) => out.push_str(&n.to_string()),
             Literal::Float(f) => out.push_str(&f.to_string()),
@@ -299,6 +300,15 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
         Expr::Resume { .. } => { out.push_str("resume(_)"); }
         Expr::Block { exprs, .. } => {
             out.push_str("{\n");
+            for e in exprs {
+                out.push_str(&format!("{}    ", sp));
+                fmt_expr(out, e, indent + 4, had_unhandled);
+                out.push('\n');
+            }
+            out.push_str(&format!("{}}}", sp));
+        }
+        Expr::Par { exprs, .. } => {
+            out.push_str("par {\n");
             for e in exprs {
                 out.push_str(&format!("{}    ", sp));
                 fmt_expr(out, e, indent + 4, had_unhandled);

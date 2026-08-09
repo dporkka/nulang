@@ -45,20 +45,21 @@ pub struct AotModule {
 }
 
 impl AotModule {
-    /// Compile a MIR module to native code.
+    /// Compile a MIR module to native code for the specified target.
     pub fn compile(mir_module: &mir::Module) -> NuResult<Self> {
-        // Set up Cranelift with the native target ISA.
+        Self::compile_for_target(mir_module, "native")
+    }
+
+    /// Compile a MIR module to native code for a specific target ISA.
+    pub fn compile_for_target(mir_module: &mir::Module, target: &str) -> NuResult<Self> {
+        // Set up Cranelift with the target ISA.
         let mut flag_builder = settings::builder();
         let _ = flag_builder.set("enable_simd", "true");
-        let isa_builder =
-            cranelift_native::builder().map_err(|msg| crate::types::NuError::VMError {
-                msg: format!("host machine not supported: {}", msg),
-                span: Span::default(),
-            })?;
+        let isa_builder = create_isa_builder(target)?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| crate::types::NuError::VMError {
-                msg: format!("failed to finalize ISA: {}", e),
+                msg: format!("failed to finalize ISA for target '{}': {}", target, e),
                 span: Span::default(),
             })?;
 
@@ -261,6 +262,60 @@ impl AotModule {
         let _ = crate::jit::runtime::aot_take_heap();
 
         Ok(result)
+    }
+
+    /// Emit assembly text for the compiled module.
+    pub fn emit_assembly(&self) -> String {
+        // For now, we'll just show the function names and basic info
+        // Full assembly emission would require using cranelift_object or TextSectionBuilder
+        let mut output = String::new();
+        output.push_str(&format!("; AOT Module for target\n"));
+        output.push_str(&format!("; Functions: {}\n", self.compiled_funcs.len()));
+        for (idx, _) in self.compiled_funcs.iter().enumerate() {
+            output.push_str(&format!("nulang_fn_{}:\n", idx));
+            output.push_str("  ; [assembly would be emitted here]\n");
+        }
+        output
+    }
+}
+
+/// Create an ISA builder for the specified target.
+fn create_isa_builder(target: &str) -> NuResult<isa::Builder> {
+    use target_lexicon::Triple;
+    
+    match target {
+        "native" => {
+            cranelift_native::builder().map_err(|msg| crate::types::NuError::VMError {
+                msg: format!("host machine not supported: {}", msg),
+                span: Span::default(),
+            })
+        }
+        "ptx" | "nvptx64" => {
+            // PTX (NVIDIA GPU) target
+            let triple: Triple = "nvptx64-nvidia-cuda".parse().map_err(|e| crate::types::NuError::VMError {
+                msg: format!("invalid PTX triple: {}", e),
+                span: Span::default(),
+            })?;
+            isa::lookup(triple).map_err(|e| crate::types::NuError::VMError {
+                msg: format!("PTX target not supported: {}", e),
+                span: Span::default(),
+            })
+        }
+        "riscv64" | "riscv" => {
+            // RISC-V 64-bit target
+            let triple: Triple = "riscv64gc-unknown-none-elf".parse().map_err(|e| crate::types::NuError::VMError {
+                msg: format!("invalid RISC-V triple: {}", e),
+                span: Span::default(),
+            })?;
+            isa::lookup(triple).map_err(|e| crate::types::NuError::VMError {
+                msg: format!("RISC-V target not supported: {}", e),
+                span: Span::default(),
+            })
+        }
+        _ => Err(crate::types::NuError::VMError {
+            msg: format!("unknown target '{}' (expected native | ptx | riscv64)", target),
+            span: Span::default(),
+        }),
     }
 }
 

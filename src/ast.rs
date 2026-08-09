@@ -68,6 +68,7 @@ pub enum Pattern {
 pub enum Expr {
     /// Literal value
     Literal(Literal, Span),
+    FString(Vec<Expr>, Span),
     /// Variable reference
     Var(String, Span),
     /// Lambda: fn(x: T) -> e
@@ -122,6 +123,16 @@ pub enum Expr {
     },
     /// Block expression: { e1; e2 }
     Block {
+        exprs: Vec<Expr>,
+        span: Span,
+    },
+    /// `par { e1; e2; ... }` — an independence annotation (adopted from
+    /// nanolang): the sub-expressions are declared to have no data
+    /// dependencies on each other. Semantics are identical to a `Block`
+    /// (evaluated in order); the node is kept distinct so later passes can
+    /// use the independence information (e.g. parallel codegen or parallel
+    /// lowering).
+    Par {
         exprs: Vec<Expr>,
         span: Span,
     },

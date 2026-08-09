@@ -276,18 +276,35 @@ impl WasmBackend {
         let wasm_locals: Vec<_> = vec![(256u32, ValType::I64)];
         let mut body = Function::new(wasm_locals);
 
-        let block_order = self.compute_block_order(func);
+        let block_order: Vec<BlockId> = (0..func.blocks.len() as u32).map(BlockId).collect();
         let mut labels: HashMap<BlockId, u32> = HashMap::new();
-        let mut li: u32 = 0;
+        for (li, &bid) in block_order.iter().enumerate() {
+            labels.insert(bid, li as u32);
+        }
         
         let vec_loops = crate::mir_wasm_simd::find_vectorizable_loops(func);
         let vec_body_to_loop: HashMap<BlockId, &crate::mir_wasm_simd::VecLoop> = vec_loops.iter().map(|l| (l.body, l)).collect();
 
-        for &bid in &block_order {
-            labels.insert(bid, li);
-            let block = &func.blocks[bid.0 as usize];
-            body.instruction(&Instruction::Block(BlockType::Empty));
+        let state_local = 251u32;
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(state_local));
 
+        body.instruction(&Instruction::Loop(BlockType::Empty));
+        
+        for _ in &block_order {
+            body.instruction(&Instruction::Block(BlockType::Empty));
+        }
+
+        body.instruction(&Instruction::LocalGet(state_local));
+        body.instruction(&Instruction::I32WrapI64);
+        let targets: Vec<u32> = (0..block_order.len() as u32).collect();
+        body.instruction(&Instruction::BrTable(std::borrow::Cow::Owned(targets.clone()), targets.last().copied().unwrap_or(0)));
+
+        for (li, &bid) in block_order.iter().enumerate() {
+            let li = li as u32;
+            body.instruction(&Instruction::End); // end block
+            
+            let block = &func.blocks[bid.0 as usize];
             if let Some(vloop) = vec_body_to_loop.get(&bid) {
                 self.compile_simd_body(&mut body, vloop, func);
             } else {
@@ -296,12 +313,64 @@ impl WasmBackend {
                 }
             }
             
-            self.compile_terminator(&mut body, &block.terminator, &labels, li, func);
-            body.instruction(&Instruction::End);
-            body.instruction(&Instruction::Unreachable);
-            li += 1;
+            match &block.terminator {
+                Terminator::Return(Some(l)) => {
+                    body.instruction(&Instruction::LocalGet(self.mir_local(l, func)));
+                    body.instruction(&Instruction::Return);
+                }
+                Terminator::Return(None) => {
+                    body.instruction(&Instruction::I64Const(crate::value_layout::TAG_UNIT as i64));
+                    body.instruction(&Instruction::Return);
+                }
+                Terminator::Jump(t) => {
+                    let tl = labels.get(t).copied().unwrap_or(0);
+                    if tl > li {
+                        body.instruction(&Instruction::Br(tl - li - 1));
+                    } else {
+                        body.instruction(&Instruction::I64Const(tl as i64));
+                        body.instruction(&Instruction::LocalSet(state_local));
+                        body.instruction(&Instruction::Br((block_order.len() - 1 - li as usize) as u32));
+                    }
+                }
+                Terminator::Branch { cond, then_, else_ } => {
+                    body.instruction(&Instruction::LocalGet(self.mir_local(cond, func)));
+                    body.instruction(&Instruction::I64Const(crate::value_layout::tag_bool(false) as i64));
+                    body.instruction(&Instruction::I64Ne);
+                    body.instruction(&Instruction::If(BlockType::Empty));
+                    
+                    let tl = labels.get(then_).copied().unwrap_or(0);
+                    if tl > li {
+                        body.instruction(&Instruction::Br(tl - li));
+                    } else {
+                        body.instruction(&Instruction::I64Const(tl as i64));
+                        body.instruction(&Instruction::LocalSet(state_local));
+                        body.instruction(&Instruction::Br((block_order.len() - li as usize) as u32));
+                    }
+                    
+                    body.instruction(&Instruction::Else);
+                    
+                    let el = labels.get(else_).copied().unwrap_or(0);
+                    if el > li {
+                        body.instruction(&Instruction::Br(el - li));
+                    } else {
+                        body.instruction(&Instruction::I64Const(el as i64));
+                        body.instruction(&Instruction::LocalSet(state_local));
+                        body.instruction(&Instruction::Br((block_order.len() - li as usize) as u32));
+                    }
+                    
+                    body.instruction(&Instruction::End); // end If
+                }
+                Terminator::Resume(_) | Terminator::Unterminated => {
+                    body.instruction(&Instruction::I64Const(crate::value_layout::TAG_NIL as i64));
+                    body.instruction(&Instruction::Return);
+                }
+            }
         }
-        body.instruction(&Instruction::End);
+        
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::I64Const(crate::value_layout::TAG_NIL as i64)); // default return
+        body.instruction(&Instruction::End); // function end
+        
         self.codes.function(&body);
     }
 
@@ -420,12 +489,34 @@ impl WasmBackend {
         body.instruction(&Instruction::I32WrapI64);
         self.emit_simd_load(body, 0);
 
-        // binop
+        // Untag: mask both loaded v128s with PAYLOAD_MASK
+        // PM as two i64 lanes: PAYLOAD_MASK = 0x0000_FFFF_FFFF_FFFF
+        // little-endian bytes: [0xFF; 6][0x00; 2][0xFF; 6][0x00; 2]
+        static PM128: [u8; 16] = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+        ];
+        self.emit_v128_const(body, &PM128);
+        self.emit_v128_and(body); // a_v128 & PM128 → untagged a
+        self.emit_v128_const(body, &PM128);
+        self.emit_v128_and(body); // b_v128 & PM128 → untagged b
+
+        // binop on untagged values
         if vloop.lane_type.is_float() {
             self.emit_simd_f64x2_binop(body, vloop.op);
         } else {
             self.emit_simd_i64x2_binop(body, vloop.op);
         }
+
+        // Re-tag: OR result with TAG_INT
+        // TAG_INT = 0x7FFB_0000_0000_0000
+        // LE bytes: [0x00; 6][0xFB, 0x7F][0x00; 6][0xFB, 0x7F]
+        static TAG128: [u8; 16] = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFB, 0x7F,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFB, 0x7F,
+        ];
+        self.emit_v128_const(body, &TAG128);
+        self.emit_v128_or(body);
 
         // store
         self.emit_simd_store(body, 0);
@@ -892,9 +983,9 @@ impl WasmBackend {
     fn emit_simd_i64x2_binop(&self, body: &mut Function, op: crate::ast::BinOp) {
         use crate::ast::BinOp;
         let simd_op: u32 = match op {
-            BinOp::Add => 0xC6, // i64x2.add
-            BinOp::Sub => 0xCD, // i64x2.sub
-            BinOp::Mul => 0xCB, // i64x2.mul
+            BinOp::Add => 0xCE, // i64x2.add
+            BinOp::Sub => 0xD1, // i64x2.sub
+            BinOp::Mul => 0xD5, // i64x2.mul
             _ => return,        // unsupported op — fall through to scalar
         };
         self.emit_simd(body, simd_op, &[]);
@@ -912,6 +1003,24 @@ impl WasmBackend {
             _ => return,
         };
         self.emit_simd(body, simd_op, &[]);
+    }
+
+
+    /// Emit v128.const with 16 raw bytes.
+    fn emit_v128_const(&self, body: &mut Function, bytes: &[u8; 16]) {
+        let mut imms = Vec::with_capacity(16);
+        imms.extend_from_slice(bytes);
+        self.emit_simd(body, 0x0C, &imms);
+    }
+
+    /// Emit v128.and (bitwise AND of two v128 values).
+    fn emit_v128_and(&self, body: &mut Function) {
+        self.emit_simd(body, 0x4E, &[]);
+    }
+
+    /// Emit v128.or (bitwise OR of two v128 values).
+    fn emit_v128_or(&self, body: &mut Function) {
+        self.emit_simd(body, 0x50, &[]);
     }
 
     // ── Array helpers ──────────────────────────────────────────────
@@ -1234,15 +1343,16 @@ mod tests {
     #[cfg(all(test, feature = "wasm-backend"))]
     fn test_wasm_simd_even_length() {
         let code = r#"
-            let a = [10, 20, 30, 40];
-            let b = [1, 2, 3, 4];
-            let c = [0, 0, 0, 0];
-            let mut i = 0;
-            while i < perform Array.length(c) {
-                c[i] = a[i] + b[i];
-                i = i + 1;
-            };
-            c[3]
+            let a = [10, 20, 30, 40] in
+            let b = [1, 2, 3, 4] in
+            let c = [0, 0, 0, 0] in
+            var i = 0 in {
+                while i < 4 {
+                    c[i] = a[i] + b[i];
+                    i = i + 1;
+                };
+                c[3]
+            }
         "#;
         let value = run_source(code).expect("run");
         assert_eq!(value.as_int(), Some(44), "c[3] should be 40 + 4");
@@ -1252,15 +1362,16 @@ mod tests {
     #[cfg(all(test, feature = "wasm-backend"))]
     fn test_wasm_simd_odd_length() {
         let code = r#"
-            let a = [10, 20, 30, 40, 50];
-            let b = [1, 2, 3, 4, 5];
-            let c = [0, 0, 0, 0, 0];
-            let mut i = 0;
-            while i < perform Array.length(c) {
-                c[i] = a[i] + b[i];
-                i = i + 1;
-            };
-            c[4]
+            let a = [10, 20, 30, 40, 50] in
+            let b = [1, 2, 3, 4, 5] in
+            let c = [0, 0, 0, 0, 0] in
+            var i = 0 in {
+                while i < 5 {
+                    c[i] = a[i] + b[i];
+                    i = i + 1;
+                };
+                c[4]
+            }
         "#;
         let value = run_source(code).expect("run");
         assert_eq!(value.as_int(), Some(55), "c[4] should be 50 + 5");

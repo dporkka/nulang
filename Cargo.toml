@@ -71,6 +71,7 @@ cranelift-jit = "0.132"
 cranelift-module = "0.132"
 cranelift-native = "0.132"
 cranelift-frontend = "0.132"
+cranelift-codegen = { version = "0.132", features = ["riscv64"] }
 
 # LSP server (optional, see [features])
 tower-lsp = { version = "0.20", optional = true }
@@ -105,6 +106,7 @@ rustls-pemfile = { version = "2", optional = true }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 hex = "0.4.3"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+target-lexicon = "0.13"
 
 flate2 = "1"
 tar = "0.4"

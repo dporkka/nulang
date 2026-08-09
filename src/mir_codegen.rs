@@ -24,7 +24,8 @@
 //! on `Drop`, so duplicate drops are harmless no-ops.
 
 use crate::bytecode::{
-    CodeModule, Constant, ForeignFunctionDef, HandlerBinding, HandlerTable, Instruction, OpCode,
+    CodeModule, Constant, DebugFunctionInfo, ForeignFunctionDef, HandlerBinding, HandlerTable,
+    Instruction, OpCode,
 };
 use crate::mir;
 use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
@@ -486,6 +487,16 @@ impl MirCodegen {
         // the module docs and `plan_drops`).
         let drop_plan = plan_drops(func);
 
+        // Source-line map: `(block id, statement index) -> line`, translated
+        // to bytecode PCs below so the debugger can place breakpoints and
+        // step through the source. Keyed identically to `mir::Function.line_table`.
+        let mut line_map: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+        for &((block, si), line) in &func.line_table {
+            line_map.insert((block.0, si), line);
+        }
+        // Function-relative pcs of each source statement's first instruction.
+        let mut func_lines: Vec<(usize, u32)> = Vec::new();
+
         for (bi, block) in func.blocks.iter().enumerate() {
             block_offsets.insert(block.id, self.module.instructions.len());
             if let Some(params) = handler_prologues.get(&block.id) {
@@ -516,6 +527,9 @@ impl MirCodegen {
                             self.emit(Instruction::new1(OpCode::Drop, (LOCAL_BASE + id.0) as u8));
                         }
                     }
+                }
+                if let Some(&line) = line_map.get(&(block.id.0, si)) {
+                    func_lines.push((self.module.instructions.len(), line));
                 }
                 self.compile_stmt(stmt, func, &mut handle_patches)?;
                 if let Some(ids) = drop_plan.after_stmt.get(&(bi, si)) {
@@ -598,7 +612,28 @@ impl MirCodegen {
         let mut function_code = Vec::new();
         std::mem::swap(&mut function_code, &mut self.module.instructions);
         self.module.instructions = saved_instructions;
+        let code_len = function_code.len();
         self.module.instructions.extend(function_code);
+
+        // Publish the debugger's pc<->line map and per-function debug info.
+        for (rel, line) in func_lines {
+            self.module.line_table.push((function_start + rel, line));
+        }
+        self.module.debug_functions.push(DebugFunctionInfo {
+            name: func.name.clone(),
+            code_offset: function_start,
+            code_len,
+            params: func
+                .params
+                .iter()
+                .map(|p| LOCAL_BASE as usize + p.0 as usize)
+                .collect(),
+            locals: func
+                .locals
+                .iter()
+                .map(|l| (LOCAL_BASE as usize + l.id.0 as usize, l.name.clone()))
+                .collect(),
+        });
 
         Ok(function_start)
     }

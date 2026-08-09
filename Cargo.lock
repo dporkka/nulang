@@ -2269,6 +2269,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cranelift",
+ "cranelift-codegen 0.132.3",
  "cranelift-frontend 0.132.3",
  "cranelift-jit",
  "cranelift-module",
@@ -2299,6 +2300,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "target-lexicon",
  "tokio",
  "toml",
  "tower-lsp",
