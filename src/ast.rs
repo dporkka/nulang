@@ -417,6 +417,20 @@ impl CrdtType {
         }
     }
 
+    /// The lowercase keyword used in source (inverse of [`Self::from_keyword`]).
+    pub fn keyword(self) -> &'static str {
+        match self {
+            CrdtType::GCounter => "gcounter",
+            CrdtType::PNCounter => "pncounter",
+            CrdtType::GSet => "gset",
+            CrdtType::ORSet => "orset",
+            CrdtType::AWORSet => "aworset",
+            CrdtType::LWWRegister => "lwwregister",
+            CrdtType::MVRegister => "mvregister",
+            CrdtType::RGA => "rga",
+        }
+    }
+
     pub fn to_u8(self) -> u8 {
         match self {
             CrdtType::GCounter => 0,
