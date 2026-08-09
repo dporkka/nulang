@@ -2850,6 +2850,48 @@ mod tests {
     }
 
     #[test]
+    fn test_chained_string_concat_with_int_lowers_to_strconcat() {
+        // Regression: `s + 2 + 3` where s is a String must lower BOTH adds to
+        // StrConcat. Previously the second add lowered to Binary(Add): the
+        // dst of the first StrConcat carried a placeholder type (HIR
+        // Operand::Var is always unit), so `is_string` failed for the
+        // chained add and the native/AOT backends mis-tagged the string
+        // pointer as an int — the interpreter/AOT differential-fuzz
+        // divergence on `"hello" + 2 + 3`. `set_local_ty(dst, String)` on
+        // the StrConcat dst is the fix; this test locks the lowering in.
+        let module = lower_source("let s = \"hello\"; s + 2 + 3").unwrap();
+        let main = find_fn(&module, "__main");
+        let mut strconcat_count = 0usize;
+        let mut binary_add_count = 0usize;
+        for b in &main.blocks {
+            for st in &b.stmts {
+                if let mir::Stmt::Assign {
+                    op: mir::RValue::StrConcat(..),
+                    ..
+                } = st
+                {
+                    strconcat_count += 1;
+                }
+                if let mir::Stmt::Assign {
+                    op: mir::RValue::Binary(crate::ast::BinOp::Add, ..),
+                    ..
+                } = st
+                {
+                    binary_add_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            strconcat_count, 2,
+            "both adds in `s + 2 + 3` must lower to StrConcat (got {strconcat_count})"
+        );
+        assert_eq!(
+            binary_add_count, 0,
+            "no Binary(Add) may remain in `s + 2 + 3` (got {binary_add_count})"
+        );
+    }
+
+    #[test]
     fn test_fuse_binds_owning_rvalue_to_named_local() {
         // `let a = [1,2,3]` must lower to `a = ArrayLit(...)` directly — not
         // `__tmp = ArrayLit(...); a = Load(__tmp)` — so codegen can prove
