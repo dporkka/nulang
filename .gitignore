@@ -45,3 +45,4 @@ lake-manifest.json
 
 # Local bootstrap build cache
 .target-bootstrap/
+src/jit/mir_compiler.rs
