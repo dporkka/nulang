@@ -95,8 +95,11 @@ Unfinished implementation lines counted from `not yet implemented` /
   FFI, state, capability check).
 - `src/mir_wasm.rs:322`, `src/wasm_runtime.rs:149,187` — WASM handler
   emission is a nil-drop; `host_read` and `host_dispatch` are stubs.
-- `src/fmt.rs:31` — formatter refuses files with `workflow`, `agent`,
-  `let`, `class`, or `impl`.
+- `src/fmt.rs` — formatter now covers every `Decl`/`Expr` construct
+  (workflow, agent, class, impl, let-binding, given, effect, module, import,
+  extern, database, crdt, state_machine, named handler, record type,
+  spawn/handle/receive/emit/migrate/cap-annotate/type-annotate), round-trips
+  idempotently; 9 unit tests (2026-08-09).
 - `src/typechecker.rs:274-284` — `opaque` nominal types are transparent.
 - `Cargo.toml` — `simd-experimental` feature removed (zero code references); `quic-experimental` removed 2026-08-05 (unwired, incompatible handshake, tokio runtime overhead).
 - `src/runtime/mod.rs:2773` — WASM component runtime path is a stub.

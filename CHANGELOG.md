@@ -396,6 +396,18 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **Formatter completeness** (Experimental, `src/fmt.rs`): `nulang fmt` now
+  formats every `Decl`/`Expr` construct instead of refusing files containing
+  `workflow`, `agent`, `class`, `impl`, `let`-binding, `given`, `effect`,
+  `module`, `import`, `extern`, `database`, `crdt`, `state_machine`, named
+  handler, or `record` declarations, or `spawn`/`handle`/`receive`/`emit`/
+  `migrate`/`cap-annotate`/`type-annotate` expressions. Output is canonical
+  and idempotent (reformatting is a no-op). Class/impl method params and
+  returns use the parser's `Unit`/bare-`Type::Var` omitted-annotation
+  sentinel and are skipped rather than emitted as spurious `: Unit`.
+  Added `CrdtType::keyword()` (inverse of `from_keyword`). 9 new unit tests;
+  all 33 `examples/*.nula` format without errors and re-parse.
+
 - **RFC 0003 Item 14 — transport hygiene complete.** `quinn` removed
   entirely (no `quinn` dep, `quic_transport.rs` deleted). `reqwest` and
   `rustls` are confined to their composition-root trait impls:
