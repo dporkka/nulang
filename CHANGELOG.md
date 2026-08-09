@@ -396,6 +396,18 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **RFC 0003 Item 14 — transport hygiene complete.** `quinn` removed
+  entirely (no `quinn` dep, `quic_transport.rs` deleted). `reqwest` and
+  `rustls` are confined to their composition-root trait impls:
+  `ReqwestHttpProvider` (the `HttpProvider` impl) in `src/backends/mod.rs`
+  and `rustls` inside `src/runtime/network.rs` (the `NetworkTransport`
+  impl). `Runtime` holds `http: Box<dyn HttpProvider>` (default
+  `ReqwestHttpProvider`) delegating through `http_post_json`/`http_get`;
+  `Transport` blanket-impls over `NetworkTransport` (already
+  `Box<dyn NetworkTransport>`). No core-language file imports
+  quinn/rustls/reqwest directly — a 2125 runtime can swap the transport
+  and HTTP client without touching the language.
+
 - **Bootstrap Stage 2: multi-fn programs + recursion through the
   self-hosting pipeline** (Experimental, `bootstrap/`): `verify.sh` check 6
   proves whole-program compilation — `desugar_fns.py` lowers top-level `fn`

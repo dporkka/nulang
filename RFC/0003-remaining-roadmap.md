@@ -168,7 +168,7 @@ through the trait boundary.
 **Why:** URLs and git repos are not durable artifact identifiers; content
 hashes are. `blake3` is already a dep.
 
-## Item 14: Deprecate Direct `quinn`/`rustls`/`reqwest` Use (Hygiene) — PENDING (depends on item 6 wiring)
+## Item 14: Deprecate Direct `quinn`/`rustls`/`reqwest` Use (Hygiene) — COMPLETE 2026-08-09
 
 **Target:** `src/runtime/network.rs`, `src/runtime/quic_transport.rs`.
 
@@ -176,6 +176,18 @@ hashes are. `blake3` is already a dep.
 - Route through Item 6's `trait Transport` / `trait HttpProvider`.
 - Default impl uses quinn/rustls/reqwest today; a 2125 impl uses whatever
   then. The language never knows.
+
+**Status (2026-08-09):** Complete. `quinn` was removed entirely
+(`quic_transport.rs` deleted 2026-08-05; no `quinn` dep remains in
+`Cargo.toml`). `reqwest` and `rustls` are confined to their composition-root
+impls — `ReqwestHttpProvider` (the `HttpProvider` impl) in
+`src/backends/mod.rs`, and `rustls` in `src/runtime/network.rs` (the
+`NetworkTransport` impl). The `Runtime` holds `http: Box<dyn
+HttpProvider>` (default `ReqwestHttpProvider`) and delegates through
+`http_post_json`/`http_get`; the `Transport` trait blanket-impls over
+`NetworkTransport`, which itself is already `Box<dyn NetworkTransport>`.
+No core-language file (`src/vm.rs`, `src/bytecode.rs`, `src/mir_*.rs`,
+`src/hir_*.rs`, `src/typechecker.rs`) imports `quinn`/`rustls`/`reqwest`.
 
 ## Item 15: Distributed Trace Context Propagation (Stable) — IMPLEMENTED 2026-08-09
 
@@ -232,14 +244,15 @@ actors interoperable with the broader WASM ecosystem without FFI glue.
 
 **Why:** Pre-compiled artifacts enable closed-source library distribution,
 Accepted 2026-07-19. Items 5 (non-breaking phase), 6 (full trait wiring),
-10 (supervisor teams), 11 (content-addressed modules), and 15 (trace context
-propagation) are implemented and verified — 1647 tests pass. Items 2
+10 (supervisor teams), 11 (content-addressed modules), 14 (transport
+hygiene), and 15 (trace context propagation) are implemented and verified —
+1647 tests pass. Items 2
 (formal semantics) and 3 (self-hosting bootstrap) are multi-week research
 efforts that remain as scoped follow-ups; they are the highest-leverage
 remaining items. Item 5's breaking phase (removing `LlmAsk`/`Effect::LLM`)
-follows the deprecation cycle (≥2 major versions). Item 14 (deprecating
-direct quinn/rustls/reqwest use), item 16 (WASM WIT mapping), and item 17
-(`.nbc` library distribution) are incremental follow-ups.
+follows the deprecation cycle (≥2 major versions). Item 16 (WASM WIT
+mapping) and item 17 (`.nbc` library distribution) are incremental
+follow-ups.
 
 ### Delivered this session
 
@@ -283,9 +296,6 @@ direct quinn/rustls/reqwest use), item 16 (WASM WIT mapping), and item 17
 - **Item 5 (breaking phase):** Remove `OpCode::LlmAsk`, `RValue::LlmAsk`,
   `Effect::LLM` after the deprecation cycle. Requires bytecode v1→v2
   migration in `src/format/migrate.rs`.
-- **Item 14:** Route `quinn`/`rustls`/`reqwest` through `trait Transport` /
-  `trait HttpProvider` (to be defined). Item 6 trait wiring is complete;
-  this is the final hygiene pass.
 - **Item 16 (WASM WIT mapping):** Map Nulang effect rows onto WASI 0.2+
   WIT interfaces. `wasm_component_runtime.rs` already hosts WASM components;
   this item adds WIT world generation from effect-row signatures so compiled
