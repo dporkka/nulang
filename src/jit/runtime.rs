@@ -911,6 +911,48 @@ pub unsafe extern "C" fn nulang_field_load(regs: *mut u64, obj_reg: u32, idx: u3
     *regs.add(dst_reg as usize) = val.as_raw();
 }
 
+// ---------------------------------------------------------------------------
+// AOT actor runtime helpers
+// ---------------------------------------------------------------------------
+// Called from AOT-compiled code when the function body contains actor
+// operations (SelfRef, StateGet, StateSet).  They go through the same
+// `ActorVmCallbacks` trait the VM uses, stored in the JIT_CALLBACKS
+// thread-local (set before each AOT invocation).  Outside an actor
+// context (`try_with_callbacks` returns None) they degrade gracefully:
+// SelfRef/StateGet return nil, StateSet is a no-op.
+
+/// Return the current actor's ID as a tagged i64, or nil outside an actor.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_self_ref() -> u64 {
+    try_with_callbacks(|cb| match cb.current_actor_id() {
+        Some(id) => Value::int(id as i64).as_raw(),
+        None => Value::nil().as_raw(),
+    })
+    .unwrap_or_else(|| Value::nil().as_raw())
+}
+
+/// Read a field from the current actor's durable state.
+///
+/// `field_name_raw` is a TAG_STRING constant resolved via
+/// `resolve_string_coerce`. Returns nil when no actor is active or the
+/// field is absent.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_state_get(field_name_raw: u64) -> u64 {
+    let field = resolve_string_coerce(field_name_raw).unwrap_or_default();
+    try_with_callbacks(|cb| cb.get_state_field(&field).as_raw())
+        .unwrap_or_else(|| Value::nil().as_raw())
+}
+
+/// Write a field on the current actor's durable state.
+///
+/// `field_name_raw` is a TAG_STRING constant; `value` is the new
+/// NaN-tagged value to store. No-op outside an actor.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_state_set(field_name_raw: u64, value: u64) {
+    let field = resolve_string_coerce(field_name_raw).unwrap_or_default();
+    try_with_callbacks(|cb| cb.set_state_field(&field, Value::from_bits(value)));
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -930,5 +972,8 @@ mod tests {
         let _ = super::nulang_str_eq as unsafe extern "C" fn(u64, u64) -> u64;
         let _ = super::nulang_str_concat as unsafe extern "C" fn(u64, u64) -> u64;
         let _ = super::nulang_pow as extern "C" fn(u64, u64) -> u64;
+        let _ = super::nulang_aot_self_ref as unsafe extern "C" fn() -> u64;
+        let _ = super::nulang_aot_state_get as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_aot_state_set as unsafe extern "C" fn(u64, u64);
     }
 }

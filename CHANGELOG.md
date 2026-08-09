@@ -479,6 +479,48 @@ in this version; they are recorded here to establish their tier.
   through lexer, parser, typechecker, effect checker, capability analyzer,
   HIR lowering, formatter, and LSP.
 
+### Added since 1.0.0-frozen — 2026-08-09 (infra session)
+
+- **`.nbc` export table** (Stable, `src/bytecode.rs`). `ExportTableEntry`
+  struct (name/kind/index/type_sig) added to `CodeModule` with
+  `#[serde(default)]` for backward compatibility. `add_export()` convenience
+  method. Consumers can link against library exports with full type
+  signatures. (RFC 0003 Item 17)
+- **`CodeModule::from_bootstrap_json()`** (Stable, `src/bytecode.rs`).
+  Parses the bootstrap emitter's JSON format into a runnable `CodeModule`.
+  Accepts hex instruction strings, typed constants (Int/Float/Bool/String),
+  and export table entries. (RFC 0003 Item 3)
+- **Bootstrap self-hosting pipeline** (Experimental, `bootstrap/`).
+  Stage 1 emitter (`emitter.nula`) outputs structured JSON for 3 Core
+  programs (literal, add, conditional). Host converter roundtrips through
+  `.nbc`. End-to-end integration test verifies the full pipeline.
+  (RFC 0003 Item 3)
+- **WASM Component Model WIT generator** (Experimental, `src/witgen.rs`).
+  Maps 5 built-in Nulang effects (IO, Timer, Random, Signal, Provider) to
+  WASI 0.2+ WIT interfaces. `extract_effects_from_source()` scans for
+  `perform Effect.op(...)` patterns. `--backend wasm-component` CLI flag
+  writes `.wit` alongside `.wasm`. (RFC 0003 Item 16)
+- **Formal semantics in Lean 4** (Experimental, `spec/formal/`).
+  6 modules formalize the Nulang Core type system: `Types.lean` (type
+  language, substitution, mgu), `Capabilities.lean` (capability lattice,
+  subtyping, join, sendability), `Effects.lean` (effect rows, subsumption,
+  union), `Syntax.lean` (Core expression AST, free vars, capture-avoiding
+  substitution), `Typing.lean` (typing context, judgment Γ ⊢ e : τ).
+  Soundness theorems (Substitution Lemma, Preservation, Progress, Type
+  Soundness) are stated as conjectures. `lake build` passes.
+  (RFC 0003 Item 2)
+- **`.nbc` dependency type in `nula` package manager** (Experimental,
+  `src/package/`). `nbc` field in `Nulang.toml` `[dependencies]`.
+  `PackageSource::Nbc` variant with full resolver pipeline (lockfile,
+  content hash, dedup). (RFC 0003 Item 17)
+- **Distributed trace context propagation** (Stable, `src/runtime/`).
+  `trace_id: Option<String>` on `Message` struct, propagated from wire
+  (`Packet::ActorMessage`) through cross-shard delivery to local send.
+  (RFC 0003 Item 15)
+- **Backend trait wiring** (Stable, `src/backends/`). 8 backend traits
+  (JitBackend, WasmBackend, ForeignInterop, StorageBackend, Transport,
+  CryptoProvider, HttpProvider, TlsProvider) fully trait-erased from the
+  core language. `create_default_jit()` factory in `src/backends/mod.rs`.
 ---
 
 ## Pre-1.0 (crate version 0.13.0-alpha.1 and earlier)

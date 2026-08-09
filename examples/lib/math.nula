@@ -1,0 +1,21 @@
+// examples/lib/math.nula — A simple math library
+//
+// Compile to .nbc for distribution:
+//   cargo run -- --backend bytecode examples/lib/math.nula
+//
+// This library exports `add` and `multiply` for consumers.
+
+fn add(x: Int, y: Int) -> Int {
+    x + y
+}
+
+fn multiply(x: Int, y: Int) -> Int {
+    x * y
+}
+
+// The "main" entry point demonstrates the library's own functions.
+// When used as a dependency, consumers call `add` and `multiply` directly.
+fn main() {
+    let a = add(10, 20) in
+    multiply(a, 3)
+}

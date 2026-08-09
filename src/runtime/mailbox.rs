@@ -13,6 +13,7 @@
 
 use crate::vm::Value;
 use crossbeam::queue::SegQueue;
+use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -59,6 +60,15 @@ pub enum MessagePriority {
 pub struct Mailbox {
     system_queue: SegQueue<Message>,
     normal_queue: SegQueue<Message>,
+    /// Same-thread local queue: messages pushed from the scheduler thread
+    /// itself (same-shard sends, exit notifications, DLQ) bypass SegQueue
+    /// atomics. Network-thread pushes still go through normal_queue.
+    ///
+    /// SAFETY: Only accessed from the scheduler thread — `push_local` (write)
+    /// and all read methods (`is_empty`, `len`, `pop`, `receive_match`,
+    /// `drain`) run on the single scheduler thread. Network-thread `push`
+    /// never touches this field.
+    local_queue: UnsafeCell<VecDeque<Message>>,
     capacity: usize,
     /// Skip-buffer for non-matching normal messages drained during selective
     /// receive (`receive_match`). Messages stay here in FIFO order until a
@@ -67,15 +77,29 @@ pub struct Mailbox {
     skip_buffer: VecDeque<(Message, bool)>,
 }
 
-// SAFETY: `Mailbox` is `Sync` because all mutable state (`skip_buffer`)
-// is accessed exclusively from the scheduler thread (all `receive_match`/
-// `pop`/`flush_skip_buffer` calls happen within `step_actor` or the VM's
-// `ReceiveMatch` handler, both running on the single scheduler thread).
-// The `SegQueue` fields are already `Sync` (lock-free concurrent queues)
-// and may be safely pushed from multiple threads.
+// SAFETY: `Mailbox` is `Sync` because mutable fields (`local_queue`,
+// `skip_buffer`) are accessed exclusively from the scheduler thread
+// (all `&mut self` methods run within `step_actor`/`ReceiveMatch`/etc
+// on the single scheduler thread).  The `SegQueue` fields are `Sync`
+// (lock-free concurrent queues) and may be safely pushed from network
+// threads via `&self` methods.  `local_queue` is wrapped in `UnsafeCell`
+// so that `&self` read methods (`is_empty`, `len`) can inspect it without
+// a mutable borrow; `UnsafeCell<T>: Sync` for `Send` T (and `VecDeque<Message>: Send`).
 unsafe impl Sync for Mailbox {}
 
 impl Mailbox {
+    // --- internal unsafe accessors ---
+    // SAFETY: these are always called from the scheduler thread, and
+    // `&mut self` callers prove exclusive access. `&self` callers
+    // (is_empty, len) only read, which is safe because no concurrent
+    // mutation occurs.
+    fn local_queue_ref(&self) -> &VecDeque<Message> {
+        unsafe { &*self.local_queue.get() }
+    }
+    fn local_queue_mut(&mut self) -> &mut VecDeque<Message> {
+        unsafe { &mut *self.local_queue.get() }
+    }
+
     /// Create a new mailbox.
     ///
     /// `capacity`: maximum total messages allowed.  `0` = unbounded
@@ -84,6 +108,7 @@ impl Mailbox {
         Mailbox {
             system_queue: SegQueue::new(),
             normal_queue: SegQueue::new(),
+            local_queue: UnsafeCell::new(VecDeque::new()),
             capacity,
             skip_buffer: VecDeque::new(),
         }
@@ -107,14 +132,36 @@ impl Mailbox {
         Ok(())
     }
 
+    /// Push a message from the same thread (scheduler).
+    ///
+    /// Messages pushed via `push_local` bypass the lock-free `SegQueue`
+    /// atomics and land directly in a thread-local `VecDeque`, drained
+    /// before the concurrent queues on every `pop` / `receive_match`.
+    /// This is the hot path for same-shard actor-to-actor messaging.
+    ///
+    /// `System` messages always succeed.  `Normal` and `Bulk` messages
+    /// are rejected with `Err(msg)` at capacity (same policy as `push`).
+    pub fn push_local(&mut self, msg: Message) -> Result<(), Message> {
+        if msg.priority == MessagePriority::System {
+            self.local_queue_mut().push_back(msg);
+            return Ok(());
+        }
+        if self.capacity > 0 && self.len() >= self.capacity {
+            return Err(msg);
+        }
+        self.local_queue_mut().push_back(msg);
+        Ok(())
+    }
+
     /// Pop the highest-priority message.
     ///
-    /// Checks the system queue first (priority), then the skip-buffer
-    /// (non-matching normal messages staged during a prior `receive_match`),
-    /// then the normal queue.
+    /// Checks the system queue first (priority), then the same-thread
+    /// local queue, then the skip-buffer (non-matching normal messages
+    /// staged during a prior `receive_match`), then the normal queue.
     pub fn pop(&mut self) -> Option<Message> {
         self.system_queue
             .pop()
+            .or_else(|| self.local_queue_mut().pop_front())
             .or_else(|| self.skip_buffer.pop_front().map(|(m, _)| m))
             .or_else(|| self.normal_queue.pop())
     }
@@ -122,21 +169,34 @@ impl Mailbox {
     /// Selective receive: scan for the first message whose behavior id
     /// appears in `behavior_ids`.
     ///
-    /// System messages are scanned first (via `scan_queue` — they are rare
-    /// and must preserve priority).  Normal messages use the skip-buffer:
-    /// on the first call the `normal_queue` is drained into the buffer and
-    /// scanned; non-matching messages stay in the buffer so the next call
-    /// does not re-drain the concurrent queue.  This makes repeated
-    /// selective receive O(skipped) amortized instead of O(N) per call.
+    /// Scan order: same-thread local queue, system queue (network-thread,
+    /// rare), skip-buffer (staged normal), then normal queue. Non-matching
+    /// local-queue messages are moved into the skip-buffer (system messages
+    /// keep priority by routing to system_queue).
     pub fn receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Arc<Vec<Value>>)> {
-        // Scan system queue first (small, rare — drain-scan-requeue is fine).
+        // 1. Scan same-thread local queue (fast, fresh).
+        for i in 0..self.local_queue_ref().len() {
+            let bid = self.local_queue_ref()[i].behavior_id;
+            if let Some(pos) = behavior_ids.iter().position(|&id| id == bid) {
+                let msg = self.local_queue_mut().remove(i).unwrap();
+                return Some((pos, msg.payload));
+            }
+        }
+        // No match in local queue: drain it — system messages go to
+        // system_queue (priority preserved), normal messages go to
+        // skip_buffer (scanned in subsequent receive_match calls).
+        while let Some(msg) = self.local_queue_mut().pop_front() {
+            if msg.priority == MessagePriority::System {
+                self.system_queue.push(msg);
+            } else {
+                self.skip_buffer.push_back((msg, false));
+            }
+        }
+        // 2. Scan system queue (small, rare — drain-scan-requeue is fine).
         if let Some(result) = Self::scan_queue(&self.system_queue, behavior_ids) {
             return Some(result);
         }
-        // Try the skip-buffer: scan for the first un-tried message whose
-        // behavior id matches. Mark it "tried" and return a clone of its
-        // payload. The message stays in the buffer until `commit_receive_match`
-        // removes it or `reset_receive_match` clears the tried flag.
+        // 3. Try the skip-buffer (includes ex-local-queue messages).
         for i in 0..self.skip_buffer.len() {
             let (tried, bid) = (self.skip_buffer[i].1, self.skip_buffer[i].0.behavior_id);
             if !tried {
@@ -146,7 +206,7 @@ impl Mailbox {
                 }
             }
         }
-        // Drain the normal queue into the buffer, then scan again.
+        // 4. Drain the normal queue into the buffer, then scan again.
         while let Some(msg) = self.normal_queue.pop() {
             self.skip_buffer.push_back((msg, false));
         }
@@ -189,23 +249,27 @@ impl Mailbox {
         found
     }
 
-    /// Total message count across system queue, skip-buffer, and normal
-    /// queue (approximate — concurrent queue lengths are snapshots).
+    /// Total message count across all queues (approximate — concurrent
+    /// queue lengths are snapshots).  Includes the same-thread local queue.
     pub fn len(&self) -> usize {
-        self.system_queue.len() + self.skip_buffer.len() + self.normal_queue.len()
+        self.system_queue.len() + self.local_queue_ref().len() + self.skip_buffer.len() + self.normal_queue.len()
     }
 
     /// True when all queues and the skip-buffer are empty.
     pub fn is_empty(&self) -> bool {
-        self.system_queue.is_empty() && self.skip_buffer.is_empty() && self.normal_queue.is_empty()
+        self.system_queue.is_empty() && self.local_queue_ref().is_empty() && self.skip_buffer.is_empty() && self.normal_queue.is_empty()
     }
 
-    /// Drain system queue, skip-buffer, and normal queue (in priority/FIFO
-    /// order) into a cloned snapshot, then restore all messages.
+    /// Drain all queues (in priority/FIFO order) into a cloned snapshot,
+    /// then restore all messages.
     pub fn drain(&mut self) -> Vec<Message> {
         let mut snapshot = Vec::with_capacity(self.len());
         // Drain system first.
         while let Some(msg) = self.system_queue.pop() {
+            snapshot.push(msg);
+        }
+        // Same-thread local queue.
+        while let Some(msg) = self.local_queue_mut().pop_front() {
             snapshot.push(msg);
         }
         // Then skip-buffer (normal messages staged during selective receive).
@@ -216,12 +280,12 @@ impl Mailbox {
         while let Some(msg) = self.normal_queue.pop() {
             snapshot.push(msg);
         }
-        // Restore: system messages go back to system_queue, normal to normal_queue.
+        // Restore: system → system_queue, normal → local_queue.
         for msg in &snapshot {
             if msg.priority == MessagePriority::System {
                 self.system_queue.push(msg.clone());
             } else {
-                self.normal_queue.push(msg.clone());
+                self.local_queue_mut().push_back(msg.clone());
             }
         }
         snapshot

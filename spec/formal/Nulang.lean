@@ -21,5 +21,5 @@ Future:
 -/
 
 import Nulang.Types
-import Nulang.Capabilities
-import Nulang.Effects
+import Nulang.Syntax
+import Nulang.Typing

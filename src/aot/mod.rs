@@ -35,6 +35,11 @@ pub struct AotModule {
     builder_context: FunctionBuilderContext,
     /// Compiled function pointers indexed by MIR function index.
     compiled_funcs: Vec<*const u8>,
+    /// Actor behavior names, parallel to `compiled_behaviors`.
+    behavior_names: Vec<String>,
+    /// Compiled actor behavior pointers (native code), parallel to
+    /// `behavior_names`. Empty when the module has no `actor` declarations.
+    compiled_behaviors: Vec<*const u8>,
     /// Entry point index (the `__main` or `main` function).
     entry_idx: Option<usize>,
     /// Module-wide field name → slot index mapping for records.
@@ -206,6 +211,45 @@ impl AotModule {
                 }
             }
         }
+
+        // Pass: compile actor behaviors to native code, indexed by behavior
+        // name. Behaviors are ordinary `Function`s (params + blocks); they
+        // are never `Call` targets, so each compiles into its own native
+        // entry point keyed by name. The actor runtime can later dispatch
+        // messages straight to these pointers, bypassing the bytecode VM.
+        let mut behavior_names: Vec<String> = Vec::new();
+        let mut behavior_fids: Vec<cranelift_module::FuncId> = Vec::new();
+        for (idx, func) in mir_module.behaviors.iter().enumerate() {
+            let func_name = format!("nulang_behavior_{}", idx);
+            let mut sig = jit_module.make_signature();
+            for _ in &func.params {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            let fid = jit_module
+                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)
+                .map_err(|e| crate::types::NuError::VMError {
+                    msg: format!("failed to declare behavior '{}': {}", func.name, e),
+                    span: Span::default(),
+                })?;
+            let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
+            ctx.func_ids = func_ids.clone();
+            ctx.field_map = field_map.clone();
+            ctx.constants = constants.clone();
+            codegen::compile_mir_function_body(
+                &mut ctx,
+                func,
+                idx,
+                fid,
+                codegen::CompileMode::Boxed,
+            )
+            .map_err(|e| crate::types::NuError::VMError {
+                msg: format!("AOT compilation of behavior '{}' failed: {}", func.name, e),
+                span: Span::default(),
+            })?;
+            behavior_names.push(func.name.clone());
+            behavior_fids.push(fid);
+        }
         jit_module
             .finalize_definitions()
             .map_err(|e| crate::types::NuError::VMError {
@@ -217,15 +261,35 @@ impl AotModule {
             .iter()
             .map(|fid| jit_module.get_finalized_function(*fid))
             .collect();
+        let compiled_behaviors: Vec<*const u8> = behavior_fids
+            .iter()
+            .map(|fid| jit_module.get_finalized_function(*fid))
+            .collect();
 
         Ok(AotModule {
             jit_module,
             builder_context,
             compiled_funcs,
+            behavior_names,
+            compiled_behaviors,
             entry_idx,
             field_map,
             constants,
         })
+    }
+
+    /// Look up a compiled behavior's native entry pointer by name.
+    ///
+    /// Returns `None` when the module has no behavior with that name. The
+    /// returned pointer is a function with the AOT calling convention:
+    /// `extern "C" fn(boxed_param_0, boxed_param_1, ...) -> u64`. It is only
+    /// valid while the `AotModule` is alive (the pointer lives in the JIT
+    /// code memory it owns).
+    pub fn fn_ptr_for_behavior(&self, name: &str) -> Option<*const u8> {
+        self.behavior_names
+            .iter()
+            .position(|n| n == name)
+            .map(|idx| self.compiled_behaviors[idx])
     }
 
     /// Execute the module entry point and return the result as a u64 value.
@@ -343,6 +407,12 @@ fn collect_field_and_consts(
                 id
             });
         }
+        mir::Stmt::StateSet { field, .. } => {
+            let c = crate::bytecode::Constant::String(field.clone());
+            if !constants.contains(&c) {
+                constants.push(c);
+            }
+        }
         _ => {}
     }
 }
@@ -387,6 +457,12 @@ fn collect_rvalue_field_and_consts(
                     id
                 });
                 collect_rvalue_field_and_consts(rv, field_map, next_field_id, constants);
+            }
+        }
+        mir::RValue::StateGet { field } => {
+            let c = crate::bytecode::Constant::String(field.clone());
+            if !constants.contains(&c) {
+                constants.push(c);
             }
         }
         _ => {}

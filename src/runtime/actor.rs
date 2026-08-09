@@ -454,7 +454,7 @@ impl Actor {
 
     /// Push a message into the mailbox.
     pub fn send(&mut self, msg: Message) -> Result<(), Message> {
-        self.mailbox.push(msg)
+        self.mailbox.push_local(msg)
     }
 
     /// Set or update a named state field.  Marks the field dirty for

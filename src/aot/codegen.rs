@@ -495,6 +495,39 @@ pub fn compile_mir_function_body(
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert("nulang_obj_set", func_ref);
         }
+        // --- AOT actor runtime helpers ---
+        // self_ref: () -> i64
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_self_ref", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_self_ref", func_ref);
+        }
+        // state_get: (i64) -> i64
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_state_get", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_state_get", func_ref);
+        }
+        // state_set: (i64, i64) -> void
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_state_set", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_state_set", func_ref);
+        }
         // Helper to register a call target FuncRef.
         let mut register_call_target = |n: usize| {
             if !call_targets.contains_key(&n) {
@@ -797,9 +830,16 @@ fn compile_stmt(
         mir::Stmt::Emit { .. } => Err(AotCompileError::Unsupported(
             "Emit: effect emission requires the bytecode backend (unavailable with --backend native)".into(),
         )),
-        mir::Stmt::StateSet { .. } => Err(AotCompileError::Unsupported(
-            "StateSet: actor state mutation requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::Stmt::StateSet { field, src } => {
+            let c = crate::bytecode::Constant::String(field.clone());
+            let field_val = compile_const(builder, &c, mode, constants)?;
+            let src_reg = mir::FunctionBuilder::LOCAL_BASE + src.0;
+            let src_val = *local_vals.get(&src_reg).ok_or_else(|| {
+                AotCompileError::Internal("StateSet src uninitialized".into())
+            })?;
+            call_void_helper(builder, helpers, "nulang_aot_state_set", &[field_val, src_val])?;
+            Ok(())
+        }
     }
 }
 
@@ -1086,16 +1126,16 @@ fn compile_rvalue(
         mir::RValue::Migrate { .. } => Err(AotCompileError::Unsupported(
             "Migrate: actor migration requires the bytecode backend (unavailable with --backend native)".into(),
         )),
-        mir::RValue::SelfRef => Err(AotCompileError::Unsupported(
-            "SelfRef: actor self-reference requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::RValue::SelfRef => call_helper(builder, helpers, "nulang_aot_self_ref", &[]),
         mir::RValue::CapabilityCheck { .. } => Err(AotCompileError::Unsupported(
             "CapabilityCheck: capability checking requires the bytecode backend (unavailable with --backend native)"
                 .into(),
         )),
-        mir::RValue::StateGet { .. } => Err(AotCompileError::Unsupported(
-            "StateGet: actor state access requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::RValue::StateGet { field } => {
+            let c = crate::bytecode::Constant::String(field.clone());
+            let field_val = compile_const(builder, &c, mode, constants)?;
+            call_helper(builder, helpers, "nulang_aot_state_get", &[field_val])
+        }
         mir::RValue::Spawn { .. } => Err(AotCompileError::Unsupported(
             "Spawn: actor spawning requires the bytecode backend (unavailable with --backend native)".into(),
         )),
@@ -1653,6 +1693,95 @@ mod tests {
         builder.terminate(mir::Terminator::Return(None));
         let func = builder.build();
         assert!(!is_all_int(&func));
+    }
+
+    #[test]
+    fn test_aot_compile_actor_state_access() {
+        // Actor behaviors using StateGet/StateSet/SelfRef must compile under
+        // --backend native. Previously they were rejected with an AOT
+        // Unsupported error naming the state op. After wiring, the only
+        // remaining blocker is the top-level `spawn` (Spawn), so the compile
+        // error must now be about Spawn — proving the state ops lowered.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                state count: Int = 0
+                behavior get() { self.count }
+            }
+            let c = spawn Counter {} in { send c get() }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module);
+        let err = aot.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            err.contains("Spawn"),
+            "expected compile to fail only on Spawn, got: {}",
+            err
+        );
+        assert!(
+            !err.contains("StateGet") && !err.contains("StateSet") && !err.contains("SelfRef"),
+            "state access ops should no longer be unsupported, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_aot_compile_and_invoke_behavior() {
+        // A pure-compute actor behavior must lower to native code in the AOT
+        // module's behavior table and be directly invocable through the
+        // boxed calling convention, bypassing the bytecode VM.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Doubler {
+                behavior double(x: Int) { x * 2 }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module)
+            .expect("AOT compile of pure-compute behavior should succeed");
+        let ptr = aot
+            .fn_ptr_for_behavior("double")
+            .expect("behavior 'double' should be compiled");
+        // Boxed calling convention: extern "C" fn(u64) -> u64.
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(ptr) };
+        let result = f(crate::vm::Value::int(21).as_raw());
+        let got = crate::vm::Value::from_bits(result).as_int();
+        assert_eq!(got, Some(42));
     }
 
     #[test]

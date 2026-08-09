@@ -1083,7 +1083,7 @@ impl Runtime {
             trace_id: trace_id.clone(),
         };
         if let Some(actor) = self.actors.get_mut(&target_id) {
-            if let Err(_dropped) = actor.mailbox.push(msg) {
+            if let Err(_dropped) = actor.mailbox.push_local(msg) {
                 self.route_to_dlq(
                     &Message {
                         behavior_id,
@@ -1691,7 +1691,7 @@ impl Runtime {
             actor
                 .flight_recorder
                 .record(self.current_actor.unwrap_or(0), behavior_id, args);
-            if let Err(_dropped) = actor.mailbox.push(msg) {
+            if let Err(_dropped) = actor.mailbox.push_local(msg) {
                 // Mailbox is full (capacity > 0). Route to DLQ with a simple notification.
                 self.route_to_dlq(
                     &Message {
@@ -1916,7 +1916,7 @@ impl Runtime {
         // Push a simple notification to the DLQ's mailbox directly.
         // We don't use send_message_by_id because it would try to ORCA-track args.
         if let Some(actor) = self.actors.get_mut(&dlq_id) {
-            let _ = actor.mailbox.push(Message {
+            let _ = actor.mailbox.push_local(Message {
                 behavior_id: 0,
                 payload: Arc::new(vec![Value::int(1)]),
                 sender: 0, // DLQ system message has no sender

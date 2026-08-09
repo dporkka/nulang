@@ -651,6 +651,15 @@ pub struct DebugFunctionInfo {
     pub locals: Vec<(usize, Option<String>)>,
 }
 
+/// Export table entry for library distribution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportTableEntry {
+    pub name: String,
+    pub kind: String,
+    pub index: usize,
+    pub type_sig: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeModule {
     pub name: String,
@@ -686,6 +695,8 @@ pub struct CodeModule {
     /// server. Includes actor behaviors (compiled as functions).
     #[serde(default)]
     pub debug_functions: Vec<DebugFunctionInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_table: Vec<ExportTableEntry>,
 }
 
 impl CodeModule {
@@ -706,6 +717,7 @@ impl CodeModule {
             tools: Vec::new(),
             line_table: Vec::new(),
             debug_functions: Vec::new(),
+            export_table: Vec::new(),
         }
     }
 
@@ -772,6 +784,42 @@ impl CodeModule {
 
     pub fn current_offset(&self) -> usize {
         self.instructions.len()
+    }
+
+    /// Build a CodeModule from bootstrap emitter JSON format.
+    /// See `bootstrap/FORMAT.md` for the JSON schema.
+    pub fn from_bootstrap_json(json: &str) -> Result<Self, String> {
+        #[derive(serde::Deserialize)]
+        struct BJson {
+            #[serde(default)]
+            name: String,
+            instructions: Vec<String>,
+            #[serde(default)]
+            constants: Vec<serde_json::Value>,
+            #[serde(default)]
+            entry_point: Option<usize>,
+        }
+        let input: BJson = serde_json::from_str(json).map_err(|e| format!("JSON: {e}"))?;
+        let mut m = CodeModule::new(if input.name.is_empty() { "bootstrap" } else { &input.name });
+        for hex in &input.instructions {
+            let w = u32::from_str_radix(hex, 16).map_err(|e| format!("hex '{hex}': {e}"))?;
+            let i = Instruction::decode(w).ok_or_else(|| format!("bad opcode: {hex}"))?;
+            m.instructions.push(i);
+        }
+        for c in &input.constants {
+            let ty = c.get("type").and_then(|v| v.as_str()).unwrap_or("Int");
+            let val = c.get("value");
+            let constant = match ty {
+                "Int" => Constant::Int(val.and_then(|v| v.as_i64()).ok_or("Int value not integer")?),
+                "Float" => Constant::Float(val.and_then(|v| v.as_f64()).ok_or("Float value not number")?),
+                "Bool" => Constant::Int(if val.and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 }),
+                "String" => Constant::String(val.and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                t => return Err(format!("unknown constant type: {t}")),
+            };
+            m.constants.push(constant);
+        }
+        m.entry_point = input.entry_point;
+        Ok(m)
     }
 }
 
@@ -1142,5 +1190,18 @@ mod tests {
         assert_eq!(FfiType::Unit, FfiType::Unit);
         assert_eq!(FfiType::Pointer, FfiType::Pointer);
         assert_ne!(FfiType::Int, FfiType::Float);
+    }
+
+    #[test]
+    fn test_from_bootstrap_json_lit42() {
+        let json = r#"{"instructions":["07000000","57000000"],"constants":[{"type":"Int","value":42}]}"#;
+        let m = CodeModule::from_bootstrap_json(json).expect("parse");
+        assert_eq!(m.instructions.len(), 2);
+        assert_eq!(m.constants.len(), 1);
+        let nbc = m.to_nbc(None).expect("to_nbc");
+        let a = CodeModule::from_nbc(&nbc).expect("from_nbc");
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(a.module);
+        assert_eq!(vm.run().unwrap().as_int(), Some(42));
     }
 }

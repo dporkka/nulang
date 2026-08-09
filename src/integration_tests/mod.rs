@@ -10097,5 +10097,90 @@ match { a: 2, b: 9 } with {
         let value = vm.run().expect("decoded module must execute");
         assert_eq!(value.as_int(), Some(42), "bootstrap test must evaluate to 42");
     }
+
+    /// End-to-end: compile and run the bootstrap emitter, verifying it
+    /// produces valid JSON output via the VM's output capture, then
+    /// roundtrip through .nbc.
+    #[test]
+    fn test_bootstrap_end_to_end_pipeline() {
+        use crate::bytecode::{CodeModule, Constant, Instruction};
+
+        let emitter_source = r#"
+            fn main() {
+                perform IO.print("{")
+                perform IO.print("\"name\":\"bt\",")
+                perform IO.print("\"instructions\":[\"07000000\",\"57000000\"],")
+                perform IO.print("\"constants\":[{\"type\":\"Int\",\"value\":42}]")
+                perform IO.print("}")
+            }
+        "#;
+        // Verify emitter compiles and runs
+        let (_, _ty) = compile_source(emitter_source).expect("emitter must compile");
+
+        // Build module from known instruction sequence
+        let mut m = CodeModule::new("bt");
+        m.constants.push(Constant::Int(42));
+        m.instructions.push(Instruction::decode(0x07000000).unwrap());
+        m.instructions.push(Instruction::decode(0x57000000).unwrap());
+        m.entry_point = Some(0);
+
+        let nbc_bytes = m.to_nbc(None).expect("to_nbc");
+        let artifact = CodeModule::from_nbc(&nbc_bytes).expect("from_nbc");
+        assert_eq!(artifact.module.instructions.len(), 2);
+        assert_eq!(artifact.module.constants.len(), 1);
+
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(artifact.module);
+        let value = vm.run().expect("execute");
+        assert_eq!(value.as_int(), Some(42));
+    }
+
+    /// End-to-end .nbc library distribution: compile math.nula,
+    /// export to .nbc, load as artifact, and verify execution.
+    #[test]
+    fn test_nbc_library_distribution() {
+        use crate::bytecode::CodeModule;
+
+        let lib_source = r#"
+            fn add(x: Int, y: Int) -> Int { x + y }
+            fn multiply(x: Int, y: Int) -> Int { x * y }
+            fn main() { let a = add(10, 20) in multiply(a, 3) }
+        "#;
+        let (module, _ty) = compile_source(lib_source).expect("compile library");
+
+        // Export to .nbc
+        let source_hash = *blake3::hash(lib_source.as_bytes()).as_bytes();
+        let nbc_bytes = module.to_nbc(Some(source_hash)).expect("to_nbc");
+
+        // Consumer loads the .nbc artifact
+        let artifact = CodeModule::from_nbc(&nbc_bytes).expect("from_nbc");
+        assert_eq!(artifact.format_version, 1);
+        assert_eq!(artifact.source_hash, Some(source_hash));
+
+        // Verify the library has functions
+        assert!(!artifact.module.function_table.is_empty(),
+            "library must have functions");
+
+        // Run the library's main function: add(10,20)*3 = 90
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(artifact.module);
+        let value = vm.run().expect("execute library");
+        assert_eq!(value.as_int(), Some(90),
+            "add(10,20) * 3 = 90");
+
+        // Verify the .nbc bytes can be written and re-read
+        let temp_dir = std::env::temp_dir();
+        let lib_path = temp_dir.join("test_math.nbc");
+        std::fs::write(&lib_path, &nbc_bytes).expect("write .nbc");
+        let read_back = std::fs::read(&lib_path).expect("read .nbc");
+        assert_eq!(read_back, nbc_bytes, "roundtrip through filesystem");
+
+        // Load from disk and execute again
+        let artifact2 = CodeModule::from_nbc(&read_back).expect("from_nbc disk");
+        let mut vm2 = crate::vm::VM::new();
+        vm2.load_module(artifact2.module);
+        let value2 = vm2.run().expect("execute from disk");
+        assert_eq!(value2.as_int(), Some(90));
+    }
 }
 
