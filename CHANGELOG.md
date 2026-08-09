@@ -396,6 +396,18 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **Node-death recovery (Stable, distributed runtime)**: when the failure
+  detector declares a peer node `Failed`, the local runtime now invalidates
+  that node's `RemoteActorCache` entries (sends fail fast instead of
+  stale-resolving) and delivers `DOWN`-with-`noconnection` system messages
+  to every local actor that had linked or monitored an actor on the dead
+  node. New `ExitReason::NoConnection` (wire tag `noconnection`, DOWN
+  payload code 6) distinguishes node loss from a crash. Inbound
+  `Packet::Link`/`Monitor` now register remote watchers and inbound
+  `Packet::Down` delivers DOWN to local watchers (previously dropped).
+  Supervisor-policy re-spawn of durable actors on another node remains
+  intentionally unimplemented pending the old-node-confirmed-gone gate.
+
 - **Formatter completeness** (Experimental, `src/fmt.rs`): `nulang fmt` now
   formats every `Decl`/`Expr` construct instead of refusing files containing
   `workflow`, `agent`, `class`, `impl`, `let`-binding, `given`, `effect`,

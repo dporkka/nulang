@@ -1149,7 +1149,23 @@ anything.
      both real gaps (incarnation bump, stale-gossip quorum) — the
      plan's "verification vehicle" reasoning paid off.
 7. **Node-death detection triggers real recovery, not silent orphaning.**
-   Confirmed: zero grep hits for `failover`/`rehome`/`migrat` logic across
+   ✅ **Parts (a)+(b) landed 2026-08-09** (`handle_node_failed` in
+   `distribution.rs`, wired to `ClusterAction::NodeFailed`): (a) the dead
+   node's `RemoteActorCache` entries are invalidated so sends fail fast
+   instead of stale-resolving; (b) every local actor that had linked or
+   monitored an actor on the failed node receives a
+   `DOWN`-with-`noconnection` system message (new `ExitReason::NoConnection`,
+   payload code 6) and the dead registry entries are dropped. The D8
+   delivery half also landed: inbound `Packet::Link`/`Monitor` now register
+   remote watchers and inbound `Packet::Down` delivers DOWN to local
+   watchers (previously all three were silently dropped). Part (c) —
+   supervisor-policy-driven re-spawn of durable actors on a healthy node —
+   remains deliberately unimplemented: it requires the
+   old-node-confirmed-gone gate that only a split-brain resolver decision
+   (not a bare failure-detection signal) provides; the safety rationale is
+   documented in the `handle_node_failed` doc comment.
+   **Original analysis (kept for provenance):** zero grep hits for
+   `failover`/`rehome`/`migrat` logic across
    `distribution.rs`/`distributed.rs`. `ClusterState` already detects
    `Failed` nodes via a staged 2s/5s/60s timeout (`cluster.rs:381-433`) —
    that signal today goes nowhere except membership bookkeeping. When a
