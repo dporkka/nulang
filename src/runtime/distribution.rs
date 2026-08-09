@@ -183,6 +183,7 @@ pub(crate) fn process_network(rt: &mut Runtime) {
                     let net_node_id = NodeId(node.0);
                     transport.disconnect(net_node_id);
                 }
+                handle_node_failed(rt, NodeId(node.0));
             }
             ClusterAction::NodeLeft { node } => {
                 if let Some(transport) = &mut rt.distributed.transport {
@@ -235,6 +236,43 @@ pub(crate) fn process_network(rt: &mut Runtime) {
                     transport.shutdown();
                 }
             }
+        }
+    }
+}
+
+/// React to a peer node being declared `Failed` by the failure detector:
+///
+/// 1. Invalidate the `RemoteActorCache` entries for that node so sends to
+///    its actors fail fast instead of stale-resolving to a dead node.
+/// 2. Deliver `DOWN`-with-`noconnection` system messages to every local
+///    actor that had linked or monitored an actor known to live on the
+///    failed node (Erlang's `{'DOWN', ..., noconnection}` for node loss),
+///    and drop the now-dead registry entries.
+///
+/// Deliberately NOT implemented here: automatic re-spawn of durable actors
+/// on another node. Without an explicit supervisor policy confirming the
+/// old node is actually gone (not merely partitioned), re-spawn risks two
+/// live copies of the same durable-id actor writing to the same store —
+/// the same safety gate Kubernetes StatefulSet pod rescheduling enforces.
+pub(crate) fn handle_node_failed(rt: &mut Runtime, node: NodeId) {
+    // (1) Invalidate cached remote actors on the failed node.
+    if let Some(resolver) = rt.distributed.resolver.as_mut() {
+        resolver.invalidate_node(node);
+    }
+
+    // (2) DOWN-with-noconnection to local watchers of actors on the node.
+    let local_node = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+    let link_pairs = rt.remote_links.clear_node(node);
+    let monitor_pairs = rt.remote_monitors.clear_node(node);
+    let reason = crate::types::ExitReason::NoConnection;
+    for (target, watcher) in link_pairs {
+        if watcher.node_id == local_node {
+            crate::runtime::exit::send_down_message(rt, watcher.actor_id, target.actor_id, &reason);
+        }
+    }
+    for (target, watcher) in monitor_pairs {
+        if watcher.node_id == local_node {
+            crate::runtime::exit::send_down_message(rt, watcher.actor_id, target.actor_id, &reason);
         }
     }
 }

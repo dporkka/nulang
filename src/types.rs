@@ -2114,6 +2114,9 @@ pub enum ExitReason {
     Shutdown(Option<Duration>),
     /// Error with description.
     Error(String),
+    /// The node hosting the target actor was declared failed (Erlang's
+    /// `noconnection`): the target may still be alive, but is unreachable.
+    NoConnection,
     /// User-defined exit reason (any serializable value).
     Custom(String),
 }
@@ -2136,6 +2139,7 @@ impl ExitReason {
             ExitReason::Killed => "killed",
             ExitReason::Shutdown(_) => "shutdown",
             ExitReason::Error(_) => "error",
+            ExitReason::NoConnection => "noconnection",
             ExitReason::Custom(_) => "custom",
         }
     }

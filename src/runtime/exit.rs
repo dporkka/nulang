@@ -332,6 +332,7 @@ pub(crate) fn send_down_message(
                 ExitReason::Kill => 2,
                 ExitReason::Killed => 3,
                 ExitReason::Shutdown(_) => 4,
+                ExitReason::NoConnection => 6,
                 ExitReason::Custom(_) => 5,
             }),
         ]),

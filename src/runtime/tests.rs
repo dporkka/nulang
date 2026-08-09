@@ -3304,6 +3304,92 @@ fn start_distributed_node() -> Runtime {
     rt
 }
 
+/// Node-death recovery (PLAN.md Phase 5 deliverable 7, parts a+b): when a
+/// peer node is declared `Failed`, the local runtime must (a) invalidate
+/// its `RemoteActorCache` entries so sends fail fast instead of
+/// stale-resolving to a dead node, and (b) deliver a
+/// `DOWN`-with-`noconnection` system message to every local actor that had
+/// linked or monitored an actor on the failed node, dropping the now-dead
+/// registry entries. (Part c — supervisor-policy re-spawn of durable
+/// actors — is deliberately out of scope: it needs the
+/// old-node-confirmed-gone gate that a split-brain resolver decision, not
+/// a bare failure-detection signal, provides.)
+#[test]
+fn test_node_failed_invalidates_cache_and_delivers_down() {
+    use crate::runtime::supervision::RemoteLink;
+    let mut rt = start_distributed_node();
+    let local_node = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+    let dead_node = NodeId(4242);
+
+    // (a) Seed the remote cache with entries on the doomed node.
+    rt.distributed
+        .resolver
+        .as_mut()
+        .unwrap()
+        .record_remote_send(dead_node, 100);
+    rt.distributed
+        .resolver
+        .as_mut()
+        .unwrap()
+        .record_remote_send(dead_node, 101);
+    rt.distributed
+        .resolver
+        .as_mut()
+        .unwrap()
+        .record_remote_send(NodeId(9999), 200);
+
+    // (b) A local actor monitors (and a second one links to) a remote actor
+    // on the doomed node.
+    let monitor_watcher = rt.spawn_actor(Box::new(|| vec![]));
+    let link_watcher = rt.spawn_actor(Box::new(|| vec![]));
+    let remote_target = RemoteLink {
+        node_id: dead_node,
+        actor_id: 100,
+    };
+    rt.remote_monitors.register(remote_target, RemoteLink {
+        node_id: local_node,
+        actor_id: monitor_watcher,
+    });
+    rt.remote_links.register(remote_target, RemoteLink {
+        node_id: local_node,
+        actor_id: link_watcher,
+    });
+
+    crate::runtime::distribution::handle_node_failed(&mut rt, dead_node);
+
+    // (a) Cache entries for the failed node are gone; unrelated entries live.
+    let cache = rt.distributed.resolver.as_mut().unwrap().cache_mut();
+    assert_eq!(cache.len(), 1, "only the unrelated node's entry survives");
+    assert!(cache.get(dead_node, 100).is_none());
+    assert!(cache.get(dead_node, 101).is_none());
+
+    // (b) Both watchers received a DOWN system message (behavior 0) with
+    // the noconnection code (6) and the dead target's actor id.
+    for watcher_id in [monitor_watcher, link_watcher] {
+        let down = rt
+            .actors
+            .get_mut(&watcher_id)
+            .unwrap()
+            .mailbox
+            .pop()
+            .expect("watcher must receive a DOWN on node failure");
+        assert_eq!(down.behavior_id, 0, "DOWN is a system message");
+        assert_eq!(down.payload[0].as_int(), Some(100), "target actor id");
+        assert_eq!(down.payload[1].as_int(), Some(watcher_id as i64));
+        assert_eq!(down.payload[2].as_int(), Some(6), "noconnection code");
+    }
+
+    // The registry entries for the dead node are dropped.
+    assert!(
+        rt.remote_monitors.get_watchers(remote_target).is_none(),
+        "monitor registry entry for the dead node must be dropped"
+    );
+    assert!(
+        rt.remote_links.get_watchers(remote_target).is_none(),
+        "link registry entry for the dead node must be dropped"
+    );
+}
+
 /// Pump `process_network` on every node until each node's cluster view
 /// holds `expected` healthy members (including itself), or fail.
 ///

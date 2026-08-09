@@ -47,6 +47,7 @@ use super::mailbox::{Message, MessagePriority};
 use super::network::{NetworkTransport, Packet};
 use super::{ClusterState, NodeId, NodeStatus};
 use crate::runtime::Runtime;
+use crate::types::ExitReason;
 use crate::vm::Value;
 use tracing::warn;
 
@@ -263,6 +264,17 @@ impl RemoteActorCache {
         let key = (node_id, actor_id);
         self.entries.remove(&key);
         self.access_order.retain(|&k| k != key);
+    }
+
+    /// Remove every cached entry whose actor lives on the given node.
+    ///
+    /// Called when a node is declared `Failed` so sends to its actors fail
+    /// fast with an unresolvable result instead of stale-resolving to a
+    /// node that is no longer reachable.
+    pub fn remove_node(&mut self, node_id: NodeId) {
+        self.entries.retain(|&(n, _), _| n != node_id);
+        self.access_order
+            .retain(|key| self.entries.contains_key(key));
     }
 
     /// Get the N most recently accessed remote actors.
@@ -554,6 +566,14 @@ impl AddressResolver {
         &mut self.remote_cache
     }
 
+    /// Drop every cached entry for the given node.
+    ///
+    /// Called when the node is declared `Failed` so subsequent sends fail
+    /// fast instead of stale-resolving to a dead node.
+    pub fn invalidate_node(&mut self, node_id: NodeId) {
+        self.remote_cache.remove_node(node_id);
+    }
+
     /// Get the local node ID.
     pub fn local_node(&self) -> NodeId {
         self.local_node
@@ -819,6 +839,21 @@ fn delivery_failure_code(reason: &str) -> i64 {
         "string intern failed on receiver" => 3,
         "target actor not found" => 4,
         _ => 5,
+    }
+}
+
+/// Map the wire reason tag (from [`ExitReason::tag`]) back to an
+/// [`ExitReason`]. The wire carries only the tag string; the original
+/// message/description payload is not transmitted.
+fn exit_reason_from_tag(tag: &str) -> ExitReason {
+    match tag {
+        "normal" => ExitReason::Normal,
+        "kill" => ExitReason::Kill,
+        "killed" => ExitReason::Killed,
+        "shutdown" => ExitReason::Shutdown(None),
+        "noconnection" => ExitReason::NoConnection,
+        "error" => ExitReason::Error("remote exit".to_string()),
+        _ => ExitReason::Custom(tag.to_string()),
     }
 }
 
@@ -1168,6 +1203,63 @@ pub fn process_network_packets(
                 if let Some(manager) = &mut runtime.crdt_manager {
                     manager.apply_op(op);
                 }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
+            Packet::Link { watcher, target } => {
+                // A remote actor (watcher, on the sending node) linked to a
+                // local actor (target). Register so the local exit protocol
+                // can notify the remote watcher when the target exits.
+                runtime.remote_links.register(target, watcher);
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
+            Packet::Monitor { watcher, target } => {
+                // Same registration for the asymmetric monitor direction.
+                runtime.remote_monitors.register(target, watcher);
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
+            Packet::Down { target, reason } => {
+                // A remote actor exited (normal exit or crash). Deliver DOWN
+                // to every local actor that had linked/monitored it.
+                let reason = exit_reason_from_tag(&reason);
+                let local_node = runtime.distributed.node_id.unwrap_or(NodeId::LOCAL);
+                let local_link_watchers: Vec<u64> = runtime
+                    .remote_links
+                    .get_watchers(target)
+                    .map(|ws| {
+                        ws.iter()
+                            .filter(|w| w.node_id == local_node)
+                            .map(|w| w.actor_id)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let local_monitor_watchers: Vec<u64> = runtime
+                    .remote_monitors
+                    .get_watchers(target)
+                    .map(|ws| {
+                        ws.iter()
+                            .filter(|w| w.node_id == local_node)
+                            .map(|w| w.actor_id)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for watcher_id in local_link_watchers {
+                    crate::runtime::exit::send_down_message(
+                        runtime,
+                        watcher_id,
+                        target.actor_id,
+                        &reason,
+                    );
+                }
+                for watcher_id in local_monitor_watchers {
+                    crate::runtime::exit::send_down_message(
+                        runtime,
+                        watcher_id,
+                        target.actor_id,
+                        &reason,
+                    );
+                }
+                runtime.remote_links.clear_target(target);
+                runtime.remote_monitors.clear_target(target);
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::MigrateActor {
@@ -1746,6 +1838,72 @@ mod tests {
         assert_eq!(info.node_id, NodeId(5));
         assert_eq!(info.actor_id, 99);
         assert_eq!(info.message_count, 1);
+    }
+
+    // -- 9b. Cache: remove_node / resolver invalidate_node -------------------
+
+    #[test]
+    fn test_remote_cache_remove_node() {
+        let mut cache = RemoteActorCache::with_defaults();
+        cache.put(NodeId(1), 10);
+        cache.put(NodeId(1), 11);
+        cache.put(NodeId(2), 20);
+
+        cache.remove_node(NodeId(1));
+
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(NodeId(1), 10).is_none());
+        assert!(cache.get(NodeId(1), 11).is_none());
+        assert!(cache.get(NodeId(2), 20).is_some());
+    }
+
+    #[test]
+    fn test_resolver_invalidate_node() {
+        let local_addr = addr(9100);
+        let local_node = NodeId::new(&local_addr);
+        let mut resolver = AddressResolver::new(local_node);
+        resolver.record_remote_send(NodeId(5), 99);
+        resolver.record_remote_send(NodeId(5), 98);
+        resolver.record_remote_send(NodeId(6), 77);
+        assert_eq!(resolver.cache().len(), 3);
+
+        resolver.invalidate_node(NodeId(5));
+
+        assert_eq!(resolver.cache().len(), 1);
+        assert!(resolver.cache_mut().get(NodeId(5), 99).is_none());
+        assert!(resolver.cache_mut().get(NodeId(5), 98).is_none());
+        assert!(resolver.cache_mut().get(NodeId(6), 77).is_some());
+    }
+
+    // -- 9c. Remote link/monitor registries ----------------------------------
+
+    #[test]
+    fn test_remote_link_registry_clear_node_returns_target_pairs() {
+        use crate::runtime::supervision::{RemoteLink, RemoteLinkRegistry};
+        let mut reg = RemoteLinkRegistry::new();
+        let target = RemoteLink {
+            node_id: NodeId(1),
+            actor_id: 100,
+        };
+        let watcher_local = RemoteLink {
+            node_id: NodeId(0),
+            actor_id: 7,
+        };
+        let watcher_remote = RemoteLink {
+            node_id: NodeId(2),
+            actor_id: 8,
+        };
+        reg.register(target, watcher_local);
+        reg.register(target, watcher_remote);
+
+        let cleared = reg.clear_node(NodeId(1));
+        assert_eq!(cleared.len(), 2);
+        // Both watchers must be paired with the target they were watching.
+        assert!(cleared.iter().all(|(t, _)| *t == target));
+        assert!(cleared.iter().any(|(_, w)| *w == watcher_local));
+        assert!(cleared.iter().any(|(_, w)| *w == watcher_remote));
+        // The registry is empty for that node now.
+        assert!(reg.get_watchers(target).is_none());
     }
 
     // -- 10. Build packet ----------------------------------------------------

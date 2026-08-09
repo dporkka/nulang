@@ -45,11 +45,21 @@ impl RemoteLinkRegistry {
     }
 
     /// Remove all entries whose target is on the given node.
-    pub fn clear_node(&mut self, node_id: NodeId) -> Vec<RemoteLink> {
+    ///
+    /// Returns `(target, watcher)` pairs so callers can deliver a
+    /// node-failure `DOWN` to each watcher with the target actor id it was
+    /// watching.
+    pub fn clear_node(&mut self, node_id: NodeId) -> Vec<(RemoteLink, RemoteLink)> {
         let mut watchers = Vec::new();
-        self.links.retain(|&(n, _), w| {
+        self.links.retain(|&(n, actor_id), w| {
             if n == node_id {
-                watchers.extend(w.iter().cloned());
+                let target = RemoteLink {
+                    node_id: n,
+                    actor_id,
+                };
+                for watcher in w.iter() {
+                    watchers.push((target, *watcher));
+                }
                 false
             } else {
                 true
@@ -89,11 +99,21 @@ impl RemoteMonitorRegistry {
     }
 
     /// Remove all entries whose target is on the given node.
-    pub fn clear_node(&mut self, node_id: NodeId) -> Vec<RemoteLink> {
+    ///
+    /// Returns `(target, watcher)` pairs so callers can deliver a
+    /// node-failure `DOWN` to each watcher with the target actor id it was
+    /// watching.
+    pub fn clear_node(&mut self, node_id: NodeId) -> Vec<(RemoteLink, RemoteLink)> {
         let mut watchers = Vec::new();
-        self.monitors.retain(|&(n, _), w| {
+        self.monitors.retain(|&(n, actor_id), w| {
             if n == node_id {
-                watchers.extend(w.iter().cloned());
+                let target = RemoteLink {
+                    node_id: n,
+                    actor_id,
+                };
+                for watcher in w.iter() {
+                    watchers.push((target, *watcher));
+                }
                 false
             } else {
                 true
