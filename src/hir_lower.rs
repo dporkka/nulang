@@ -129,6 +129,18 @@ fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
 
 fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
     match decl {
+        Decl::CrdtDecl { name, fields, span } => {
+            // CRDT declarations are lowered to a Constant with empty body
+            // In a full implementation, this would create a CRDT actor
+            hir::Decl::Constant {
+                name: name.clone(),
+                body: hir::Body {
+                    stmts: vec![],
+                    terminator: hir::Terminator::FnReturn(Some(hir::Operand::Unit)),
+                },
+                span: *span,
+            }
+        }
         Decl::Function {
             name,
             type_params,
@@ -325,13 +337,14 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             span: *span,
         },
 
-        Decl::LetBinding { name, value, .. } => {
+        Decl::LetBinding { name, value, span, .. } => {
             let mut body = hir::Body::new();
             let op = lower_expr(value, &mut body);
             body.set_terminator(hir::Terminator::FnReturn(Some(op)));
             hir::Decl::Constant {
                 name: name.clone(),
                 body,
+                span: *span,
             }
         }
         Decl::Workflow {
@@ -357,6 +370,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             class_name,
             for_type,
             methods,
+            span,
             ..
         } => {
             let mut body = hir::Body::new();
@@ -396,6 +410,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             hir::Decl::Constant {
                 name: dict_name,
                 body,
+                span: *span,
             }
         }
         Decl::Class { .. } => {
@@ -439,12 +454,13 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             tables: tables.clone(),
             span: *span,
         },
-        Decl::Given { .. } => {
+        Decl::Given { span, .. } => {
             // Given declarations are resolved to call-site arguments
             // during typechecking and do not produce HIR nodes.
             hir::Decl::Constant {
                 name: "_unused_given".to_string(),
                 body: hir::Body::new(),
+                span: *span,
             }
         }
     }

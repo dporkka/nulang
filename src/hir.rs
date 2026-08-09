@@ -7,7 +7,7 @@
 //!   - actor/module structure is preserved;
 //!   - patterns are preserved with type annotations.
 
-use crate::ast::{BinOp, Literal, Pattern, StateModel, UnOp};
+use crate::ast::{BinOp, CrdtType, Expr, Literal, Pattern, StateModel, UnOp};
 use crate::types::{Capability, EffectRow, Span, Type};
 
 // Re-exported AST types used in HIR declarations
@@ -86,6 +86,12 @@ pub enum Decl {
     Constant {
         name: String,
         body: Body,
+        span: Span,
+    },
+    CrdtDecl {
+        name: String,
+        fields: Vec<(String, CrdtType, Type, Expr)>,
+        span: Span,
     },
 }
 

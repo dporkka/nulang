@@ -60,6 +60,10 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
 /// `decls` in place, so this pass does the same instead of erroring.
 fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
     match decl {
+        hir::Decl::CrdtDecl { name, .. } => {
+            // CRDT declaration - reserve a placeholder
+            let _ = ctx.reserve_function(name); // placeholder
+        }
         hir::Decl::Function(f) => {
             if ctx.func_map.contains_key(&f.name) {
                 return Err(compile_err(
@@ -235,7 +239,7 @@ fn lower_decl_bodies(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 lower_decl_bodies(ctx, d)?;
             }
         }
-        hir::Decl::Constant { name, body } => {
+        hir::Decl::Constant { name, body, .. } => {
             let idx = ctx.func_map[name];
             let mut lowerer = FnLowerer::new(ctx, name, None);
             lowerer.lower_body_top(body)?;

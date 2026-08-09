@@ -1151,6 +1151,11 @@ impl TypeChecker {
         decl: &Decl,
     ) -> NuResult<(Substitution, Type)> {
         match decl {
+            Decl::CrdtDecl { name, span, .. } => {
+                // CRDT declaration: bind name to unit type
+                let _ = span;
+                Ok((Vec::new(), Type::unit()))
+            }
             Decl::Function {
                 name,
                 type_param_constraints,

@@ -150,6 +150,7 @@ fn decl_name(decl: &Decl) -> Option<&str> {
         | Decl::Agent { name, .. }
         | Decl::Database { name, .. } => Some(name.as_str()),
         Decl::NamedHandler { name, .. } => Some(name.as_str()),
+        Decl::CrdtDecl { name, .. } => Some(name.as_str()),
         Decl::Extern { .. }
         | Decl::Workflow { .. }
         | Decl::Import { .. }

@@ -409,6 +409,7 @@ impl Parser {
             }
             TokenKind::StateMachine => self.parse_state_machine(),
             TokenKind::Agent => self.parse_agent(),
+            TokenKind::Crdt => self.parse_crdt_decl(),
             TokenKind::Workflow => self.parse_workflow(),
             TokenKind::Database => self.parse_database(),
             TokenKind::Opaque => {
@@ -1648,6 +1649,58 @@ impl Parser {
         }
         Ok(Decl::Database { name, tables, span })
     }
+
+    /// Parse a CRDT declaration: `crdt Name { type field = value, ... }`
+    fn parse_crdt_decl(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'crdt'
+        let name = self.expect_ident("crdt name")?;
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut fields = Vec::new();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            // Parse: type name = default
+            let crdt_type = match self.peek_kind() {
+                TokenKind::Ident(kw) => {
+                    if let Some(ct) = CrdtType::from_keyword(kw) {
+                        self.advance(); // consume the type keyword
+                        ct
+                    } else {
+                        return Err(NuError::parse_error(
+                            format!("Unknown CRDT type: {}", kw),
+                            self.current_span(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(NuError::parse_error(
+                        "Expected CRDT type (gcounter, pncounter, gset, orset, aworset, lwwregister, mvregister, rga)".to_string(),
+                        self.current_span(),
+                    ));
+                }
+            };
+            let field_name = self.expect_ident("field name")?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            self.expect(TokenKind::Assign)?;
+            let default = self.parse_expr()?;
+            fields.push((field_name, crdt_type, ty, default));
+            self.skip_newlines();
+            let _ = self.consume_if(&TokenKind::Comma);
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Decl::CrdtDecl {
+            name,
+            fields,
+            span,
+        })
+    }
+
 
     fn parse_state_model(&mut self, default_model: StateModel) -> StateModel {
         match self.peek_kind() {

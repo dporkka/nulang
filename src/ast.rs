@@ -721,6 +721,12 @@ pub enum Decl {
         tables: Vec<DatabaseTable>,
         span: Span,
     },
+    /// CRDT declaration: `crdt Name { type field = value, ... }`
+    CrdtDecl {
+        name: String,
+        fields: Vec<(String, CrdtType, Type, Expr)>, // name, crdt_type, type, default
+        span: Span,
+    },
     /// Named handler declaration: `handler name = { | Effect.op(params) resume => body, ... }`
     NamedHandler {
         name: String,
