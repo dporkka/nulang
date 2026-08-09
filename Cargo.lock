@@ -2286,6 +2286,7 @@ dependencies = [
  "nulang-ai",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "parking_lot",
  "pyo3",
  "rand_core 0.6.4",
@@ -2306,6 +2307,7 @@ dependencies = [
  "ureq",
  "wasm-encoder 0.220.1",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]
@@ -2469,6 +2471,7 @@ dependencies = [
  "bytes",
  "http 1.4.2",
  "opentelemetry",
+ "reqwest",
 ]
 
 [[package]]
@@ -2485,6 +2488,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost 0.13.5",
+ "reqwest",
  "thiserror 1.0.69",
 ]
 
@@ -2515,7 +2519,10 @@ dependencies = [
  "opentelemetry",
  "percent-encoding",
  "rand 0.8.7",
+ "serde_json",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -3245,7 +3252,9 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2 0.4.15",
  "http 1.4.2",
  "http-body 1.1.0",

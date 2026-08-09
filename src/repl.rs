@@ -125,8 +125,6 @@ impl ReplHelper {
                 "Signal.wait",
                 "Signal.notify",
                 "Inference.ask",
-                "LLM.ask",
-                "LLM.complete",
                 "Net.connect",
                 "Net.listen",
                 "Actor.spawn",
@@ -854,7 +852,6 @@ impl Repl {
                 println!("  Timer   -- sleep, now");
                 println!("  Signal  -- wait, notify");
                 println!("  Net     -- connect, listen");
-                println!("  LLM     -- AI inference");
                 println!();
                 println!("Function signatures declare effects:");
                 println!("  fn pure() -> Int !{{}}        {{ 42 }}           -- no effects");

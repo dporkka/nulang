@@ -20,8 +20,7 @@
 use parking_lot::Mutex;
 
 use opentelemetry::global;
-use opentelemetry::metrics::MeterProvider;
-use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
 
 /// Global singleton guard so `init_tracer` / `init_meter` are idempotent.
 static TRACER_INIT: Mutex<bool> = Mutex::new(false);
@@ -42,15 +41,14 @@ pub fn init_tracer(url: &str, service_name: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .with_endpoint(url)
-        .build()
-        .map_err(|e| format!("failed to build OTLP trace exporter: {e}"))?;
-
-    let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_config(
+    let provider = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .http()
+                .with_endpoint(url),
+        )
+        .with_trace_config(
             opentelemetry_sdk::trace::Config::default().with_resource(
                 opentelemetry_sdk::Resource::new(vec![
                     opentelemetry::KeyValue::new("service.name", service_name.to_string()),
@@ -61,7 +59,8 @@ pub fn init_tracer(url: &str, service_name: &str) -> Result<(), String> {
                 ]),
             ),
         )
-        .build();
+        .install_simple()
+        .map_err(|e| format!("failed to build OTLP trace pipeline: {e}"))?;
 
     global::set_tracer_provider(provider);
     *guard = true;
@@ -83,21 +82,13 @@ pub fn init_meter(url: &str, service_name: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_http()
-        .with_endpoint(url)
-        .with_temporality(opentelemetry_sdk::metrics::Temporality::Delta)
-        .build()
-        .map_err(|e| format!("failed to build OTLP metrics exporter: {e}"))?;
-
-    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
-        exporter,
-        opentelemetry_sdk::runtime::Tokio,
-    )
-    .build();
-
-    let provider = opentelemetry_sdk::metrics::MeterProvider::builder()
-        .with_reader(reader)
+    let provider = opentelemetry_otlp::new_pipeline()
+        .metrics(opentelemetry_sdk::runtime::TokioCurrentThread)
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .http()
+                .with_endpoint(url),
+        )
         .with_resource(opentelemetry_sdk::Resource::new(vec![
             opentelemetry::KeyValue::new("service.name", service_name.to_string()),
             opentelemetry::KeyValue::new(
@@ -105,7 +96,8 @@ pub fn init_meter(url: &str, service_name: &str) -> Result<(), String> {
                 crate::format::constants::LANGUAGE_VERSION_STR.to_string(),
             ),
         ]))
-        .build();
+        .build()
+        .map_err(|e| format!("failed to build OTLP metrics pipeline: {e}"))?;
 
     global::set_meter_provider(provider);
     *guard = true;
@@ -124,6 +116,137 @@ pub fn shutdown() {
     // does not expose a typed shutdown method.
     let mut mg = METER_INIT.lock();
     *mg = false;
+}
+
+// ---------------------------------------------------------------------------
+// OTLP metric publishing (parity with Prometheus metrics)
+// ---------------------------------------------------------------------------
+
+use opentelemetry::metrics::Meter;
+
+/// Cached OpenTelemetry metric instruments for publishing [`MetricsSnapshot`]
+/// values.  Created once per meter and reused across calls.
+pub struct MetricsExporter {
+    actors_live: opentelemetry::metrics::Gauge<u64>,
+    dlq_depth: opentelemetry::metrics::Gauge<u64>,
+    mailbox_depth: opentelemetry::metrics::Gauge<u64>,
+    scheduler_total: opentelemetry::metrics::Counter<u64>,
+    scheduler_local: opentelemetry::metrics::Counter<u64>,
+    scheduler_global: opentelemetry::metrics::Counter<u64>,
+    scheduler_stolen: opentelemetry::metrics::Counter<u64>,
+    scheduler_steal_attempts: opentelemetry::metrics::Counter<u64>,
+    scheduler_steal_successes: opentelemetry::metrics::Counter<u64>,
+    scheduler_empty_polls: opentelemetry::metrics::Counter<u64>,
+    gc_objects_allocated: opentelemetry::metrics::Counter<u64>,
+    gc_objects_freed: opentelemetry::metrics::Counter<u64>,
+    gc_bytes_allocated: opentelemetry::metrics::Counter<u64>,
+    gc_bytes_freed: opentelemetry::metrics::Counter<u64>,
+    gc_cycles_detected: opentelemetry::metrics::Counter<u64>,
+    resolver_local: opentelemetry::metrics::Counter<u64>,
+    resolver_remote: opentelemetry::metrics::Counter<u64>,
+    resolver_failed: opentelemetry::metrics::Counter<u64>,
+    resolver_cache_hits: opentelemetry::metrics::Counter<u64>,
+    resolver_cache_misses: opentelemetry::metrics::Counter<u64>,
+    /// Previous snapshot, used to compute deltas for counter metrics.
+    prev: parking_lot::Mutex<Option<crate::runtime::MetricsSnapshot>>,
+}
+
+impl MetricsExporter {
+    /// Create instruments under the given `meter`.
+    pub fn new(meter: &Meter) -> Self {
+        MetricsExporter {
+            actors_live: meter.u64_gauge("nulang.actors.live").init(),
+            dlq_depth: meter.u64_gauge("nulang.dlq.depth").init(),
+            mailbox_depth: meter.u64_gauge("nulang.actor.mailbox.depth").init(),
+            scheduler_total: meter.u64_counter("nulang.scheduler.tasks.total").init(),
+            scheduler_local: meter.u64_counter("nulang.scheduler.tasks.local").init(),
+            scheduler_global: meter.u64_counter("nulang.scheduler.tasks.global").init(),
+            scheduler_stolen: meter.u64_counter("nulang.scheduler.tasks.stolen").init(),
+            scheduler_steal_attempts: meter.u64_counter("nulang.scheduler.steal.attempts").init(),
+            scheduler_steal_successes: meter
+                .u64_counter("nulang.scheduler.steal.successes")
+                .init(),
+            scheduler_empty_polls: meter
+                .u64_counter("nulang.scheduler.empty_polls")
+                .init(),
+            gc_objects_allocated: meter.u64_counter("nulang.gc.objects.allocated").init(),
+            gc_objects_freed: meter.u64_counter("nulang.gc.objects.freed").init(),
+            gc_bytes_allocated: meter.u64_counter("nulang.gc.bytes.allocated").init(),
+            gc_bytes_freed: meter.u64_counter("nulang.gc.bytes.freed").init(),
+            gc_cycles_detected: meter.u64_counter("nulang.gc.cycles.detected").init(),
+            resolver_local: meter.u64_counter("nulang.resolver.local").init(),
+            resolver_remote: meter.u64_counter("nulang.resolver.remote").init(),
+            resolver_failed: meter.u64_counter("nulang.resolver.failed").init(),
+            resolver_cache_hits: meter.u64_counter("nulang.resolver.cache.hits").init(),
+            resolver_cache_misses: meter.u64_counter("nulang.resolver.cache.misses").init(),
+            prev: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// Publish a metrics snapshot to OTLP.  Gauges are set to the absolute
+    /// value; counters are incremented by the delta from the previous snapshot.
+    pub fn publish(&self, snap: &crate::runtime::MetricsSnapshot) {
+        let prev = self.prev.lock();
+        let prev_ref = prev.as_ref();
+
+        self.actors_live.record(snap.actors_live, &[]);
+        self.dlq_depth.record(snap.dlq_depth, &[]);
+
+        for m in &snap.actors_mailboxes {
+            self.mailbox_depth
+                .record(m.depth as u64, &[opentelemetry::KeyValue::new("actor_id", m.actor_id as i64)]);
+        }
+
+        let s = &snap.scheduler;
+        let p_s = prev_ref.map(|p| &p.scheduler);
+        add_delta(&self.scheduler_total, s.total_tasks_processed, p_s.map(|p| p.total_tasks_processed));
+        add_delta(&self.scheduler_local, s.tasks_from_local_queue, p_s.map(|p| p.tasks_from_local_queue));
+        add_delta(&self.scheduler_global, s.tasks_from_global_queue, p_s.map(|p| p.tasks_from_global_queue));
+        add_delta(&self.scheduler_stolen, s.tasks_from_steal, p_s.map(|p| p.tasks_from_steal));
+        add_delta(&self.scheduler_steal_attempts, s.steal_attempts, p_s.map(|p| p.steal_attempts));
+        add_delta(&self.scheduler_steal_successes, s.steal_successes, p_s.map(|p| p.steal_successes));
+        add_delta(&self.scheduler_empty_polls, s.empty_polls, p_s.map(|p| p.empty_polls));
+
+        let g = &snap.gc;
+        let p_g = prev_ref.map(|p| &p.gc);
+        add_delta(&self.gc_objects_allocated, g.objects_allocated, p_g.map(|p| p.objects_allocated));
+        add_delta(&self.gc_objects_freed, g.objects_freed, p_g.map(|p| p.objects_freed));
+        add_delta(&self.gc_bytes_allocated, g.bytes_allocated, p_g.map(|p| p.bytes_allocated));
+        add_delta(&self.gc_bytes_freed, g.bytes_freed, p_g.map(|p| p.bytes_freed));
+        add_delta(&self.gc_cycles_detected, g.cycles_detected, p_g.map(|p| p.cycles_detected));
+
+        let r = &snap.resolver;
+        let p_r = prev_ref.map(|p| &p.resolver);
+        add_delta(&self.resolver_local, r.local_resolves, p_r.map(|p| p.local_resolves));
+        add_delta(&self.resolver_remote, r.remote_resolves, p_r.map(|p| p.remote_resolves));
+        add_delta(&self.resolver_failed, r.failed_resolves, p_r.map(|p| p.failed_resolves));
+        add_delta(&self.resolver_cache_hits, r.cache_hits, p_r.map(|p| p.cache_hits));
+        add_delta(&self.resolver_cache_misses, r.cache_misses, p_r.map(|p| p.cache_misses));
+
+        drop(prev);
+        *self.prev.lock() = Some(snap.clone());
+    }
+}
+
+/// Helper: add `current - previous` to a counter, or `current` if no previous.
+fn add_delta(counter: &opentelemetry::metrics::Counter<u64>, current: u64, previous: Option<u64>) {
+    let delta = current.saturating_sub(previous.unwrap_or(0));
+    if delta > 0 {
+        counter.add(delta, &[]);
+    }
+}
+
+/// Cached global [`MetricsExporter`] so instruments are created only once.
+static OTLP_EXPORTER: std::sync::LazyLock<MetricsExporter> = std::sync::LazyLock::new(|| {
+    MetricsExporter::new(&opentelemetry::global::meter("nulang-runtime"))
+});
+
+/// Publish a [`MetricsSnapshot`] to OTLP.  The exporter is lazily
+/// initialised on the first call using the global meter provider
+/// (which must have been set up via [`init_meter`]).  No-op if the
+/// global meter provider has not been configured.
+pub fn publish_otlp_metrics(snap: &crate::runtime::MetricsSnapshot) {
+    OTLP_EXPORTER.publish(snap);
 }
 
 #[cfg(test)]
@@ -148,8 +271,14 @@ mod tests {
     fn test_init_meter_idempotent() {
         let url = "http://localhost:4318/v1/metrics";
         let name = "nulang-test-meter";
-        let r1 = init_meter(url, name);
-        let r2 = init_meter(url, name);
+        // The metrics pipeline requires a Tokio runtime for its background
+        // periodic reader. Create one for the test.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (r1, r2) = rt.block_on(async {
+            let r1 = init_meter(url, name);
+            let r2 = init_meter(url, name);
+            (r1, r2)
+        });
         assert_eq!(r1.is_ok(), r2.is_ok());
     }
 }

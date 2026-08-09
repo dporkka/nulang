@@ -30,6 +30,7 @@ pub mod mir_lower;
 pub mod mir_wasm;
 pub mod package;
 pub mod parser;
+pub mod mir_wasm_simd;
 pub mod prelude_source;
 #[cfg(feature = "python")]
 pub mod python;
@@ -51,4 +52,6 @@ pub mod vm;
 pub mod wasm_component_runtime;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
+#[cfg(feature = "otel")]
+pub mod observability;
 pub mod wasm_types;

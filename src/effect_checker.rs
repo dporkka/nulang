@@ -85,7 +85,6 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Migrate" => Effect::Migrate,
         "STM" => Effect::STM,
         "Async" => Effect::Async,
-        "LLM" => Effect::Inference,
         "Inference" => Effect::Inference,
         "Cost" => Effect::Cost,
         "Event" => Effect::Event,
@@ -749,14 +748,6 @@ impl EffectChecker {
                 span,
             } => {
                 let eff = parse_effect_name(effect);
-
-                // Deprecation warning: LLM is a deprecated alias for Inference (RFC 0010).
-                if effect == "LLM" {
-                    self.diagnostics.push(
-                        "warning: `LLM.ask` is deprecated; use `Inference.ask` instead (RFC 0010). Both are synonyms."
-                            .to_string(),
-                    );
-                }
 
                 // Check whether this effect is handled by an enclosing handler.
                 let is_handled = ctx.handlers.iter().any(|h| {
@@ -2309,7 +2300,6 @@ mod tests {
         assert_eq!(parse_effect_name("Spawn"), Effect::Spawn);
         assert_eq!(parse_effect_name("Http"), Effect::Net);
         assert_eq!(parse_effect_name("Async"), Effect::Async);
-        assert_eq!(parse_effect_name("LLM"), Effect::Inference);
         assert_eq!(parse_effect_name("Inference"), Effect::Inference);
     }
 
@@ -3816,47 +3806,5 @@ mod tests {
         let mut checker = EffectChecker::new();
         assert!(checker.check_module(&ast.decls).is_ok());
         assert!(checker.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn test_llm_ask_deprecation_warning() {
-        let ast = parse_module(
-            r#"
-            fn main() { perform LLM.ask("hello") }
-            "#,
-        );
-        let mut checker = EffectChecker::new();
-        assert!(checker.check_module(&ast.decls).is_ok());
-        assert!(
-            !checker.diagnostics.is_empty(),
-            "expected deprecation warning for LLM.ask"
-        );
-        assert!(
-            checker
-                .diagnostics
-                .iter()
-                .any(|d| d.contains("LLM.ask") && d.contains("deprecated")),
-            "warning should mention LLM.ask is deprecated"
-        );
-    }
-
-    #[test]
-    fn test_inference_ask_no_deprecation_warning() {
-        let ast = parse_module(
-            r#"
-            fn main() { perform Inference.ask("hello") }
-            "#,
-        );
-        let mut checker = EffectChecker::new();
-        assert!(checker.check_module(&ast.decls).is_ok());
-        let llm_warnings: Vec<_> = checker
-            .diagnostics
-            .iter()
-            .filter(|d| d.contains("LLM.ask") || d.contains("deprecated"))
-            .collect();
-        assert!(
-            llm_warnings.is_empty(),
-            "Inference.ask should not produce LLM deprecation warning"
-        );
     }
 }

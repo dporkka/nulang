@@ -29,7 +29,6 @@ fn rewrites() -> Vec<Rewrite> {
         Rewrite { name: "agent → actor", from: "agent ", to: "actor ", add_import: Some("import nlc.ai;") },
         Rewrite { name: "workflow → actor", from: "workflow ", to: "actor ", add_import: Some("import nlc.workflow;") },
         Rewrite { name: "database → actor", from: "database ", to: "actor ", add_import: Some("import nlc.storage;") },
-        Rewrite { name: "LLM.ask → Provider.ask", from: "perform LLM.ask(", to: r#"perform Provider.ask("inference", "#, add_import: None },
     ]
 }
 
@@ -173,13 +172,6 @@ mod tests {
         assert!(result.contains("import nlc.workflow;"));
     }
 
-    #[test]
-    fn test_llm_ask_migration() {
-        let source = "perform LLM.ask(\"hello world\")";
-        let (result, applied) = apply_rewrites(source);
-        assert!(applied.iter().any(|a| a.contains("LLM")));
-        assert!(result.contains(r#"perform Provider.ask("inference", "#));
-    }
 
     #[test]
     fn test_no_change() {

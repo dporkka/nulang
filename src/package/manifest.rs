@@ -46,6 +46,8 @@ pub struct PackageSection {
     /// When set, `nula publish` uploads here and bare version deps resolve from here.
     #[serde(default)]
     pub registry: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 fn default_entry() -> String {

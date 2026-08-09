@@ -31,15 +31,15 @@ autobenches = false
 language-version = "1.0.0-frozen"
 
 [features]
-default = ["python", "sqlite", "lsp", "ai-runtime"]
+default = ["python", "sqlite", "lsp", "ai-runtime", "tls"]
 python = ["dep:pyo3"]
 sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp", "dep:tokio"]
 ai-runtime = ["dep:nulang-ai", "dep:reqwest", "dep:tokio"]
-wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
+wasm-backend = ["dep:wasm-encoder", "dep:wasmtime", "dep:wat"]
 http-client = ["dep:reqwest", "dep:tokio"]
-otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:tokio"]
-
+otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio"]
+tls = ["dep:rustls", "dep:rustls-pemfile"]
 
 [dependencies]
 # Memory & concurrency
@@ -78,7 +78,8 @@ tokio = { version = "1.37.0", features = ["full", "macros", "net", "rt-multi-thr
 
 # OpenTelemetry observability (optional, see [features])
 opentelemetry = { version = "0.24", optional = true }
-opentelemetry-otlp = { version = "0.17", optional = true, default-features = false, features = ["trace", "metrics", "http-proto"] }
+opentelemetry-otlp = { version = "0.17", optional = true, default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-client"] }
+opentelemetry_sdk = { version = "0.24", optional = true, features = ["rt-tokio", "rt-tokio-current-thread"] }
 
 # Python interop (optional, see [features])
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }
@@ -97,9 +98,10 @@ reqwest = { version = "0.12", features = ["json"], optional = true }
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model", "wat"] }
+wat = { version = "1.254", optional = true }
 blake3 = "1.8"
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
-rustls-pemfile = "2"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 hex = "0.4.3"
 rand_core = { version = "0.6.4", features = ["getrandom"] }

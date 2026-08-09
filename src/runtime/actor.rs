@@ -463,7 +463,12 @@ impl Actor {
     pub fn set_state_field(&mut self, name: impl Into<String>, value: Value) {
         let name_str = name.into();
         self.dirty_fields.insert(name_str.clone());
-        self.state_data.insert(name_str, value);
+        self.state_data.insert(name_str.clone(), value);
+        
+        // Auto-sync CRDT fields on mutation
+        if let Some(StateModel::Crdt(_crdt_type)) = self.state_models.get(&name_str) {
+            self.dirty_fields.insert(name_str.clone());
+        }
     }
 
     /// Get a named state field.

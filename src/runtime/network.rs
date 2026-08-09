@@ -3322,3 +3322,120 @@ impl NetworkTransport for DeterministicNetworkTransport {
         }
     }
 }
+
+#[cfg(feature = "tls")]
+mod tls_provider {
+    use crate::backends::{DefaultTlsProvider, ServerTlsConfig, ClientTlsConfig, TlsStream, TlsProvider};
+    use rustls::{ServerConfig, ClientConfig};
+    use std::io::{self, Read, Write};
+    use std::net::TcpStream;
+    use std::sync::Arc;
+    use parking_lot::Mutex;
+
+    /// rustls-backed server TLS configuration.
+    pub struct RustlsServerConfig {
+        config: Arc<ServerConfig>,
+    }
+    impl ServerTlsConfig for RustlsServerConfig {}
+
+    /// rustls-backed client TLS configuration.
+    pub struct RustlsClientConfig {
+        config: Arc<ClientConfig>,
+    }
+
+    impl ClientTlsConfig for RustlsClientConfig {}
+
+    /// rustls-backed TLS stream wrapper.
+    pub enum RustlsStream {
+        Server(Arc<Mutex<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>>),
+        Client(Arc<Mutex<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>>),
+    }
+
+    impl Read for RustlsStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self {
+                RustlsStream::Server(s) => s.lock().read(buf),
+                RustlsStream::Client(s) => s.lock().read(buf),
+            }
+        }
+    }
+
+    impl Write for RustlsStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self {
+                RustlsStream::Server(s) => s.lock().write(buf),
+                RustlsStream::Client(s) => s.lock().write(buf),
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            match self {
+                RustlsStream::Server(s) => s.lock().flush(),
+                RustlsStream::Client(s) => s.lock().flush(),
+            }
+        }
+    }
+
+    impl TlsStream for RustlsStream {
+        fn peer_certificates(&self) -> Option<Vec<Vec<u8>>> {
+            match self {
+                RustlsStream::Server(s) => {
+                    let locked = s.lock();
+                    locked.conn.peer_certificates().map(|c| c.iter().map(|cert| cert.to_vec()).collect())
+                }
+                RustlsStream::Client(s) => {
+                    let locked = s.lock();
+                    locked.conn.peer_certificates().map(|c| c.iter().map(|cert| cert.to_vec()).collect())
+                }
+            }
+        }
+    }
+
+    impl TlsProvider for DefaultTlsProvider {
+        fn server_config(&self) -> io::Result<Box<dyn ServerTlsConfig>> {
+            // This is a placeholder; actual TLS config is built from TlsConfig
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Use TlsConfig::server_config() directly",
+            ))
+        }
+
+        fn client_config(&self) -> io::Result<Box<dyn ClientTlsConfig>> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Use TlsConfig::client_config() directly",
+            ))
+        }
+
+        fn wrap_server_stream(
+            &self,
+            stream: TcpStream,
+            config: Box<dyn ServerTlsConfig>,
+        ) -> io::Result<Box<dyn TlsStream>> {
+            let any_config = config as Box<dyn std::any::Any>;
+            let rustls_config = any_config
+                .downcast::<RustlsServerConfig>()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Expected RustlsServerConfig"))?;
+            let conn = rustls::ServerConnection::new(Arc::clone(&rustls_config.config))
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            Ok(Box::new(RustlsStream::Server(Arc::new(Mutex::new(
+                rustls::StreamOwned::new(conn, stream),
+            )))))
+        }
+
+        fn wrap_client_stream(
+            &self,
+            stream: TcpStream,
+            config: Box<dyn ClientTlsConfig>,
+        ) -> io::Result<Box<dyn TlsStream>> {
+            let any_config = config as Box<dyn std::any::Any>;
+            let rustls_config = any_config
+                .downcast::<RustlsClientConfig>()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Expected RustlsClientConfig"))?;
+            let conn = rustls::ClientConnection::new(Arc::clone(&rustls_config.config), rustls::pki_types::ServerName::try_from("localhost").unwrap())
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            Ok(Box::new(RustlsStream::Client(Arc::new(Mutex::new(
+                rustls::StreamOwned::new(conn, stream),
+            )))))
+        }
+    }
+}

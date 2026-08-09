@@ -471,6 +471,10 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             return rt.perform_python_builtin(op_name, constants, regs);
         }
+        if effect_name == "CRDT" {
+            let mut rt = self.runtime.borrow_mut();
+            return rt.perform_crdt_builtin(op_name, constants, regs);
+        }
         self.perform_effect(effect_name, regs)
     }
 

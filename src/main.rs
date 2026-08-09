@@ -241,6 +241,11 @@ fn main() {
             }
             "--version" | "-V" => {
                 println!("nulang {}", VERSION);
+                println!("language {}", nulang::format::constants::LANGUAGE_VERSION_STR);
+                return;
+            }
+            "--language-version" => {
+                println!("{}", nulang::format::constants::LANGUAGE_VERSION_STR);
                 return;
             }
             "--lsp" => opts.lsp = true,
@@ -267,6 +272,16 @@ fn main() {
                     i += 1;
                 } else {
                     eprintln!("Error: --out requires a file path argument");
+                    std::process::exit(1);
+                }
+            }
+            "--ffi-sandbox" => opts.ffi_sandbox = true,
+            "--ffi-allow" => {
+                if i + 1 < args.len() {
+                    opts.ffi_allow.push(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --ffi-allow requires a library name or path argument");
                     std::process::exit(1);
                 }
             }
@@ -424,6 +439,17 @@ fn main() {
 
     // Resolve color mode once after all args are parsed.
     let use_color = color_enabled(&opts);
+
+    // Apply FFI policy
+    if opts.ffi_sandbox {
+        use std::collections::HashSet;
+        use nulang::ffi::native::FfiPolicy;
+        
+        let allowed = opts.ffi_allow.clone().into_iter().collect::<HashSet<_>>();
+        let mut reg = nulang::ffi::native::FFI_REGISTRY.get_or_init(|| std::sync::Mutex::new(nulang::ffi::native::FfiRegistry::new())).lock().unwrap();
+        reg.set_policy(FfiPolicy::Allowlist(allowed));
+    }
+
 
     if opts.doc {
         let root = match std::env::current_dir() {
@@ -730,6 +756,8 @@ struct Options {
     bench_count: Option<usize>,
     /// Start a Prometheus-format metrics server on this port.
     metrics_port: Option<u16>,
+    ffi_sandbox: bool,
+    ffi_allow: Vec<String>,
     profile: Option<String>,
 }
 
@@ -754,6 +782,8 @@ impl Default for Options {
             all_errors: false,
             bench_count: None,
             metrics_port: None,
+            ffi_sandbox: false,
+            ffi_allow: Vec::new(),
             profile: None,
         }
     }

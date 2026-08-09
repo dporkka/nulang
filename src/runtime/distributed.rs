@@ -48,8 +48,23 @@ use super::network::{NetworkTransport, Packet};
 use super::{ClusterState, NodeId, NodeStatus};
 use crate::runtime::Runtime;
 use crate::vm::Value;
-
 use tracing::warn;
+
+// Message wrapper for distributed communication
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistributedMessage(pub Message);
+
+impl From<Message> for DistributedMessage {
+    fn from(msg: Message) -> Self {
+        DistributedMessage(msg)
+    }
+}
+
+impl From<DistributedMessage> for Message {
+    fn from(dm: DistributedMessage) -> Self {
+        dm.0
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Constants

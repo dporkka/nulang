@@ -4,7 +4,7 @@
 //! resolved symbols. Symbols are keyed by `(library_name, symbol_name)` so the
 //! same name can be provided by different libraries.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
@@ -97,11 +97,20 @@ impl NativeFunction {
     }
 }
 
+
+#[derive(Debug, Default, Clone)]
+pub enum FfiPolicy {
+    #[default]
+    AllowAll,
+    Allowlist(HashSet<String>),
+}
+
 /// Internal registry backing the global `FFI_REGISTRY`.
 #[derive(Debug, Default)]
 pub struct FfiRegistry {
     functions: HashMap<(Option<String>, String), NativeFunction>,
     libraries: HashMap<String, NativeLibrary>,
+    policy: FfiPolicy,
 }
 
 impl FfiRegistry {
@@ -109,24 +118,33 @@ impl FfiRegistry {
         Self::default()
     }
 
+    pub fn set_policy(&mut self, policy: FfiPolicy) {
+        self.policy = policy;
+    }
+
+    pub fn is_lib_allowed(&self, path: &str) -> bool {
+        match &self.policy {
+            FfiPolicy::AllowAll => true,
+            FfiPolicy::Allowlist(allowed) => allowed.contains(path),
+        }
+    }
+
+
     /// Load a dynamic library and keep it open for symbol resolution.
     ///
     /// # Safety
     /// The caller must ensure `path` points to a valid shared library.
     pub unsafe fn load_library(&mut self, path: &str) -> Result<NativeLibrary, String> {
+        if !self.is_lib_allowed(path) {
+            return Err(format!("FFI: library '{}' not in allowlist", path));
+        }
         if let Some(_lib) = self.libraries.get(path) {
             // Library is already open; return a reference-equivalent description.
-            // Note: `libloading::Library` is not `Clone`, so we return a fresh
-            // open handle. On most platforms this is a cheap re-open.
             return unsafe { NativeLibrary::open(path) };
         }
-        let lib = unsafe { NativeLibrary::open(path) }?;
-        let stored = NativeLibrary {
-            inner: unsafe { libloading::Library::new(path).map_err(|e| e.to_string())? },
-            name: path.to_string(),
-        };
+        let stored = unsafe { NativeLibrary::open(path)? };
         self.libraries.insert(path.to_string(), stored);
-        Ok(lib)
+        unsafe { NativeLibrary::open(path) }
     }
 
     /// Resolve a registered native function.
@@ -200,6 +218,30 @@ pub unsafe fn register_native_function(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_ffi_allowlist() {
+        let mut reg = FfiRegistry::new();
+        // By default, AllowAll permits any load. We'll use a nonexistent lib to prove
+        // it tries to load it (which fails) rather than rejecting by policy.
+        let nonexistent = "libnonexistent_does_not_exist.so";
+        
+        let err = unsafe { reg.load_library(nonexistent) }.unwrap_err();
+        assert!(!err.contains("not in allowlist"), "Should not be blocked by policy");
+
+        // Now set a strict allowlist
+        let mut allowed = HashSet::new();
+        allowed.insert("liballowed.so".to_string());
+        reg.set_policy(FfiPolicy::Allowlist(allowed));
+
+        // Unallowed library fails by policy
+        let err_denied = unsafe { reg.load_library(nonexistent) }.unwrap_err();
+        assert_eq!(err_denied, format!("FFI: library '{}' not in allowlist", nonexistent));
+
+        // Allowed library fails at load time (since it doesn't exist), not by policy
+        let err_allowed = unsafe { reg.load_library("liballowed.so") }.unwrap_err();
+        assert!(!err_allowed.contains("not in allowlist"), "Should not be blocked by policy");
+    }
+
     use crate::ffi::marshal::{CType, Signature};
     use std::ffi::c_void;
 

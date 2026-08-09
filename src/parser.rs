@@ -3647,7 +3647,7 @@ impl Parser {
         self.expect(TokenKind::Dot)?;
         // `ask`, `link`, `monitor` and `exit` are reserved keywords, so they
         // lex as keyword tokens rather than identifiers; accept them as
-        // operation names (`perform Actor.link(t)`, `perform LLM.ask(p)`).
+        // operation names (`perform Actor.link(t)`).
         let op = match self.peek_kind() {
             TokenKind::Ask => {
                 self.advance();

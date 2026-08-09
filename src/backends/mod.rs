@@ -221,15 +221,106 @@ impl HttpProvider for ReqwestHttpProvider {
 // ---------------------------------------------------------------------------
 
 /// A transport backend provides point-to-point packet delivery between
-/// cluster nodes. The default implementation uses TCP
-/// (`src/runtime/network.rs`). A future runtime could implement this with
-/// QUIC, UDP, or whatever transport exists in 2125.
-///
-/// This trait mirrors the existing [`crate::runtime::NetworkTransport`] trait
-/// — network transport was already behind a trait. This re-export makes the
-/// boundary discoverable from one place.
-pub trait Transport: crate::runtime::NetworkTransport {}
-impl<T: crate::runtime::NetworkTransport> Transport for T {}
+// cluster nodes. The default implementation uses TCP
+// (`src/runtime/network.rs`). A future runtime could implement this with
+// QUIC, UDP, or whatever transport exists in 2125.
+//
+// This trait mirrors the existing [`crate::runtime::NetworkTransport`] trait
+// — network transport was already behind a trait. This re-export makes the
+// boundary discoverable from one place.
+pub trait Transport: Send {
+    fn connect(&mut self, node_id: crate::runtime::NodeId, addr: std::net::SocketAddr) -> std::io::Result<()>;
+    fn send(&mut self, to_node: crate::runtime::NodeId, to_addr: std::net::SocketAddr, packet: crate::runtime::Packet);
+    fn receive(&self) -> Vec<crate::runtime::IncomingPacket>;
+    fn node_id(&self) -> crate::runtime::NodeId;
+    fn listen_addr(&self) -> std::net::SocketAddr;
+    fn disconnect(&mut self, node_id: crate::runtime::NodeId);
+    fn shutdown(&mut self);
+    fn connection_count(&self) -> usize;
+    fn connection_addr(&self, node_id: crate::runtime::NodeId) -> Option<std::net::SocketAddr>;
+}
+
+impl<T: crate::runtime::NetworkTransport> Transport for T {
+    fn connect(&mut self, node_id: crate::runtime::NodeId, addr: std::net::SocketAddr) -> std::io::Result<()> {
+        crate::runtime::NetworkTransport::connect(self, node_id, addr)
+    }
+    fn send(&mut self, to_node: crate::runtime::NodeId, to_addr: std::net::SocketAddr, packet: crate::runtime::Packet) {
+        crate::runtime::NetworkTransport::send(self, to_node, to_addr, packet)
+    }
+    fn receive(&self) -> Vec<crate::runtime::IncomingPacket> {
+        crate::runtime::NetworkTransport::receive(self)
+    }
+    fn node_id(&self) -> crate::runtime::NodeId {
+        crate::runtime::NetworkTransport::node_id(self)
+    }
+    fn listen_addr(&self) -> std::net::SocketAddr {
+        crate::runtime::NetworkTransport::listen_addr(self)
+    }
+    fn disconnect(&mut self, node_id: crate::runtime::NodeId) {
+        crate::runtime::NetworkTransport::disconnect(self, node_id)
+    }
+    fn shutdown(&mut self) {
+        crate::runtime::NetworkTransport::shutdown(self)
+    }
+    fn connection_count(&self) -> usize {
+        crate::runtime::NetworkTransport::connection_count(self)
+    }
+    fn connection_addr(&self, node_id: crate::runtime::NodeId) -> Option<std::net::SocketAddr> {
+        crate::runtime::NetworkTransport::connection_addr(self, node_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TLS provider — the interface for TLS configuration and connection handling
+// ---------------------------------------------------------------------------
+
+/// A TLS provider supplies server/client TLS configuration and stream wrapping.
+/// The default implementation uses `rustls` (`src/runtime/network.rs`).
+/// A future runtime could implement this with a different TLS library
+/// (e.g., OpenSSL, BoringSSL, or a post-quantum TLS implementation).
+pub trait TlsProvider: Send + Sync {
+    /// Build a server TLS configuration for accepting connections.
+    fn server_config(&self) -> std::io::Result<Box<dyn ServerTlsConfig>>;
+
+    /// Build a client TLS configuration for dialing connections.
+    fn client_config(&self) -> std::io::Result<Box<dyn ClientTlsConfig>>;
+
+    /// Wrap a raw TCP stream as a TLS server stream.
+    fn wrap_server_stream(&self, stream: std::net::TcpStream, config: Box<dyn ServerTlsConfig>) -> std::io::Result<Box<dyn TlsStream>>;
+
+    /// Wrap a raw TCP stream as a TLS client stream.
+    fn wrap_client_stream(&self, stream: std::net::TcpStream, config: Box<dyn ClientTlsConfig>) -> std::io::Result<Box<dyn TlsStream>>;
+}
+
+/// Server-side TLS configuration.
+pub trait ServerTlsConfig: Send + Sync + std::any::Any {}
+
+/// Client-side TLS configuration.
+pub trait ClientTlsConfig: Send + Sync + std::any::Any {}
+/// A TLS-wrapped stream.
+pub trait TlsStream: std::io::Read + std::io::Write + Send {
+    /// Get the peer's certificate chain, if any.
+    fn peer_certificates(&self) -> Option<Vec<Vec<u8>>>;
+}
+
+// ---------------------------------------------------------------------------
+// Default TLS provider impl — rustls
+// ---------------------------------------------------------------------------
+
+/// The default TLS provider: rustls with PEM-based certificate handling.
+pub struct DefaultTlsProvider;
+
+impl DefaultTlsProvider {
+    pub fn new() -> Self {
+        DefaultTlsProvider
+    }
+}
+
+impl Default for DefaultTlsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Crypto provider — the interface for cryptographic operations

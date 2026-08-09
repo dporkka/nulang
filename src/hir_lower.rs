@@ -129,8 +129,7 @@ fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
 
 fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
     match decl {
-        Decl::CrdtDecl { name, fields, span } => {
-            // CRDT declarations are lowered to a Constant with empty body
+        Decl::CrdtDecl { name, fields: _, span } => {
             // In a full implementation, this would create a CRDT actor
             hir::Decl::Constant {
                 name: name.clone(),

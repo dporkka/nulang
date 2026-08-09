@@ -1,5 +1,10 @@
 package nulang:runtime;
 world actor {
+    import host: interface {
+        log: func(msg: string);
+        clock-now: func() -> u64;
+        random-u64: func() -> u64;
+    }
     export init: func() -> s64;
     export handle-message: func(msg: list<u8>) -> s64;
     export checkpoint: func() -> list<u8>;

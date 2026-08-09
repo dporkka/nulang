@@ -1206,7 +1206,7 @@ impl<'c> FnLowerer<'c> {
                 effect, op, args, ..
             } => {
                 // Mirror the stable compiler's special cases.
-                if (effect == "LLM" || effect == "Inference") && op == "ask" {
+                if effect == "Inference" && op == "ask" {
                     let prompt = match args.first() {
                         Some(a) => self.lower_operand(a)?,
                         None => self.unit_temp(),

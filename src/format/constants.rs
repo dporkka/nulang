@@ -48,6 +48,8 @@ pub const VALUE_LAYOUT_VERSION: u32 = 1;
 /// but the language version moves only on RFC-ratified change. See
 /// `CHANGELOG.md` and `GOVERNANCE.md`.
 pub const LANGUAGE_VERSION: u32 = 1;
+/// String form of [`LANGUAGE_VERSION`] for telemetry and CLI output.
+pub const LANGUAGE_VERSION_STR: &str = "1.0.0-frozen";
 
 /// Length of a `.nbc` file header in bytes (magic + format_version +
 /// language_version + source_hash + instr_count).
@@ -116,6 +118,11 @@ impl std::error::Error for FormatError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_language_version_str() {
+        assert!(LANGUAGE_VERSION_STR.starts_with(&LANGUAGE_VERSION.to_string()), "String version should match numeric");
+    }
+
 
     #[test]
     fn test_magic_bytes_are_ascii() {

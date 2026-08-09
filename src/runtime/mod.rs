@@ -30,9 +30,9 @@ mod agent;
 #[cfg(feature = "ai-runtime")]
 mod ai_impls;
 mod callbacks;
-mod crdt;
-mod crdt_manager;
-mod crdt_reg;
+pub mod crdt;
+pub mod crdt_manager;
+pub mod crdt_reg;
 mod distribution;
 mod exit;
 mod http_server;
@@ -65,6 +65,7 @@ pub use heap::*;
 use http_server::HttpServerState;
 pub use mailbox::*;
 pub use network::*;
+pub use network::NetworkTransport;
 pub use orca_cycle::*;
 pub use persistence::*;
 pub use process_groups::*;
@@ -75,6 +76,7 @@ pub use timer::*;
 
 use crate::types::{ExitReason, VmSuspension};
 use crate::vm::Value;
+
 #[cfg(feature = "ai-runtime")]
 use nulang_ai::{
     AiRuntimeRegistry, LlmClient, LlmError, LlmMessage, LlmRequest, LlmResponse,
@@ -184,7 +186,7 @@ fn actor_exit_reason(value: Option<&Value>, constants: &[crate::bytecode::Consta
 ///
 /// Each shard owns a disjoint subset of actors (by `actor_id % shard_count`).
 /// Cross-shard messages carry only value-type payloads (ints, strings, bools,
-/// unit, nil) — heap pointers are stripped before sending, matching the
+/// unit, nil) - heap pointers are stripped before sending, matching the
 /// network wire-protocol restriction. This keeps ORCA reference counting
 /// local to each shard.
 #[derive(Debug)]
@@ -293,7 +295,7 @@ pub struct Runtime {
     /// non-blocking suspension on `perform LLM.ask` and on `receive ...
     /// after ms =>` timed waits. Nested synchronous entry points
     /// (`ask_actor_sync`: pipelines, supervisors, debates) force it back
-    /// to false so they keep blocking behavior. Not LLM-specific — lives
+    /// to false so they keep blocking behavior. Not LLM-specific - lives
     /// on `Runtime` directly (not `LlmState`) because core receive-wait
     /// suspension depends on it regardless of the `ai-runtime` feature.
     pub(crate) suspend_enabled: bool,
@@ -324,11 +326,11 @@ pub struct Runtime {
     /// arrives and the module is cached.
     pub(crate) pending_fetched_messages:
         HashMap<[u8; 32], Vec<(u64, String, Message, Vec<String>)>>,
-    // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
+    // Pipelines and debates (v0.9 AI Runtime) - extracted into a registry so
     // the god-object shrinks and the subsystems can evolve independently.
     #[cfg(feature = "ai-runtime")]
     pub ai: AiRuntimeRegistry,
-    // Supervisor teams (v0.9 AI Runtime) — extracted into a registry so the
+    // Supervisor teams (v0.9 AI Runtime) - extracted into a registry so the
     // god-object shrinks and the subsystem can evolve independently.
     #[cfg(feature = "ai-runtime")]
     pub supervisor_teams: SupervisorTeamRegistry,
@@ -346,7 +348,7 @@ pub struct Runtime {
     /// (empty run queue, no inflight LLM calls, no pending timers).
     /// The embedder (e.g. NLC guest agent) wires this to host signaling.
     pub idle_callback: Option<Box<dyn FnMut()>>,
-    // Test effect handlers — installed via `install_test_handler` to
+    // Test effect handlers - installed via `install_test_handler` to
     // intercept `perform Effect.op` calls in tests.  Key is the qualified
     // name (e.g. "IO.print", "DB.write").  A handler returns `Some(value)`
     // to mock the effect or `None` to fall through to real dispatch.
@@ -362,12 +364,16 @@ pub struct Runtime {
     #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
     pub http: Box<dyn crate::backends::HttpProvider>,
 
+    /// TLS provider for network encryption.
+    /// Defaults to [`crate::backends::DefaultTlsProvider`] when TLS feature is enabled.
+    #[cfg(feature = "tls")]
+    pub tls_provider: Box<dyn crate::backends::TlsProvider>,
     // -- Multi-threaded scheduler sharding --
     /// This shard's index (0-based). Always 0 for a single-shard runtime.
     pub shard_idx: u16,
     /// Total number of shards. Always 1 for a single-shard runtime.
     pub shard_count: u16,
-    /// Channels to send messages to every shard (including self — unused).
+    /// Channels to send messages to every shard (including self - unused).
     /// `None` when `shard_count == 1` (single-shard, no cross-shard routing).
     cross_shard_tx: Option<Vec<mpsc::SyncSender<CrossShardMsg>>>,
     /// Channel to receive messages for this shard.
@@ -462,6 +468,8 @@ impl Runtime {
             spawnable_behaviors: HashMap::new(),
             #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
             http: Box::new(crate::backends::ReqwestHttpProvider::new()),
+            #[cfg(feature = "tls")]
+            tls_provider: Box::new(crate::backends::DefaultTlsProvider::new()),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
             http_server: None,
@@ -497,7 +505,7 @@ impl Runtime {
         self.http.get(url)
     }
 
-    /// Create a shard Runtime. Private — use [`Runtime::new_sharded`] to
+    /// Create a shard Runtime. Private - use [`Runtime::new_sharded`] to
     /// create a set of N shards with cross-shard channels wired.
     fn new_shard(
         shard_idx: u16,
@@ -1155,7 +1163,7 @@ impl Runtime {
     /// Mark the end of a call into the shared runtime VM. When the
     /// outermost call returns, drain the deferred receive-wait wakes: a
     /// resumed behavior can itself send and re-queue a wake, so loop until
-    /// the backlog is empty. The drain flag keeps this iterative — a
+    /// the backlog is empty. The drain flag keeps this iterative - a
     /// nested `vm_exec_end` (from a resume issued by the drain) returns
     /// without draining again.
     fn vm_exec_end(&mut self) {
@@ -1201,7 +1209,7 @@ impl Runtime {
             // Re-install callbacks bound to THIS actor: other actors may have
             // run on the shared VM while this one was suspended, and a resumed
             // `LLM.ask` must record its in-flight call (and later completion)
-            // on this actor — same as resume_suspended_llm_step.
+            // on this actor - same as resume_suspended_llm_step.
             vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
                 runtime: self_ptr,
             }));
@@ -1244,17 +1252,17 @@ impl Runtime {
                 }
             }
             Err(crate::types::NuError::Suspended(_)) => {
-                // Suspended again — waiting for another signal OR on a
+                // Suspended again - waiting for another signal OR on a
                 // background LLM call (`perform LLM.ask` after the wait).
                 // Re-capture the VM state so the next matching signal or the
                 // pumped LLM completion can resume the step.  The marker is
                 // the awaited signal's name for a signal wait, or the
                 // reserved LLM marker (via suspension_marker) for an LLM
                 // suspend, whose completion flows through
-                // resume_suspended_llm_step — that path performs the workflow
+                // resume_suspended_llm_step - that path performs the workflow
                 // completion bookkeeping.  BytecodeRuntimeCallbacks::
                 // suspend_for_signal is a no-op, so the capture must happen
-                // here — same as in run_bytecode_at_offset and
+                // here - same as in run_bytecode_at_offset and
                 // resume_suspended_llm_step.
                 let recaptured = match self.vm.as_mut() {
                     Some(vm) => vm.take_suspended_state().map(|vm_state| {
@@ -1637,14 +1645,14 @@ impl Runtime {
             return;
         }
         // Cross-shard routing: if the target actor lives on another shard,
-        // validate the payload (no heap pointers — ORCA is per-shard) and
+        // validate the payload (no heap pointers - ORCA is per-shard) and
         // send via the cross-shard channel. The receiving shard delivers it
         // through `deliver_cross_shard_message`.
         if self.shard_count > 1 {
             let target_shard = (target_id % self.shard_count as u64) as u16;
             if target_shard != self.shard_idx {
                 // Reject payloads that carry heap pointers, actor refs, or
-                // closures — same restriction as the NUL0 wire protocol.
+                // closures - same restriction as the NUL0 wire protocol.
                 for arg in args {
                     if arg.is_ptr() || arg.is_actor_ref() || arg.is_closure() {
                         tracing::warn!(
@@ -1712,7 +1720,7 @@ impl Runtime {
                     // SAFETY: TAG_PTR values carry ActorHeap payload pointers
                     // with a uniform OrcaHeader layout; the sender holds a
                     // counted reference (a local ref or a receiver hold), so
-                    // the heap is live — or retired — and the header valid.
+                    // the heap is live - or retired - and the header valid.
                     let source_header = unsafe { crate::runtime::heap::ActorHeap::header_of(ptr) };
                     let owner_id = unsafe { (*source_header).actor_id };
 
@@ -1875,7 +1883,7 @@ impl Runtime {
         total
     }
     /// Return the DLQ actor id, creating the DLQ actor if needed.
-    /// The DLQ actor is intentionally never scheduled — messages accumulate
+    /// The DLQ actor is intentionally never scheduled - messages accumulate
     /// in its mailbox for inspection via `dlq_depth()`.
     pub fn ensure_dlq_actor(&mut self) -> u64 {
         if let Some(id) = self.dlq_actor_id {
@@ -1967,7 +1975,7 @@ impl Runtime {
                     // still in flight or timers are pending: block briefly
                     // for the next completion or timer deadline so
                     // run_scheduler keeps its "run until quiescent"
-                    // semantics — an actor whose last turn armed a timer
+                    // semantics - an actor whose last turn armed a timer
                     // must still receive the fired message.
                     let wait = match self.timer_wheel.next_deadline() {
                         Some(deadline) => deadline
@@ -1999,7 +2007,7 @@ impl Runtime {
             // Micro-batch: continue processing the same actor for a few more
             // messages to maximize L1 instruction-cache retention.  The
             // per-turn reduction budget (checked by should_yield) acts as
-            // the safety limit — a hot actor that exhausts its budget will
+            // the safety limit - a hot actor that exhausts its budget will
             // be requeued behind other actors.
             const BATCH_SIZE: usize = 16;
             for _ in 1..BATCH_SIZE {
@@ -2145,7 +2153,7 @@ impl Runtime {
     /// payload that `receiver_id` has just popped from its mailbox.
     ///
     /// Each hold increments the owning object's `foreign_count`, so the
-    /// object survives until the receiver exits — even if the sender drops
+    /// object survives until the receiver exits - even if the sender drops
     /// its local references or exits first.  Holds are recorded on the
     /// receiver's `OrcaGc` and released by [`release_held_foreign_refs`].
     fn hold_payload_refs(&mut self, receiver_id: u64, payload: &[Value]) {
@@ -2157,7 +2165,7 @@ impl Runtime {
             // SAFETY: TAG_PTR values carry ActorHeap payload pointers with a
             // uniform OrcaHeader layout.  The pointer is valid because the
             // in-flight send bump (or the sender's local ref) keeps the
-            // owning heap live — heaps with outstanding foreign refs are
+            // owning heap live - heaps with outstanding foreign refs are
             // retired, never freed.
             let header = unsafe { crate::runtime::heap::ActorHeap::header_of(ptr) };
             let owner_id = unsafe { (*header).actor_id };
@@ -2627,7 +2635,7 @@ impl Runtime {
                 actor.reset_reductions();
                 false
             } else if actor.should_yield() {
-                // Reduction budget exhausted with mail pending: yield —
+                // Reduction budget exhausted with mail pending: yield -
                 // reset the counter and requeue at the back of the
                 // scheduler queue so other actors get a turn first.
                 actor.reset_reductions();
@@ -3068,7 +3076,7 @@ impl Runtime {
     /// This does a full VM resume (not just a flag + enqueue) so that
     /// Timer.sleep works without the AI runtime feature.  Previously it only
     /// set a flag and relied on `poll_llm_completions` (ai-runtime only) to
-    /// resume — the single-arg form permanently hung without that feature.
+    /// resume - the single-arg form permanently hung without that feature.
     fn fire_timer_sleep_wake(&mut self, actor_id: u64) {
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.timer_sleep_fired = true;
@@ -3081,7 +3089,7 @@ impl Runtime {
             None => return,
         };
         let Some(suspended) = suspended else {
-            // Not currently suspended — nothing to resume.
+            // Not currently suspended - nothing to resume.
             return;
         };
         if self.vm.is_none() {
@@ -3119,7 +3127,7 @@ impl Runtime {
                     }
                 }
                 Err(e) => {
-                    // VM error during resume — log and clean up.
+                    // VM error during resume - log and clean up.
                     tracing::warn!("Timer.sleep resume error for actor {}: {:?}", actor_id, e);
                     if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
                         actor.suspended_execution = None;
@@ -3249,7 +3257,7 @@ impl Runtime {
         }
         // The suspension resolved (completed or failed): if messages queued
         // up while the behavior was suspended, schedule the actor to drain
-        // them — step_actor leaves mail untouched while a suspension is live.
+        // them - step_actor leaves mail untouched while a suspension is live.
         self.requeue_if_mail_pending(actor_id);
     }
 
@@ -3307,7 +3315,7 @@ impl Runtime {
     /// `LLM_SUSPEND_MARKER` sentinel for LLM suspends) to decide that the
     /// in-flight step must be re-driven; the state it re-runs from is the
     /// last pre-step checkpoint.  A no-op when the actor has no snapshot
-    /// yet — without one there is nothing to recover anyway.
+    /// yet - without one there is nothing to recover anyway.
     fn persist_suspension_marker(&mut self, actor_id: u64) {
         let waiting_signal = match self.actors.get(&actor_id) {
             Some(actor) if actor.persistent => actor.waiting_signal.clone(),
@@ -3850,13 +3858,13 @@ impl Runtime {
         Some(actor_id)
     }
 
-    /// Build an actor from a snapshot and bytecode module — the common core
+    /// Build an actor from a snapshot and bytecode module - the common core
     /// shared by [`recover_actor`](Runtime::recover_actor) and
     /// [`receive_migrated_actor`](Runtime::receive_migrated_actor).
     ///
     /// Restores persistent flags, state models, durable fields, and default
     /// values.  Does NOT register the recovery module, restore CRDT state,
-    /// insert into `self.actors`, or enqueue — callers do those.
+    /// insert into `self.actors`, or enqueue - callers do those.
     fn restore_actor_from_snapshot(
         actor_id: u64,
         module: &crate::bytecode::CodeModule,
@@ -4165,7 +4173,7 @@ impl Runtime {
     /// Shared by `handle_actor_exit` and by supervisor mass-removal paths
     /// (`restart_all`/`restart_from`/`shutdown_supervisor`), which remove
     /// LIVING children and therefore must not bypass the protocol.  Does not
-    /// dispatch to the actor's supervisor — supervision is handled by the
+    /// dispatch to the actor's supervisor - supervision is handled by the
     /// callers, which is why this is not simply `handle_actor_exit`.
     fn reap_living_actor(&mut self, actor_id: u64, reason: ExitReason) {
         exit::reap_living_actor(self, actor_id, reason)
@@ -4412,9 +4420,90 @@ impl Runtime {
     }
 
     /// Resolve an actor type by name to the `(module, behavior_idx)` pair
+
+    /// Dispatch a built-in `CRDT.*` effect performed from bytecode.
+    /// Returns `None` for unknown op names so the caller can fall through
+    /// to other built-in handlers.
+    fn perform_crdt_builtin(
+        &mut self,
+        op_name: Option<&str>,
+        constants: &[crate::bytecode::Constant],
+        regs: &[Value],
+    ) -> Option<Value> {
+        let string_arg = |idx: usize| -> Option<String> {
+            let id = regs.get(idx)?.as_string_id()?;
+            match constants.get(id as usize) {
+                Some(crate::bytecode::Constant::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        };
+        let int_arg = |idx: usize| -> Option<i64> {
+            regs.get(idx)?.as_int()
+        };
+        let actor_id = self.current_actor?;
+        let _actor = self.actors.get_mut(&actor_id)?;
+        let Some(manager) = &mut self.crdt_manager else {
+            return Some(Value::nil());
+        };
+        match op_name {
+            Some("merge") => {
+                let target_actor = int_arg(0)? as u64;
+                let field_name = string_arg(1)?;
+                let other_crdt_id = int_arg(2)? as u64;
+                let source_id = manager.get_field_id(target_actor, &field_name)?;
+                let other_id = CrdtId(other_crdt_id);
+                let other_payload = manager.entries.get(&other_id).map(|e| e.payload_bytes().to_vec());
+                if let Some(other_payload) = other_payload {
+                    if let Some(entry) = manager.entries.get_mut(&source_id) {
+                        if merge_payload(entry, &other_payload) {
+                            Some(Value::unit())
+                        } else {
+                            Some(Value::nil())
+                        }
+                    } else {
+                        Some(Value::nil())
+                    }
+                } else {
+                    Some(Value::nil())
+                }
+            }
+            Some("read") => {
+                // CRDT.read(actor_id, field_name)
+                let target_actor = int_arg(0)? as u64;
+                let field_name = string_arg(0)?;
+                if let Some(id) = manager.get_field_id(target_actor, &field_name) {
+                    if let Some(entry) = manager.entries.get(&id) {
+                        Some(Value::int(entry.payload_bytes().len() as i64)) // placeholder
+                    } else {
+                        Some(Value::nil())
+                    }
+                } else {
+                    Some(Value::nil())
+                }
+            }
+            Some("write") => {
+                // CRDT.write(actor_id, field_name, value)
+                let target_actor = int_arg(0)? as u64;
+                let field_name = string_arg(0)?;
+                let _value = regs.get(2)?;
+                if let Some(id) = manager.get_field_id(target_actor, &field_name) {
+                    if let Some(_entry) = manager.entries.get_mut(&id) {
+                        Some(Value::unit())
+                    } else {
+                        Some(Value::nil())
+                    }
+                } else {
+                    Some(Value::nil())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve an actor type by name to the `(module, behavior_idx)` pair
     /// `spawn_from_module` expects. Searches the performing module first,
     /// then the runtime VM's loaded modules, then the recovery modules
-    /// registered by previous spawns — so a type declared anywhere in the
+    /// registered by previous spawns - so a type declared anywhere in the
     /// running program resolves even before its first spawn.
     fn find_actor_template(
         &self,
@@ -4552,7 +4641,7 @@ impl Runtime {
     /// process groups are cleaned up and monitors/links are notified.
     ///
     /// The `supervisor` value is passed in because callers remove it from
-    /// `self.supervisors` before deciding to shut it down — looking it up in
+    /// `self.supervisors` before deciding to shut it down - looking it up in
     ///
     // -- Distributed Actor System --
 
@@ -4632,6 +4721,11 @@ impl Runtime {
             let snap = self.metrics_snapshot();
             server.publish(snap.to_prometheus_text());
         }
+        #[cfg(feature = "otel")]
+        {
+            let snap = self.metrics_snapshot();
+            crate::observability::publish_otlp_metrics(&snap);
+        }
     }
     pub fn enable_distribution(
         &mut self,
@@ -4649,7 +4743,7 @@ impl Runtime {
     /// node by name (via `Packet::SpawnRequest`).
     ///
     /// This is the MVP scope of remote spawn: only native behaviors
-    /// explicitly registered here can be spawned remotely — a node cannot
+    /// explicitly registered here can be spawned remotely - a node cannot
     /// make a peer run arbitrary code it never offered. When a spawn
     /// request for `name` arrives, the runtime spawns a fresh actor with
     /// the request's initial state and registers this handler as its sole
@@ -4661,7 +4755,7 @@ impl Runtime {
     ///
     /// Returns `None` while the response has not arrived yet; otherwise
     /// `Some(Some(actor_id))` on success (the real actor id on the remote
-    /// node — combine it with the node id into an `ActorAddress::remote`)
+    /// node - combine it with the node id into an `ActorAddress::remote`)
     /// or `Some(None)` if the remote node rejected the request (unknown
     /// behavior name).
     pub fn take_spawn_response(&mut self, request_id: u64) -> Option<Option<u64>> {
@@ -4695,7 +4789,7 @@ impl Runtime {
 
     /// Synchronize CRDT state with all healthy cluster members.
     ///
-    /// Most rounds ship **delta-state** ops (`Packet::CrdtDeltaSync`) —
+    /// Most rounds ship **delta-state** ops (`Packet::CrdtDeltaSync`) -
     /// only the changes since the previous round, with never-synced
     /// entries sent in full (the join fallback). Every
     /// `CRDT_FULL_SYNC_INTERVAL`-th round (starting with the first) ships

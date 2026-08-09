@@ -18,11 +18,11 @@ use wasm_encoder::*;
 // Note: import indices count all imports, but function indices only
 // count function imports. The memory import (index 0) is NOT a function,
 // so function indices start at 0 while import indices start at 1.
-#[allow(dead_code)]
+
 const IMPORT_ALLOC_IDX: u32 = 0; // function index of nulang_alloc
-#[allow(dead_code)]
+
 const IMPORT_DISPATCH_IDX: u32 = 1; // function index of nulang_dispatch
-#[allow(dead_code)]
+
 const IMPORT_LOG_IDX: u32 = 2; // function index of log
 /// Function index of `env.io_print` — used in `Call` instructions.
 const IMPORT_IO_PRINT: u32 = 3;
@@ -32,9 +32,9 @@ const IMPORT_IO_READ: u32 = 4;
 const FUNC_IMPORT_COUNT: u32 = 5;
 
 const TY_VOID_TO_I64: u32 = 0;
-#[allow(dead_code)]
+
 const TY_I64_TO_I64: u32 = 1;
-#[allow(dead_code)]
+
 const TY_I64I64_TO_I64: u32 = 2;
 const TY_I32I32_TO_I64: u32 = 3;
 const TY_FIXED_COUNT: u32 = 4;
@@ -279,15 +279,23 @@ impl WasmBackend {
         let block_order = self.compute_block_order(func);
         let mut labels: HashMap<BlockId, u32> = HashMap::new();
         let mut li: u32 = 0;
+        
+        let vec_loops = crate::mir_wasm_simd::find_vectorizable_loops(func);
+        let vec_body_to_loop: HashMap<BlockId, &crate::mir_wasm_simd::VecLoop> = vec_loops.iter().map(|l| (l.body, l)).collect();
 
         for &bid in &block_order {
             labels.insert(bid, li);
             let block = &func.blocks[bid.0 as usize];
             body.instruction(&Instruction::Block(BlockType::Empty));
 
-            for stmt in &block.stmts {
-                self.compile_stmt(&mut body, stmt, func);
+            if let Some(vloop) = vec_body_to_loop.get(&bid) {
+                self.compile_simd_body(&mut body, vloop, func);
+            } else {
+                for stmt in &block.stmts {
+                    self.compile_stmt(&mut body, stmt, func);
+                }
             }
+            
             self.compile_terminator(&mut body, &block.terminator, &labels, li, func);
             body.instruction(&Instruction::End);
             body.instruction(&Instruction::Unreachable);
@@ -324,6 +332,180 @@ impl WasmBackend {
             i += 1;
         }
         order
+    }
+
+
+    fn compile_simd_body(&self, body: &mut Function, vloop: &crate::mir_wasm_simd::VecLoop, func: &mir::Function) {
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        let i_loc = self.mir_local(&vloop.induction, func);
+        let a_loc = self.mir_local(&vloop.array_a, func);
+        let b_loc = self.mir_local(&vloop.array_b, func);
+        let c_loc = self.mir_local(&vloop.array_c, func);
+
+        // We use Wasm locals 255, 254, 253, 252 for scratch.
+        // It's safe since MIR limits locals, and Wasm allocation is up to 256.
+        let scratch_len = 255;
+        let scratch_base_a = 254;
+        let scratch_base_b = 253;
+        let scratch_base_c = 252;
+
+        // len = ArrayLen(c)
+        body.instruction(&Instruction::LocalGet(c_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        body.instruction(&Instruction::LocalSet(scratch_len)); // untagged i64 len
+
+        // base_a = a & pm
+        body.instruction(&Instruction::LocalGet(a_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::LocalSet(scratch_base_a));
+
+        // base_b = b & pm
+        body.instruction(&Instruction::LocalGet(b_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::LocalSet(scratch_base_b));
+
+        // base_c = c & pm
+        body.instruction(&Instruction::LocalGet(c_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::LocalSet(scratch_base_c));
+
+        // 1. SIMD strided loop (processes 2 elements per iteration)
+        body.instruction(&Instruction::Block(BlockType::Empty)); // block for SIMD exit
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // SIMD loop header
+
+        // check i + 1 < len
+        body.instruction(&Instruction::LocalGet(i_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalGet(scratch_len));
+        body.instruction(&Instruction::I64GeS);
+        body.instruction(&Instruction::BrIf(1)); // exit SIMD loop
+
+        // compute offset for i: (i + 1) * 8
+        let compute_offset = |b: &mut Function| {
+            b.instruction(&Instruction::LocalGet(i_loc));
+            b.instruction(&Instruction::I64Const(pm));
+            b.instruction(&Instruction::I64And);
+            b.instruction(&Instruction::I64Const(1));
+            b.instruction(&Instruction::I64Add);
+            b.instruction(&Instruction::I64Const(8));
+            b.instruction(&Instruction::I64Mul);
+        };
+
+        // c_addr (push first so it's ready for store later)
+        body.instruction(&Instruction::LocalGet(scratch_base_c));
+        compute_offset(body);
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+
+        // a_addr
+        body.instruction(&Instruction::LocalGet(scratch_base_a));
+        compute_offset(body);
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+        self.emit_simd_load(body, 0);
+
+        // b_addr
+        body.instruction(&Instruction::LocalGet(scratch_base_b));
+        compute_offset(body);
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+        self.emit_simd_load(body, 0);
+
+        // binop
+        if vloop.lane_type.is_float() {
+            self.emit_simd_f64x2_binop(body, vloop.op);
+        } else {
+            self.emit_simd_i64x2_binop(body, vloop.op);
+        }
+
+        // store
+        self.emit_simd_store(body, 0);
+
+        // i += 2 (tagged)
+        body.instruction(&Instruction::LocalGet(i_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Const(2));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
+        body.instruction(&Instruction::I64Or);
+        body.instruction(&Instruction::LocalSet(i_loc));
+
+        body.instruction(&Instruction::Br(0)); // loop again
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::End); // end Block
+
+        // 2. Scalar epilogue loop (for remaining elements)
+        body.instruction(&Instruction::Block(BlockType::Empty)); // block for scalar exit
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // scalar loop header
+
+        // check i < len
+        body.instruction(&Instruction::LocalGet(i_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::LocalGet(scratch_len));
+        body.instruction(&Instruction::I64GeS);
+        body.instruction(&Instruction::BrIf(1)); // exit scalar loop
+
+        // compute offset for i: (i + 1) * 8
+        let compute_offset_scalar = |b: &mut Function| {
+            b.instruction(&Instruction::LocalGet(i_loc));
+            b.instruction(&Instruction::I64Const(pm));
+            b.instruction(&Instruction::I64And);
+            b.instruction(&Instruction::I64Const(1));
+            b.instruction(&Instruction::I64Add);
+            b.instruction(&Instruction::I64Const(8));
+            b.instruction(&Instruction::I64Mul);
+        };
+
+        // c_addr
+        body.instruction(&Instruction::LocalGet(scratch_base_c));
+        compute_offset_scalar(body);
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+
+        // a_addr
+        body.instruction(&Instruction::LocalGet(scratch_base_a));
+        compute_offset_scalar(body);
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+
+        // b_addr
+        body.instruction(&Instruction::LocalGet(scratch_base_b));
+        compute_offset_scalar(body);
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+
+        // scalar binop
+        self.emit_binop(body, vloop.op);
+
+        // store scalar
+        body.instruction(&Instruction::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
+
+        // i += 1 (tagged)
+        body.instruction(&Instruction::LocalGet(i_loc));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
+        body.instruction(&Instruction::I64Or);
+        body.instruction(&Instruction::LocalSet(i_loc));
+
+        body.instruction(&Instruction::Br(0)); // loop again
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::End); // end Block
     }
 
     // ── Statement compilation ──────────────────────────────────────
@@ -364,13 +546,9 @@ impl WasmBackend {
                 body.instruction(&Instruction::LocalGet(self.mir_local(l, func)));
             }
             RValue::Binary(op, a, b) => {
-                // Attempt SIMD lowering first; fall through to scalar if
-                // operands are not adjacent array-element loads.
-                if !self.try_compile_simd_binary(body, *op, a, b, func) {
-                    body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
-                    body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
-                    self.emit_binop(body, *op);
-                }
+                body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+                body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
+                self.emit_binop(body, *op);
             }
             RValue::Unary(op, a) => {
                 self.compile_unary(body, *op, a, func);
@@ -665,7 +843,7 @@ impl WasmBackend {
     // compiler to emit untagged array element IR. This module provides
     // the lowering infrastructure that such compiler changes can target.
 
-    #[allow(dead_code)]
+    
     /// Emit raw WASM SIMD opcode bytes. `opcode` is the LEB128-encoded
     /// SIMD opcode (without the 0xFD prefix), followed by optional
     fn emit_simd(&self, body: &mut Function, opcode: u32, immediates: &[u8]) {
@@ -681,7 +859,7 @@ impl WasmBackend {
     }
     /// Emit a SIMD memory load: `v128.load align=4 offset=<offset>`.
     /// Returns the v128 value on the stack.
-    #[allow(dead_code)]
+    
     fn emit_simd_load(&self, body: &mut Function, offset: u32) {
         // v128.load opcode = 0x00; align=4 (natural for v128), offset as LEB128.
         let mut buf = [0u8; 5];
@@ -697,7 +875,7 @@ impl WasmBackend {
 
     /// Emit a SIMD memory store: `v128.store align=4 offset=<offset>`.
     /// Consumes the v128 value from the stack.
-    #[allow(dead_code)]
+    
     fn emit_simd_store(&self, body: &mut Function, offset: u32) {
         let mut buf = [0u8; 5];
         let olen = leb128_u32(offset, &mut buf);
@@ -710,7 +888,7 @@ impl WasmBackend {
     }
 
     /// Emit a SIMD binary operation on i64x2 lanes.
-    #[allow(dead_code)]
+    
     fn emit_simd_i64x2_binop(&self, body: &mut Function, op: crate::ast::BinOp) {
         use crate::ast::BinOp;
         let simd_op: u32 = match op {
@@ -723,7 +901,7 @@ impl WasmBackend {
     }
 
     /// Emit a SIMD binary operation on f64x2 lanes.
-    #[allow(dead_code)]
+    
     fn emit_simd_f64x2_binop(&self, body: &mut Function, op: crate::ast::BinOp) {
         use crate::ast::BinOp;
         let simd_op: u32 = match op {
@@ -792,6 +970,8 @@ impl WasmBackend {
         idx: &LocalId,
         func: &mir::Function,
     ) {
+        // Bounds: no bounds check. We rely on the guard-page trap model
+        // (OOB access SIGSEGVs into a Wasmtime trap).
         let pm = value_layout::PAYLOAD_MASK as i64;
         // base = arr & PAYLOAD_MASK
         body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
@@ -852,6 +1032,8 @@ impl WasmBackend {
         src: &LocalId,
         func: &mir::Function,
     ) {
+        // Bounds: no bounds check. We rely on the guard-page trap model
+        // (OOB access SIGSEGVs into a Wasmtime trap).
         let pm = value_layout::PAYLOAD_MASK as i64;
         // base = arr & PAYLOAD_MASK
         body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
@@ -888,33 +1070,11 @@ impl WasmBackend {
     /// replaces the scalar pair with `v128.load` + vector op + `v128.store`.
     ///
     /// Returns `true` if any SIMD lowering was applied.
-    #[allow(dead_code)]
-    fn try_simd_lower_function(&mut self, func: &mir::Function) -> bool {
-        // This is a framework hook. Full SIMD vectorization requires:
-        // 1. Compiler emits MIR annotations marking vectorizable loops
-        // 2. Or a loop-analysis pass identifies element-wise patterns
-        // For now, return false — lowering happens in compile_rvalue.
-        let _ = func;
-        false
-    }
+    
 
     /// Attempt SIMD lowering for a binary operation whose operands are
     /// array-element loads. When both `a` and `b` are adjacent array element
     /// loads (from the same base pointer), emit a vectorized operation.
-    fn try_compile_simd_binary(
-        &self,
-        body: &mut Function,
-        _op: crate::ast::BinOp,
-        _a: &LocalId,
-        _b: &LocalId,
-        _func: &mir::Function,
-    ) -> bool {
-        // Placeholder: when MIR carries array-element annotations, this
-        // will emit v128.load + vector op + v128.store.
-        // For now, scalar path handles all binary ops.
-        let _ = body;
-        false
-    }
 
     // ── Helpers ────────────────────────────────────────────────────
 
@@ -1069,6 +1229,42 @@ mod tests {
         let value = run_source("let a = [5, 6]; perform Array.length(a)").expect("run");
         assert_eq!(value.as_int(), Some(2), "Array.length should be 2");
     }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_simd_even_length() {
+        let code = r#"
+            let a = [10, 20, 30, 40];
+            let b = [1, 2, 3, 4];
+            let c = [0, 0, 0, 0];
+            let mut i = 0;
+            while i < perform Array.length(c) {
+                c[i] = a[i] + b[i];
+                i = i + 1;
+            };
+            c[3]
+        "#;
+        let value = run_source(code).expect("run");
+        assert_eq!(value.as_int(), Some(44), "c[3] should be 40 + 4");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_simd_odd_length() {
+        let code = r#"
+            let a = [10, 20, 30, 40, 50];
+            let b = [1, 2, 3, 4, 5];
+            let c = [0, 0, 0, 0, 0];
+            let mut i = 0;
+            while i < perform Array.length(c) {
+                c[i] = a[i] + b[i];
+                i = i + 1;
+            };
+            c[4]
+        "#;
+        let value = run_source(code).expect("run");
+        assert_eq!(value.as_int(), Some(55), "c[4] should be 50 + 5");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,5 +1284,4 @@ impl crate::backends::WasmBackend for WasmBackend {
     fn run(&mut self, wasm: &[u8]) -> crate::types::NuResult<crate::vm::Value> {
         let mut runtime = crate::wasm_runtime::WasmRuntime::new(wasm, None)?;
         runtime.run()
-    }
-}
+    }}

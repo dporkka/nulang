@@ -399,14 +399,6 @@ impl StdLib {
                     description: "Send the prompt to the configured inference provider and return the reply; suspends non-blockingly when the runtime supports it.",
                 },
                 BuiltinOp {
-                    name: "LLM.ask",
-                    effect: "LLM",
-                    op: "ask",
-                    signature: "ask(prompt: String) -> String",
-                    implemented_in: ImplSite::RuntimeHost,
-                    description: "Deprecated alias for `Inference.ask`. Prefer `Inference.ask` in new code.",
-                },
-                BuiltinOp {
                     name: "Http.get",
                     effect: "Http",
                     op: "get",
@@ -739,9 +731,7 @@ mod tests {
             "FS.read",
             "FS.write",
             "FS.append",
-            "FS.exists",
             "Signal.wait",
-            "LLM.ask",
             "Actor.link",
             "Actor.unlink",
             "Actor.monitor",
@@ -823,14 +813,6 @@ mod tests {
             ImplSite::RuntimeHost
         );
         assert_eq!(
-            lib.lookup("Signal.wait").unwrap().implemented_in,
-            ImplSite::RuntimeHost
-        );
-        assert_eq!(
-            lib.lookup("LLM.ask").unwrap().implemented_in,
-            ImplSite::RuntimeHost
-        );
-        assert_eq!(
             lib.lookup("Actor.link").unwrap().implemented_in,
             ImplSite::RuntimeHost
         );
@@ -866,7 +848,6 @@ mod tests {
                 "Timer",
                 "Signal",
                 "Inference",
-                "LLM",
                 "Http",
                 "Actor",
                 "Otp",

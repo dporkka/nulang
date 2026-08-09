@@ -5254,7 +5254,7 @@ match { a: 2, b: 9 } with {
         assert_int_new(src, 30);
     }
 
-    /// MIR + Runtime + fn main() with LLM.ask.
+    /// MIR + Runtime + fn main() with Inference.ask.
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_fn_main_with_runtime() {
@@ -5262,12 +5262,12 @@ match { a: 2, b: 9 } with {
         rt.borrow_mut()
             .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
         let v =
-            run_source_new_with_runtime("fn main() { perform LLM.ask(\"hello\") }", rt).unwrap();
+            run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt).unwrap();
         assert!(!v.is_nil());
     }
 
     /// MIR + Runtime + fn main() with Inference.ask (canonical name).
-    /// Regression: Inference.ask must work identically to the deprecated LLM.ask.
+    /// Regression: Inference.ask must work identically to the deprecated Inference.ask.
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_fn_main_with_runtime_inference_ask() {
@@ -6435,8 +6435,8 @@ match { a: 2, b: 9 } with {
 
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_llm_ask_mock_client() {
-        let source = r#"perform LLM.ask("hello")"#;
+    fn test_inference_ask_mock_client() {
+        let source = r#"perform Inference.ask("hello")"#;
         let (module, _ty) = compile_source(source).unwrap();
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
@@ -6469,35 +6469,12 @@ match { a: 2, b: 9 } with {
         actor.set_state_field("count", Value::int(n + 1));
     }
 
-    /// `perform Inference.ask` with a mock LLM client must return the response
-    /// identically to the deprecated `perform LLM.ask` (RFC 0010 synonym).
-    #[cfg(feature = "ai-runtime")]
-    #[test]
-    fn test_inference_ask_mock_client() {
-        let source = r#"perform Inference.ask("hello")"#;
-        let (module, _ty) = compile_source(source).unwrap();
-
-        let rt = Rc::new(RefCell::new(Runtime::new()));
-        rt.borrow_mut()
-            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
-
-        let mut vm = VM::new();
-        vm.load_module(module);
-        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
-
-        let result = vm.run().unwrap();
-        let string_id = result.as_string_id().expect("expected string result");
-        let module_idx = vm.modules.len() - 1;
-        let content = vm.constant_string(module_idx, string_id).unwrap();
-        assert_eq!(content, "world");
-    }
-
-    /// A bytecode behavior that performs `LLM.ask` suspends on the scheduler
+    /// A bytecode behavior that performs `Inference.ask` suspends on the scheduler
     /// thread, a background worker completes the HTTP call, and the behavior
     /// resumes with the response written back into the prompt register.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_llm_ask_actor_behavior_suspends_and_resumes() {
+    fn test_inference_ask_actor_behavior_suspends_and_resumes() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let client = nulang_ai::MockLlmClient::text("world");
         rt.borrow_mut().set_llm_client(Box::new(client.clone()));
@@ -6506,7 +6483,7 @@ match { a: 2, b: 9 } with {
             actor LlmActor {
                 state answer = ""
                 behavior go() {
-                    self.answer = perform LLM.ask("hello")
+                    self.answer = perform Inference.ask("hello")
                 }
             }
             let a = spawn LlmActor { answer = "" } in a
@@ -6547,7 +6524,7 @@ match { a: 2, b: 9 } with {
     /// pumped by run_scheduler, never by manual stepping.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_llm_ask_nonblocking_other_actors_run_first() {
+    fn test_inference_ask_nonblocking_other_actors_run_first() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
             .set_llm_client(Box::new(nulang_ai::MockLlmClient::delayed(
@@ -6559,7 +6536,7 @@ match { a: 2, b: 9 } with {
             actor LlmActor {
                 state answer = ""
                 behavior go() {
-                    self.answer = perform LLM.ask("hello")
+                    self.answer = perform Inference.ask("hello")
                 }
             }
             let a = spawn LlmActor { answer = "" } in a
@@ -6640,12 +6617,12 @@ match { a: 2, b: 9 } with {
         );
     }
 
-    /// Two sequential `perform LLM.ask` calls in one behavior: the behavior
+    /// Two sequential `perform Inference.ask` calls in one behavior: the behavior
     /// suspends and resumes twice, re-capturing VM state on the second
     /// suspend, and observes both responses in order.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_llm_ask_chained_suspensions_resume_in_order() {
+    fn test_inference_ask_chained_suspensions_resume_in_order() {
         let text_response = |content: &str| nulang_ai::LlmResponse {
             content: Some(content.to_string()),
             tool_calls: Vec::new(),
@@ -6665,8 +6642,8 @@ match { a: 2, b: 9 } with {
                 state first = ""
                 state second = ""
                 behavior go() {
-                    let _ = self.first = perform LLM.ask("one") in
-                    self.second = perform LLM.ask("two")
+                    let _ = self.first = perform Inference.ask("one") in
+                    self.second = perform Inference.ask("two")
                 }
             }
             let a = spawn Chained { first = ""; second = "" } in a
@@ -6698,7 +6675,7 @@ match { a: 2, b: 9 } with {
     }
 
     /// Two messages sent to one actor whose behavior suspends on
-    /// `LLM.ask`: the second message must wait in the mailbox until the
+    /// `Inference.ask`: the second message must wait in the mailbox until the
     /// first behavior fully resumes.  Previously step_actor ran the second
     /// message over the live suspension; its `LlmAsk` saw the in-flight
     /// flag, returned Pending, and overwrote `suspended_execution`, so the
@@ -6706,7 +6683,7 @@ match { a: 2, b: 9 } with {
     /// response and the first behavior was lost forever.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_llm_ask_queued_messages_wait_for_suspended_behavior() {
+    fn test_inference_ask_queued_messages_wait_for_suspended_behavior() {
         let text_response = |content: &str| nulang_ai::LlmResponse {
             content: Some(content.to_string()),
             tool_calls: Vec::new(),
@@ -6726,10 +6703,10 @@ match { a: 2, b: 9 } with {
                 state first = ""
                 state second = ""
                 behavior one() {
-                    self.first = perform LLM.ask("one")
+                    self.first = perform Inference.ask("one")
                 }
                 behavior two() {
-                    self.second = perform LLM.ask("two")
+                    self.second = perform Inference.ask("two")
                 }
             }
             let a = spawn LlmPair { first = ""; second = "" } in a
@@ -6778,7 +6755,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(calls[1].messages[0].content, "two");
     }
 
-    /// A workflow step that performs `LLM.ask` suspends on the background
+    /// A workflow step that performs `Inference.ask` suspends on the background
     /// call and, once resumed, records the step completion the same way a
     /// signal-resumed step does: step_index advances, a StepCompleted
     /// event is appended, and the actor checkpoints.  Previously
@@ -6786,10 +6763,10 @@ match { a: 2, b: 9 } with {
     /// the step never advanced from the journal's perspective.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_workflow_llm_ask_step_records_completion() {
+    fn test_workflow_inference_ask_step_records_completion() {
         let source = r#"
             workflow LlmFlow {
-                step ask_step { self.answer = perform LLM.ask("hello") }
+                step ask_step { self.answer = perform Inference.ask("hello") }
             }
             let w = spawn LlmFlow {} in { w }
         "#;
@@ -6837,18 +6814,18 @@ match { a: 2, b: 9 } with {
         );
     }
 
-    /// Crash-and-recover for a workflow step suspended on `LLM.ask`: the
+    /// Crash-and-recover for a workflow step suspended on `Inference.ask`: the
     /// persisted suspension marker lets recovery re-drive the interrupted
     /// step, which re-issues the call on the new runtime and completes the
     /// step in the journal.  Previously the snapshot carried no marker
-    /// (waiting_signal is None for LLM suspends), so recover_actor did not
+    /// (waiting_signal is None for Inference.ask suspends), so recover_actor did not
     /// re-trigger the step and it was silently lost on restart.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_workflow_llm_ask_step_redriven_after_restart() {
+    fn test_workflow_inference_ask_step_redriven_after_restart() {
         let source = r#"
             workflow LlmFlowRecover {
-                step ask_step { self.answer = perform LLM.ask("hello") }
+                step ask_step { self.answer = perform Inference.ask("hello") }
             }
             let w = spawn LlmFlowRecover {} in { w }
         "#;
@@ -6953,7 +6930,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(calls[0].messages[0].content, "hello");
     }
 
-    /// A workflow step that waits on a signal AND THEN performs `LLM.ask`
+    /// A workflow step that waits on a signal AND THEN performs `Inference.ask`
     /// must, once the signal arrives and the step resumes, suspend on the
     /// background LLM call instead of running saga compensation.
     /// Previously resume_suspended_workflow_step only matched
@@ -6963,11 +6940,11 @@ match { a: 2, b: 9 } with {
     /// thread instead of suspending.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_workflow_step_signal_wait_then_llm_ask() {
+    fn test_workflow_step_signal_wait_then_inference_ask() {
         let source = r#"
             workflow SignalThenLlm {
                 step wait_then_ask {
-                    (perform Signal.wait("go"), self.answer = perform LLM.ask("hello"))
+                    (perform Signal.wait("go"), self.answer = perform Inference.ask("hello"))
                 }
             }
             let w = spawn SignalThenLlm {} in { w }
@@ -7005,7 +6982,7 @@ match { a: 2, b: 9 } with {
 
         // The signal arrives: the step resumes, consumes it, and suspends
         // again on the background LLM call.  The suspension must be
-        // re-captured with the LLM marker — NOT treated as a step failure.
+        // re-captured with the Inference.ask marker — NOT treated as a step failure.
         rt.borrow_mut().signal_workflow(actor_id, "go", None);
         {
             let rt_ref = rt.borrow();
@@ -7013,7 +6990,7 @@ match { a: 2, b: 9 } with {
             assert_eq!(
                 actor.waiting_signal.as_deref(),
                 Some("__llm_ask_pending__"),
-                "signal-resumed step should re-suspend with the LLM marker"
+                "signal-resumed step should re-suspend with the Inference.ask marker"
             );
             assert!(
                 actor.suspended_execution.is_some(),
@@ -7031,7 +7008,7 @@ match { a: 2, b: 9 } with {
             !events
                 .iter()
                 .any(|e| matches!(e, WorkflowEvent::SagaCompensated { .. })),
-            "an LLM suspend is not a step failure: no saga compensation"
+            "an Inference.ask suspend is not a step failure: no saga compensation"
         );
         assert!(
             !events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "wait_then_ask")),
@@ -7075,18 +7052,18 @@ match { a: 2, b: 9 } with {
         );
     }
 
-    /// Reverse order: a workflow step that performs `LLM.ask` AND THEN waits
+    /// Reverse order: a workflow step that performs `Inference.ask` AND THEN waits
     /// on a signal.  The LLM completion resumes the step through
     /// resume_suspended_llm_step, whose chained-suspend arm re-captures the
     /// signal wait with the signal name as marker; the signal then completes
     /// the step through resume_suspended_workflow_step.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_workflow_step_llm_ask_then_signal_wait() {
+    fn test_workflow_step_inference_ask_then_signal_wait() {
         let source = r#"
             workflow LlmThenSignal {
                 step ask_then_wait {
-                    (self.answer = perform LLM.ask("hello"), perform Signal.wait("go"))
+                    (self.answer = perform Inference.ask("hello"), perform Signal.wait("go"))
                 }
             }
             let w = spawn LlmThenSignal {} in { w }
@@ -8302,7 +8279,7 @@ match { a: 2, b: 9 } with {
         ]);
         rt.borrow_mut().set_llm_client(Box::new(client));
 
-        let source = "fn main() { perform LLM.ask(\"hello\") }";
+        let source = "fn main() { perform Inference.ask(\"hello\") }";
         let result = run_source_new_with_runtime(source, rt);
         match result {
             Ok(_) => { /* agent responded */ }
@@ -8418,16 +8395,16 @@ match { a: 2, b: 9 } with {
     }
 
     // -----------------------------------------------------------------------
-    // Provider effect — the general, non-transient replacement for LLM.ask
+    // Provider effect — the general, non-transient replacement for Inference.ask
     // -----------------------------------------------------------------------
 
     /// `perform Provider.ask("llm", prompt)` must produce the same result as
-    /// `perform LLM.ask(prompt)` when an LLM client is registered. This is
+    /// `perform Inference.ask(prompt)` when an LLM client is registered. This is
     /// the longevity path: the language vocabulary references an eternal
     /// "provider" abstraction, not a transient technology.
     #[cfg(feature = "ai-runtime")]
     #[test]
-    fn test_provider_ask_llm_equivalent_to_llm_ask() {
+    fn test_provider_ask_llm_equivalent_to_inference_ask() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
             .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));

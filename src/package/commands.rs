@@ -412,6 +412,37 @@ fn prepare_package() -> NuResult<PathBuf> {
         span: Span::default(),
     })?;
 
+    if let Some(req) = &manifest.package.language {
+        use crate::format::constants::LANGUAGE_VERSION_STR;
+        
+        let parse_maj_min = |s: &str| -> Option<(u32, u32)> {
+            let s = s.split('-').next().unwrap_or(s);
+            let mut parts = s.split('.');
+            let maj = parts.next()?.parse().ok()?;
+            let min = parts.next()?.parse().ok()?;
+            Some((maj, min))
+        };
+        
+        if let (Some((req_maj, req_min)), Some((tool_maj, tool_min))) = (parse_maj_min(req), parse_maj_min(LANGUAGE_VERSION_STR)) {
+            if req_maj != tool_maj || req_min != tool_min {
+                return Err(NuError::PackageError {
+                    msg: format!("package requires language {} but this toolchain provides {}", req, LANGUAGE_VERSION_STR),
+                    span: Span::default(),
+                });
+            }
+        } else {
+            // fallback exact match if parsing fails
+            let req_base = req.split('-').next().unwrap_or(req);
+            let tool_base = LANGUAGE_VERSION_STR.split('-').next().unwrap_or(LANGUAGE_VERSION_STR);
+            if req_base != tool_base {
+                return Err(NuError::PackageError {
+                    msg: format!("package requires language {} but this toolchain provides {}", req, LANGUAGE_VERSION_STR),
+                    span: Span::default(),
+                });
+            }
+        }
+    }
+
     eprintln!("  Resolving dependencies...");
     let resolution = resolve(&root, &manifest).map_err(|e| NuError::PackageError {
         msg: format!(
@@ -1396,6 +1427,37 @@ fn cmd_remove(name: Option<&str>) -> NuResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_manifest_language_pin() {
+        let _cwd = cwd_guard();
+        let dir = std::env::temp_dir().join(format!("nulang_lang_pin_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        scaffold_package(&dir, "test-pkg", "default").expect("scaffold should succeed");
+
+        // 1. Absent language => ok
+        assert!(prepare_package().is_ok());
+
+        // 2. Matching language => ok (our format is 1.0.0-frozen, so 1.0.0 should match)
+        let mut manifest = Manifest::load(&dir).expect("manifest should load");
+        manifest.package.language = Some("1.0.0".to_string());
+        manifest.save(&dir).unwrap();
+        assert!(prepare_package().is_ok());
+
+        // 3. Mismatching language => fail
+        manifest.package.language = Some("2.0.0".to_string());
+        manifest.save(&dir).unwrap();
+        let err = prepare_package().expect_err("should fail with wrong language version");
+        let msg = err.to_string();
+        assert!(msg.contains("requires language 2.0.0"));
+        assert!(msg.contains("this toolchain provides"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use crate::package::manifest::DEFAULT_ENTRY;
     use std::sync::LazyLock;
     use std::sync::Mutex;
@@ -1754,6 +1816,7 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
+
+}
 
 }
