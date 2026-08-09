@@ -1,95 +1,68 @@
 # Nulang Formal Semantics
 
-> **Status:** `types.lean`'s three headline theorems (`progress`,
-> `preservation`, `type_soundness`) are `sorry`-stubbed as of 2026-08-02 —
-> see the regression note below. `capabilities.lean`'s lattice theorems are
-> genuinely proved. `effects.lean` and `combined.lean` are definition-only.
-> The implementation fuzzer (`src/fuzz.rs`) is the primary correctness
-> mechanism.
-> **Referenced implementation:** `src/typechecker.rs`
+> Machine-checked formal specification of the Nulang type system,
+> capability lattice, and algebraic effects in Lean 4.
+>
+> **Status:** Bootstrap phase — type language, substitution, unification,
+> capability lattice, and effect rows are formalized. Soundness proofs
+> are stated as conjectures pending machine verification.
 
-## Governance
+## Purpose
 
-**`SPEC2.md` (prose + inference rules) is the authoritative language
-specification.** The Lean files in this directory model the Core fragment
-and provide machine-checked proofs of type soundness for that fragment.
-Where `SPEC2.md` and these files disagree on the Core fragment, these
-files win for the Core fragment only. For capabilities, effects, and
-distribution, `SPEC2.md` is authoritative and the Lean files are
-descriptive sketches.
+Per [GOVERNANCE.md §7](../../GOVERNANCE.md#7-authoritative-artifacts), the
+formal model is the authoritative definition of Nulang's semantics. Where
+the formal model and prose specification (`SPEC2.md`) disagree, the formal
+model takes precedence.
 
-## Scope
+## Structure
 
-| File | Coverage | Proof status |
-|------|----------|-------------|
-| `types.lean` | HM type system + Core expression language + call-by-value small-step semantics. `HasType` (13 rules), `Step` (14 rules). | **1/9 proved:** `canonical_forms` only. `weakening`, `substitution_lemma`, `progress`, `preservation`, `type_soundness`, `context_drop_shadowed`, `closed_type_under_closed_context`, `value_has_closed_type` are all `sorry` (regressed by `ac9ef5d`, 2026-07-26 — see below). |
-| `capabilities.lean` | Capability lattice + capability-annotated typing judgment. | **5/6 proved:** `join_assoc`, `join_comm`, `join_idem`, `cap_sendable`, `discharge_sendable`. `linear_at_most_once` is `sorry` (needs context-splitting semantics not yet modeled — see the theorem's own doc comment). |
-| `effects.lean` | Effect rows + effect-annotated typing judgment. | Definitions only; both theorems (`dispatch_type_preservation`, `effect_safety_static`) are vacuous `True` stubs, not proofs. |
-| `combined.lean` | Unified judgment combining HM types, capabilities, and effect rows. | Definitions only (soundness conjecture stated, proof open). |
+| File | Content | Status |
+|---|---|---|
+| `Nulang/Types.lean` | Type language, `freeVars`, `Subst`, `occurs`, `mgu` | Formalized |
+| `Nulang/Capabilities.lean` | Capability lattice, `subtype`, `join`, `isSendable` | Formalized |
+| `Nulang/Effects.lean` | Effect rows, `subrow`, `union` | Formalized |
+| `Nulang/Soundness.lean` | Type soundness theorem + proof | Conjecture |
+| `Nulang/CapSafety.lean` | Capability safety theorem + proof | Conjecture |
+| `Nulang/EffectSafety.lean` | Effect safety theorem + proof | Conjecture |
 
-## Regression note (2026-08-02)
+## Theorems (Stated, Pending Proof)
 
-`types.lean` briefly achieved 0 sorries in commit `2740cfc` (2026-07-25),
-using a custom induction principle (`HasType.rec_on_ctx`) to work around a
-known weakening-proof subtlety: naive structural induction on the typing
-derivation produces an induction hypothesis with the wrong context order
-in the `tLambda`/`tLet` cases (`(x,σ)::(x₁,τ1)::Γ` from the IH vs. the
-`(x₁,τ1)::(x,σ)::Γ` the goal needs), which are not interchangeable under
-name shadowing when `x = x₁`. The very next commit (`ac9ef5d`,
-2026-07-26) dropped that recursor because it broke under a Lean 4.16.0
-upgrade, and reverted 9 theorem statements to `:= by sorry` to keep
-`lake build` green — its own commit message honestly discloses "12 sorry
-warnings". No downstream doc (this file, `SPEC2.md`, `CHANGELOG.md`,
-`PLAN.md`) was updated to match until this correction. Re-proving
-`weakening` requires either a context-splitting formulation (prove
-insertion at an arbitrary position, specialize to position 0) or an
-explicit freshness side condition; see `types.lean:463-466`.
+### Type Soundness
+```
+Theorem type_soundness:
+  ∅ ⊢ e : τ ∧ e ↦ v ⇒ ∅ ⊢ v : τ
+```
+A well-typed closed program either diverges or evaluates to a value of the
+same type.  This is the fundamental correctness property of the type system.
 
-## What is intentionally NOT formalized
+### Capability Sendability
+```
+Theorem cap_sendable:
+  isSendable c = true → value tagged with c can cross actor boundaries
+  without violating isolation
+```
+Values with `iso`, `val`, `tag`, `lineariso`, or `linear` capabilities
+are safe to send between actors.
 
-The following are verified through other means (fuzzer, integration tests):
+### Effect Safety
+```
+Theorem effect_safety:
+  A program with closed effect row {} cannot perform an unhandled effect
+```
+If a function's effect row is empty, every `perform` in its body is
+statically handled — no runtime "unhandled effect" errors.
 
-- **Capability soundness** — the capability lattice is enforced at
-  compile time; runtime correctness is tested via `src/fuzz.rs`
-- **Effect safety** — effect rows are checked statically; runtime
-  handler dispatch is tested via integration tests
-- **Distribution** — the wire protocol and actor model are tested via
-  chaos/stress tests (`src/stress_tests.rs`)
-- **LinearIso must-use** — at-most-once use (no double-use) is enforced
-  for every binding. Exactly-once (must-use) is enforced for `let`-bound
-  linear values as of 2026-08-02 (`CapabilityAnalyzer::infer_cap_tracked`'s
-  `Expr::Let` case in `src/effect_checker.rs`, with a transparent-rebind
-  exemption for bare `let a = x` aliases — see the tests prefixed
-  `test_lineariso_let_bound_` / `test_linear_let_bound_` in that file).
-  Function/lambda parameter-level must-use remains future work (a linear
-  binding already present in the *initial* context, e.g. a parameter, is
-  not yet checked); this mirrors why `linear_at_most_once` in
-  `capabilities.lean` is still `sorry`.
-- **Numeric semantics** — value-layout tag dispatch is tested via
-  the bytecode VM test suite
-
-## Known divergences from the implementation
-
-| Item | Formal model | Implementation (`src/`) | Impact |
-|------|-------------|------------------------|--------|
-| Type representation | `Ty` uses de Bruijn-style vars; `Prim` includes `Unit`, `Nil` | `Type` uses nominal `TypeVar`; `PrimitiveType` includes `Float`, `String` | Low — Core fragment is sound for the modeled subset |
-| BinOp representation | 3 separate typing rules (`tBinOpIntArith`, `tBinOpIntCmp`, `tBinOpBoolLogic`) | Single `tBinOp` with helper predicate | Low — logically equivalent |
-| Effect checking | Static effect rows in `types.lean` | Runtime `handler_stack` in `vm.rs` | Medium — the formal model captures the static contract; the runtime model is not formalized |
-| String concatenation | Typing rule `tStrConcat` | Built-in `strConcat` in bytecode | Low — straightforward typing rule |
-
-## CI
-
-The Lean files are checked in CI via `lake build` (`.github/workflows/ci.yml`).
-A break in `lake build` signals a semantics-affecting change to the
-Core fragment.
-
-## Running locally
+## Build
 
 ```bash
-# Install Lean 4
-curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh
-
-# Build the formal specs
 cd spec/formal
 lake build
 ```
+
+## References
+
+- `src/types.rs` — Rust implementation (oracle)
+- `src/typechecker.rs` — Algorithm W implementation
+- `src/effect_checker.rs` — Effect + capability checker
+- `GOVERNANCE.md` §7 — Authoritative artifacts
+- RFC 0003 Item 2 — Formal semantics scoping

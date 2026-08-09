@@ -1,0 +1,10 @@
+name = "nulang-semantics"
+version = "0.1.0"
+defaultTargets = ["nulang-semantics"]
+
+[[lean_lib]]
+name = "NulangSemantics"
+
+[[lean_exe]]
+name = "nulang-semantics"
+root = "Main"
