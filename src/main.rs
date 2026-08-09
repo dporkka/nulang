@@ -6,6 +6,7 @@
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
 //!   nulang --lsp
+//!   nulang --dap [FILE]
 //!   nulang nula <new|build|build-wasm|test|run|add|remove|publish|deploy|watch|doc>
 //!   nulang fmt [--check] [<file>]
 //!
@@ -16,6 +17,7 @@
 //!   --doc                    Generate Markdown API docs (docs/api.md)
 //!   --emit-stdlib-docs <dir> Generate per-effect stdlib docs into <dir>
 //!   --lsp                    Start Language Server (stdio)
+//!   --dap                    Start Debug Adapter (stdio); program from launch request or FILE
 //!   --backend <b>            Backend: bytecode (default, full language) | native
 //!                            (pure-functional subset only — effects/actors/FFI
 //!                            error with a specific unsupported-construct message)
@@ -413,6 +415,7 @@ fn main() {
                     "--eval",
                     "--check",
                     "--lsp",
+                    "--dap",
                     "--doc",
                     "--backend",
                     "--out",
@@ -506,6 +509,7 @@ fn main() {
     }
     if opts.dap {
         nulang::dap::run_dap_server();
+        return;
     }
 
     if let Some(n) = &opts.init {
@@ -817,6 +821,7 @@ fn print_help() {
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
+    println!("       nulang --dap");
     println!("       nulang fmt [--check] [<file>]");
     println!("       nulang node --listen <ADDR> [--seed <ADDR>] [--expected-nodes <N>]");
     println!("       nulang --doc");
@@ -828,6 +833,7 @@ fn print_help() {
     println!("  --doc            Generate Markdown API docs (docs/api.md)");
     println!("  --emit-stdlib-docs <dir>  Generate per-effect stdlib Markdown docs into <dir>");
     println!("  --lsp            Start Language Server (stdio)");
+    println!("  --dap            Start Debug Adapter (stdio; program via launch request)");
     print!("  --backend <b>    Backend: bytecode (default) | native");
     if cfg!(feature = "wasm-backend") {
         print!(" | wasm | wasm-run | wasm-aot");
@@ -1609,9 +1615,19 @@ fn run_with_runtime(
 
         // Spawn worker threads for shards 1..N, run shard 0 on the main
         // thread so the return value captures its post-scheduler state.
+        // When NULANG_PIN_CORES is set, bind each shard thread to its own
+        // logical CPU to realize the thread-per-core model (shard i -> CPU i).
+        let pin = nulang::runtime::core_pinning_enabled();
+        if pin {
+            let _ = nulang::runtime::pin_current_thread_to_cpu(0); // shard 0
+        }
         std::thread::scope(|s| {
-            for mut rt in remaining {
+            for (idx, mut rt) in remaining.into_iter().enumerate() {
+                let shard_idx = idx + 1; // shards[1..] => shard index 1..N
                 s.spawn(move || {
+                    if pin {
+                        let _ = nulang::runtime::pin_current_thread_to_cpu(shard_idx);
+                    }
                     rt.run_scheduler();
                 });
             }

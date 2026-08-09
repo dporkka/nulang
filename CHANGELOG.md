@@ -394,6 +394,41 @@ in this version; they are recorded here to establish their tier.
   captured parameter at definition time, and corrected the environment register
   mapping from the raw capture register to r11.
 
+### Added since 1.0.0-frozen — 2026-08-09
+
+- **Debug Adapter Protocol server** (Experimental, `src/dap/`, `--dap`).
+  `nulang --dap` speaks DAP over stdio (the same `Content-Length` framing as
+  the LSP) so editors such as VS Code can debug `.nula` programs: source
+  breakpoints, continue/step-in/step-over/step-out, pause, stack traces
+  (frames + source lines), scopes, local-variable inspection, and
+  `evaluate` (local lookup + literals). Architecture: a reader thread
+  parses framed requests; a server loop dispatches them; a dedicated
+  debuggee thread owns the VM with a `DebugHook` invoked before every
+  interpreted instruction (JIT disabled while attached) that returns the
+  `DebugPause` sentinel to stop. The v1 debuggee runs on the **standalone
+  VM** — top-level code, functions, closures, and effect handlers
+  (`IO.print`/`IO.read`) are fully debuggable; actor `spawn`/`send`/
+  `receive` are no-ops, matching the standalone VM's outside-an-actor
+  contract. Program stdout is captured and forwarded as DAP `output`
+  events so it never corrupts the DAP stream. In-process test harness:
+  `run_dap_server_io` over arbitrary buffers.
+- **Debugger line table & per-function debug info** (Experimental). The MIR
+  pipeline now records a source-line map (`CodeModule.line_table`: bytecode
+  pc → 1-indexed line, one entry per source statement) and per-function
+  metadata (`CodeModule.debug_functions`: name, code range, named locals
+  with their registers). `mir_lower` threads each `hir::Stmt` span into the
+  `FunctionBuilder`; `mir_codegen` translates statement indices to bytecode
+  PCs. Both fields are additive `serde(default)`, so pre-existing `.nbc`
+  artifacts deserialize unchanged.
+- **`par { ... }` independence annotation** (Experimental). `par { e1; e2;
+  ... }` declares that the sub-expressions have no data dependencies on
+  each other. Semantics are identical to a sequential `Block` (evaluated in
+  order, last expression wins); the distinct `Expr::Par` node is preserved
+  through the frontend so later passes can exploit the independence (e.g.
+  parallel lowering/codegen), mirroring nanolang's `par` block. Wired
+  through lexer, parser, typechecker, effect checker, capability analyzer,
+  HIR lowering, formatter, and LSP.
+
 ---
 
 ## Pre-1.0 (crate version 0.13.0-alpha.1 and earlier)

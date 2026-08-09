@@ -425,6 +425,16 @@ impl FunctionBuilder {
         &self.locals[id.0 as usize].ty
     }
 
+    /// Overwrite the type recorded for a local. Used by lowering passes that
+    /// discover a more precise type after the local is created — e.g. a
+    /// `StrConcat` destination, whose result is always a `String` regardless
+    /// of the type assigned at creation time.
+    pub fn set_local_ty(&mut self, id: LocalId, ty: Type) {
+        if let Some(local) = self.locals.get_mut(id.0 as usize) {
+            local.ty = ty;
+        }
+    }
+
     pub fn add_handler_table(&mut self, table: HandlerTableDef) -> usize {
         self.handler_tables.push(table);
         self.handler_tables.len() - 1

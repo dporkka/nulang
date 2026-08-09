@@ -189,17 +189,30 @@ fn apply_candidates(
             continue;
         }
 
-        if c.callee.has_handlers || c.callee.is_recursive {
+        if c.callee.has_handlers || c.callee.is_recursive || c.callee.blocks.len() != 1 {
             continue;
         }
 
-        // Drop call sites in blocks already modified by another candidate.
+        // Sites in blocks already modified by another candidate this round
+        // carry stale indices, so we cannot inline them now. Defer them to
+        // `remaining` rather than discarding them: they are re-discovered
+        // (with fresh indices) next round, and counting them in `remaining`
+        // prevents the premature `remove_closure_allocation` that would
+        // otherwise orphan still-referenced call sites into nil calls.
+        let mut deferred = Vec::new();
         c.call_sites.retain(|site| {
-            !modified_blocks.contains_key(&(c.container, site.block))
+            if modified_blocks.contains_key(&(c.container, site.block)) {
+                deferred.push(CallSite {
+                    block: site.block,
+                    stmt_idx: site.stmt_idx,
+                    dst: site.dst,
+                    args: site.args.clone(),
+                });
+                false
+            } else {
+                true
+            }
         });
-        if c.call_sites.is_empty() {
-            continue;
-        }
 
         // Sort call sites by (block, stmt_idx) descending.
         c.call_sites.sort_by(|a, b| {
@@ -209,7 +222,7 @@ fn apply_candidates(
         // Inline at most one call site per block this round.
         let mut seen_blocks: FxHashMap<BlockId, ()> = FxHashMap::default();
         let mut inlined_this_round = Vec::new();
-        let mut remaining = Vec::new();
+        let mut remaining = deferred;
 
         for site in &c.call_sites {
             if seen_blocks.contains_key(&site.block) {
@@ -453,10 +466,6 @@ fn inline_one_call(
     callee_captures: &[LocalId],
     closure_captures: &[LocalId],
 ) {
-    // Only single-block callees are supported for now.
-    if callee_blocks.len() != 1 {
-        return;
-    }
 
     // Build the local-ID remapping: callee local → caller local.
     let mut remap: FxHashMap<LocalId, LocalId> = FxHashMap::default();
@@ -813,7 +822,7 @@ mod tests {
         Module::new("test")
     }
 
-    fn add_function(m: &mut Module, name: &str, f: Function) -> usize {
+    fn add_function(m: &mut Module, _name: &str, f: Function) -> usize {
         m.functions.push(f);
         m.functions.len() - 1
     }

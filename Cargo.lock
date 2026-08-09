@@ -2281,6 +2281,7 @@ dependencies = [
  "hex",
  "httparse",
  "inferno",
+ "libc",
  "libloading",
  "libsql",
  "mimalloc",

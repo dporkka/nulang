@@ -2458,4 +2458,46 @@ mod tests {
             "plain receive must not emit ReceiveWait"
         );
     }
+
+    #[test]
+    fn test_debug_line_table_and_functions() {
+        let source = "let a = 1 in {\n  let b = a + 1 in {\n    let c = b + 2 in c\n  }\n}";
+        crate::types::set_source_map(source);
+        let module = compile_mir_source(source).unwrap();
+        // The line table maps the innermost statement to source line 3.
+        assert!(!module.line_table.is_empty(), "expected a non-empty line table");
+        assert!(
+            module.line_table.iter().any(|&(_, l)| l == 3),
+            "line table should include line 3, got {:?}",
+            module.line_table
+        );
+        // Breakpoint resolution: line 3 resolves to a verified pc.
+        let resolved = module.resolve_line(3);
+        assert!(resolved.is_some(), "line 3 should resolve to a pc");
+        let (pc, line) = resolved.unwrap();
+        assert_eq!(line, 3);
+        assert_eq!(module.line_at(pc), Some(3));
+        // Debug functions carry a code range and named locals.
+        assert!(!module.debug_functions.is_empty(), "expected debug functions");
+        let main = module
+            .debug_functions
+            .iter()
+            .find(|df| df.name == "__main")
+            .expect("expected an __main debug entry");
+        assert!(main.code_len > 0, "expected a non-empty __main code range");
+        assert!(
+            main.locals.iter().any(|(_, n)| n.as_deref() == Some("a")),
+            "expected local 'a' in __main, got {:?}",
+            main.locals
+        );
+        crate::types::clear_source_map();
+    }
+
+    #[test]
+    fn test_par_block_runs_as_sequential_block() {
+        // `par { .. }` is an independence annotation: sequential block
+        // semantics (last expression wins).
+        let value = run_mir_source("par { 1 + 2; 3 * 4 }").unwrap();
+        assert_eq!(value.as_int(), Some(12));
+    }
 }

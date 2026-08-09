@@ -1,0 +1,16 @@
+// bootstrap/emitter.nula — Stage 1: JSON emitter for .nbc generation
+//
+// Compiles a minimal Nulang Core program to structured JSON.
+// The Rust host converts JSON → .nbc binary.
+//
+// Target: fn main() { 42 }
+//
+// This is the simplest possible emitter — everything is hardcoded
+// for the initial bootstrap. Later stages generalize.
+
+fn main() {
+    perform IO.print("{")
+    perform IO.print("  \"instructions\": [\"07000000\", \"57000000\"],")
+    perform IO.print("  \"constants\": [{\"type\":\"Int\",\"value\":42}]")
+    perform IO.print("}")
+}

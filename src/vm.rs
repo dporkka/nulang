@@ -26,10 +26,9 @@
 
 use std::ffi::{c_char, CStr, CString};
 
-use crate::backends::{JitBackend, TieredAction};
+use crate::backends::{create_default_jit, JitBackend, TieredAction};
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::ffi::{call_native, CType, Signature, FFI_REGISTRY};
-use crate::jit::JitSession;
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 use crate::types::{NuError, NuResult, Span, VmSuspension};
 
@@ -1769,8 +1768,19 @@ pub const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
 const MAX_CLOSURE_ENVS: usize = 10_000_000;
 
 impl VM {
-    /// Create a new VM.
+    /// Create a new VM with the JIT tiering enabled (the default).
     pub fn new() -> Self {
+        Self::new_with_jit(true)
+    }
+
+    /// Create a new VM with the JIT tiering disabled. Every instruction
+    /// flows through the interpreter — used for deterministic interpreter
+    /// benchmarking and debugging, and as the explicit fallback path.
+    pub fn new_without_jit() -> Self {
+        Self::new_with_jit(false)
+    }
+
+    fn new_with_jit(enable_jit: bool) -> Self {
         VM {
             modules: Vec::new(),
             frames: Vec::with_capacity(64),
@@ -1778,7 +1788,7 @@ impl VM {
             handler_stack: Vec::new(),
             step_count: 0,
             yield_pending: false,
-            jit_session: JitSession::new().map(|j| Box::new(j) as Box<dyn JitBackend>),
+            jit_session: if enable_jit { create_default_jit() } else { None },
             jit_constants: Vec::new(),
             node_id: 0,
             pending_migrations: Vec::new(),

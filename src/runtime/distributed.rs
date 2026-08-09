@@ -519,7 +519,7 @@ impl AddressResolver {
                 sender_actor,
                 sender_node,
                 priority,
-                ..
+                trace_id,
             } => {
                 // Record the sender in our cache so we can reply.
                 let sender_cluster_node = NodeId(sender_node.0);
@@ -530,6 +530,7 @@ impl AddressResolver {
                     payload: Arc::new(payload),
                     sender: sender_actor,
                     priority,
+                    trace_id,
                 };
                 Some((target_actor, behavior_name, msg, string_table, content_hash))
             }

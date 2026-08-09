@@ -44,7 +44,7 @@ components separately (HM, capabilities follow Pony, row effects follow
 Koka) and state the combination as a conjecture with a documented proof
 plan. Do not skip the artifact entirely.
 
-## Item 3: Self-Hosting Bootstrap for the Frozen Core (Frozen)
+## Item 3: Self-Hosting Bootstrap for the Frozen Core (Frozen) — STAGE 1 SEEDED 2026-08-09
 
 **Target:** `bootstrap/` — new top-level directory. `SPEC2.md` §"Core".
 
@@ -57,9 +57,17 @@ plan. Do not skip the artifact entirely.
   bootstrap/self_test.nula` produces identical output to `cargo run --
   bootstrap/self_test.nula`.
 
-**Why:** Self-hosting decouples the language from its host's survival. Every
-50+ year-old language either self-hosts or has multiple independent
-implementations.
+**Status (2026-08-09):** Stage 1 seeded.
+- `bootstrap/README.md` — strategy document.
+- `bootstrap/emitter.nula` — Core program that produces structured JSON for
+  a minimal program (`fn main() { 42 }`). Type-checks and runs.
+- `bootstrap/self_test.nula` — minimal Core test program.
+- `test_bootstrap_emitter_nbc_roundtrip` — integration test verifying `.nbc`
+  roundtrip for the emitter's instruction sequence (ConstU + RetVal). Passes.
+- Remaining: generalize emitter from hardcoded instructions to a
+  parameterized code generator; write host converter (JSON → `.nbc` binary);
+  Stage 2 self-compiling parser.
+
 
 ## Item 5: Decouple LLM (and All Transient Tech) from the Language Vocabulary (Stable) — NON-BREAKING PHASE IMPLEMENTED 2026-07-19
 
@@ -85,28 +93,34 @@ implementations.
 (actor, message, type, effect, capability) not transient ones (LLM, pipeline,
 debate).
 
-## Item 6: Host-ABI Trait Boundary Over All Transient Backends (Stable) — TRAITS DEFINED 2026-07-19
+## Item 6: Host-ABI Trait Boundary Over All Transient Backends (Stable) — FULLY WIRED 2026-08-09
 
-**Target:** New traits in `src/backends/` directory. Existing impls in
-`src/jit/`, `src/mir_wasm.rs`, `src/wasm_runtime.rs`, `src/python/`,
-`src/runtime/persistence.rs`.
+**Target:** `src/backends/mod.rs` (trait definitions + factory functions),
+`src/vm.rs`, `src/runtime/mod.rs`, `src/main.rs`.
 
 **Change:**
 - Define `trait JitBackend`, `trait WasmBackend`, `trait StorageBackend`
   (generalize `PersistenceStore`), `trait Transport`, `trait CryptoProvider`,
-  `trait HttpProvider`.
-- `src/jit/` becomes a `JitBackend` impl for Cranelift, swappable.
-- `src/mir_wasm.rs` + `src/wasm_runtime.rs` become a `WasmBackend` impl.
-- `src/python/` becomes a `ForeignInterop` impl for PyO3.
+  `trait HttpProvider`, `trait ForeignInterop`, `trait TlsProvider`.
+- `src/jit/` is a `JitBackend` impl for Cranelift; `vm.rs` accesses it
+  exclusively through `Box<dyn JitBackend>` and `create_default_jit()`.
+- `src/mir_wasm.rs` + `src/wasm_runtime.rs` are a `WasmBackend` impl;
+  `main.rs` accesses them through `Box<dyn WasmBackend>`.
+- `src/python/` is a `ForeignInterop` impl for PyO3; `Runtime` accesses it
+  through `Option<Box<dyn ForeignInterop>>`.
 - Core language never imports `cranelift`, `wasmtime`, `pyo3`, `libsql`,
-  `quinn`, `rustls`, or `reqwest` directly.
+  `quinn`, `rustls`, or `reqwest` directly. The sole exception is
+  `src/backends/mod.rs` which imports concrete types for factory functions
+  and `src/runtime/mod.rs` which constructs default impls at startup —
+  both are composition roots, not core language code.
 
 **Why:** Dependencies are transient; the language is not. Trait boundaries
 let a 2125 runtime swap Cranelift for whatever codegen exists then.
 
 **Contingency:** If this breaks JIT tiering (concrete access to VM fields),
 keep a `JitView` struct exposed by `VM` — the boundary is "JIT sees a
-stable view", not "JIT sees only traits".
+stable view", not "JIT sees only traits". Not needed: JIT tiering works
+through the trait boundary.
 
 ## Item 10: Break Up the Runtime God-Object (Hygiene) — SUPERVISOR TEAMS EXTRACTED 2026-07-19
 
@@ -140,17 +154,69 @@ hashes are. `blake3` is already a dep.
 - Default impl uses quinn/rustls/reqwest today; a 2125 impl uses whatever
   then. The language never knows.
 
-## Resolution
+## Item 15: Distributed Trace Context Propagation (Stable) — IMPLEMENTED 2026-08-09
 
-Accepted 2026-07-19. Items 5 (non-breaking phase), 6 (traits), 10
-(supervisor teams), and 11 (content-addressed modules) are implemented and
-verified — 1358 tests pass. Items 2 (formal semantics) and 3 (self-hosting
-bootstrap) are multi-week research efforts that remain as scoped follow-ups;
-they are the highest-leverage remaining items. Item 5's breaking phase
-(removing `LlmAsk`/`Effect::LLM`) follows the deprecation cycle (≥2 major
-versions). Item 6's full wiring (routing existing impls behind the new
-traits) and item 14 (deprecating direct quinn/rustls/reqwest use) are
-incremental follow-ups.
+**Target:** `src/runtime/mailbox.rs`, `src/runtime/mod.rs`, `src/runtime/distributed.rs`,
+`src/runtime/network.rs`.
+
+**Change:**
+- Add `trace_id: Option<String>` to `Message` struct — carries W3C traceparent
+  across local send, cross-shard delivery, and network deserialization.
+- Propagate `trace_id` from `Packet::ActorMessage` (already serialized on the
+  wire, `SPEC2` §15.3) into `Message` in `parse_packet` — previously discarded.
+- Add `trace_id` to `CrossShardMsg::DeliverMessage` so trace context survives
+  shard-boundary hops.
+- `send_message_by_id`, `deliver_cross_shard_message`, exit signals, and DOWN
+  messages all carry `trace_id: None` by default; the OTel layer populates it
+  when the `otel` feature is active.
+
+**Why:** The `Packet::ActorMessage` wire format already serialized `trace_id`
+but `parse_packet` dropped it with `..`. End-to-end trace context is the
+foundation for observability — without it, every actor hop and node boundary
+breaks the trace.
+
+## Item 16: WASM Component Model WIT Interface Mapping (Experimental)
+
+**Target:** `src/wasm_component_runtime.rs`, `src/wasm_types.rs`,
+`src/effect_checker.rs`.
+
+**Change:**
+- Map Nulang's row-polymorphic algebraic effects onto WIT interfaces:
+  each `perform Effect.op(args...)` becomes a WIT `import` function call
+  in the compiled WASM component.
+- The `wasm_component_runtime.rs` host provides WIT `export` functions that
+  correspond to built-in effects (`IO`, `Timer`, `Signal`, `Provider`).
+- Generate WIT world files from effect-row signatures so a compiled Nulang
+  actor is a valid WASI 0.2+ component pluggable into any compliant host.
+
+**Why:** WASM components are the emerging standard for language-agnostic,
+capability-sandboxed modules. Mapping effect rows onto WIT makes Nulang
+actors interoperable with the broader WASM ecosystem without FFI glue.
+
+## Item 17: `.nbc` Library Distribution in nula Package Manager (Experimental)
+
+**Target:** `src/package/` — extend `resolver.rs` and `lockfile.rs`.
+
+**Change:**
+- Support `.nbc` artifacts as library dependencies in `Nulang.toml`:
+  `{ nbc = "path/to/lib.nbc" }` or registry-hosted `.nbc` packages.
+- A library author publishes type-checked, compiled `.nbc` files; consumers
+  link them without source distribution.
+- Extend the `.nbc` format with an export table (symbol name → type signature
+  + bytecode offset) so consumers can resolve library symbols at link time.
+- The type checker validates consumer code against the library's export
+  signatures (stored in the `.nbc` constant pool).
+
+**Why:** Pre-compiled artifacts enable closed-source library distribution,
+Accepted 2026-07-19. Items 5 (non-breaking phase), 6 (full trait wiring),
+10 (supervisor teams), 11 (content-addressed modules), and 15 (trace context
+propagation) are implemented and verified — 1647 tests pass. Items 2
+(formal semantics) and 3 (self-hosting bootstrap) are multi-week research
+efforts that remain as scoped follow-ups; they are the highest-leverage
+remaining items. Item 5's breaking phase (removing `LlmAsk`/`Effect::LLM`)
+follows the deprecation cycle (≥2 major versions). Item 14 (deprecating
+direct quinn/rustls/reqwest use), item 16 (WASM WIT mapping), and item 17
+(`.nbc` library distribution) are incremental follow-ups.
 
 ### Delivered this session
 
@@ -172,6 +238,13 @@ incremental follow-ups.
 - **Item 11 (content-addressed):** `Nulang.lock` now carries a BLAKE3
   `content_hash` per pinned package, computed from `.nula` source files.
   2 new tests pass.
+- **Item 15 (trace context):** `trace_id: Option<String>` added to
+  `Message` struct; propagated end-to-end from `Packet::ActorMessage`
+  wire format through `parse_packet`, `CrossShardMsg::DeliverMessage`,
+  `deliver_cross_shard_message`, and all local `send_message_by_id` paths.
+  The field was already serialized on the wire but discarded by `..` in
+  `parse_packet`. 0 new tests (mechanical field addition to existing
+  struct; 31 Message construction sites updated).
 
 ### Remaining as scoped follow-ups
 
@@ -187,8 +260,15 @@ incremental follow-ups.
 - **Item 5 (breaking phase):** Remove `OpCode::LlmAsk`, `RValue::LlmAsk`,
   `Effect::LLM` after the deprecation cycle. Requires bytecode v1→v2
   migration in `src/format/migrate.rs`.
-- **Item 6 (full wiring):** Route `src/jit/`, `src/mir_wasm.rs`,
-  `src/wasm_runtime.rs`, `src/python/` behind the new traits. The trait
-  definitions are in place; the concrete impls need to be moved.
 - **Item 14:** Route `quinn`/`rustls`/`reqwest` through `trait Transport` /
-  `trait HttpProvider` (to be defined). Depends on item 6 full wiring.
+  `trait HttpProvider` (to be defined). Item 6 trait wiring is complete;
+  this is the final hygiene pass.
+- **Item 16 (WASM WIT mapping):** Map Nulang effect rows onto WASI 0.2+
+  WIT interfaces. `wasm_component_runtime.rs` already hosts WASM components;
+  this item adds WIT world generation from effect-row signatures so compiled
+  actors are pluggable into any WASM component host without glue code.
+- **Item 17 (`.nbc` library dist):** Extend `nula` package manager with
+  `.nbc` artifact dependencies. Library authors publish type-checked,
+  compiled `.nbc` files; consumers link them without source. Requires an
+  export table in the `.nbc` format (backward-compatible extension per
+  RFC 0001).

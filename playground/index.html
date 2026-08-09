@@ -17,22 +17,40 @@
   header button.compile:hover { background: #1a4a8a; }
   header button.check { background: #0f3460; border-color: #0f3460; }
   header button.check:hover { background: #1a4a8a; }
+  header button.secondary { background: #233554; border-color: #233554; }
+  header button.secondary:hover { background: #2d4570; }
   main { display: flex; flex: 1; overflow: hidden; }
-  #editor { flex: 1; height: 100%; }
-  #output { width: 380px; background: #0d1117; border-left: 1px solid #0f3460; padding: 16px; overflow-y: auto; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+  #editor { flex: 1; height: 100%; min-width: 0; }
+  #output { width: 380px; background: #0d1117; border-left: 1px solid #0f3460; padding: 16px; overflow-y: auto; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; display: flex; flex-direction: column; }
   #output .out { color: #c9d1d9; }
   #output .err { color: #f85149; }
   #output .info { color: #58a6ff; }
   #output .empty { color: #484f58; font-style: italic; }
+  #output-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #0f3460; }
+  #output-header h3 { font-size: 14px; font-weight: 600; color: #e0e0e0; }
+  #output-toolbar { display: flex; gap: 6px; }
+  #output-toolbar button { padding: 4px 8px; font-size: 11px; border-radius: 3px; border: 1px solid #0f3460; background: #16213e; color: #8b949e; cursor: pointer; }
+  #output-toolbar button:hover { background: #233554; color: #e0e0e0; }
   #status { font-size: 12px; color: #58a6ff; padding: 0 8px; }
   .cm-editor { height: 100%; font-size: 14px; }
   .cm-focused { outline: none; }
+  .cm-lineNumbers { min-width: 3rem; padding: 0 12px 0 8px; color: #484f58; }
+  .cm-gutters { background: #16213e; border-right: 1px solid #0f3460; }
+  @media (max-width: 768px) {
+    main { flex-direction: column; }
+    #output { width: 100%; height: 300px; border-left: none; border-top: 1px solid #0f3460; }
+    header { flex-wrap: wrap; }
+    header h1 { margin-right: 0; margin-bottom: 8px; width: 100%; }
+  }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #16213e; color: #e0e0e0; padding: 12px 20px; border-radius: 6px; border: 1px solid #0f3460; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 1000; animation: slideIn 0.3s ease; }
+  @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  .toast.success { border-color: #3fb950; }
+  .toast.error { border-color: #f85149; }
 </style>
 <!-- CodeMirror 6 with Lezer -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@codemirror/theme-one-dark@6/themes/one-dark.css">
 <script type="module">
-import { EditorView, basicSetup } from "https://cdn.jsdelivr.net/npm/codemirror@6/view/+esm";
-import { EditorState } from "https://cdn.jsdelivr.net/npm/codemirror@6/state/+esm";
+import { EditorView, basicSetup, lineNumbers, highlightActiveLineGutter, updateListener } from "https://cdn.jsdelivr.net/npm/codemirror@6/view/+esm";
 import { keymap } from "https://cdn.jsdelivr.net/npm/@codemirror/view@6/+esm";
 import { indentWithTab } from "https://cdn.jsdelivr.net/npm/@codemirror/commands@6/+esm";
 import { defaultKeymap, history, historyKeymap } from "https://cdn.jsdelivr.net/npm/@codemirror/commands@6/+esm";
@@ -77,16 +95,19 @@ const nulangSupport = new LanguageSupport(nulangLanguage, [
   syntaxHighlighting(nulangHighlightStyle)
 ]);
 
-// Configure editor
+// Configure editor with line numbers and active line highlighting
 const editor = new EditorView({
   state: EditorState.create({
     doc: 'perform IO.print("Hello, Nulang!")',
     extensions: [
       basicSetup,
+      lineNumbers(),
+      highlightActiveLineGutter(),
       keymap.of([...defaultKeymap, ...historyKeymap, ...closeBracketsKeymap, indentWithTab]),
       nulangSupport,
       EditorView.lineWrapping,
-      EditorState.tabSize.of(4)
+      EditorState.tabSize.of(4),
+      updateListener.of(v => { if (v.docChanged) localStorage.setItem('nulang-playground-code', v.state.doc.toString()); })
     ]
   }),
   parent: document.getElementById('editor')
@@ -135,13 +156,37 @@ select.addEventListener('change', function() {
   }
 });
 
+// Load from localStorage or URL hash
+function loadInitialCode() {
+  if (location.hash) {
+    try {
+      const code = decodeURIComponent(location.hash.slice(1));
+      if (code) return code;
+    } catch(e) {}
+  }
+  const saved = localStorage.getItem('nulang-playground-code');
+  if (saved) return saved;
+  return null;
+}
+
+const initialCode = loadInitialCode();
+if (initialCode) {
+  editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: initialCode } });
+}
+
+// Save to localStorage on change
+editor.state.doc.onChange = () => {
+  localStorage.setItem('nulang-playground-code', editor.state.doc.toString());
+};
+
 // Run function
 async function run() {
   const code = editor.state.doc.toString();
-  const out = document.getElementById('output');
+  const out = document.getElementById('output-content');
   const status = document.getElementById('status');
   out.innerHTML = '<span class="info">Running...</span>';
   status.textContent = 'running...';
+  status.style.color = '#58a6ff';
 
   try {
     const resp = await fetch('/run', {
@@ -157,26 +202,30 @@ async function run() {
     out.innerHTML = html;
     status.textContent = data.ok ? 'ok' : 'error';
     status.style.color = data.ok ? '#3fb950' : '#f85149';
+    showToast(data.ok ? 'Execution completed' : 'Execution failed', data.ok);
   } catch(e) {
     out.innerHTML = '<span class="err">Connection error: ' + escapeHtml(e.message) + '</span>';
     status.textContent = 'offline';
     status.style.color = '#f85149';
+    showToast('Connection error: ' + e.message, false);
   }
 }
 
 // Compile function
 async function compile() {
   const code = editor.state.doc.toString();
-  const out = document.getElementById('output');
+  const out = document.getElementById('output-content');
   const status = document.getElementById('status');
   out.innerHTML = '<span class="info">Compiling...</span>';
   status.textContent = 'compiling...';
+  status.style.color = '#58a6ff';
 
   try {
+    const target = document.getElementById('compile-target').value;
     const resp = await fetch('/compile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, target: 'native' }),
+      body: JSON.stringify({ code, target }),
     });
     const data = await resp.json();
     let html = '';
@@ -186,20 +235,23 @@ async function compile() {
     out.innerHTML = html;
     status.textContent = data.ok ? 'ok' : 'error';
     status.style.color = data.ok ? '#3fb950' : '#f85149';
+    showToast(data.ok ? 'Compilation completed' : 'Compilation failed', data.ok);
   } catch(e) {
     out.innerHTML = '<span class="err">Connection error: ' + escapeHtml(e.message) + '</span>';
     status.textContent = 'offline';
     status.style.color = '#f85149';
+    showToast('Connection error: ' + e.message, false);
   }
 }
 
 // Check function
 async function check() {
   const code = editor.state.doc.toString();
-  const out = document.getElementById('output');
+  const out = document.getElementById('output-content');
   const status = document.getElementById('status');
   out.innerHTML = '<span class="info">Type checking...</span>';
   status.textContent = 'checking...';
+  status.style.color = '#58a6ff';
 
   try {
     const resp = await fetch('/check', {
@@ -215,10 +267,12 @@ async function check() {
     out.innerHTML = html;
     status.textContent = data.ok ? 'ok' : 'error';
     status.style.color = data.ok ? '#3fb950' : '#f85149';
+    showToast(data.ok ? 'Type check passed' : 'Type check failed', data.ok);
   } catch(e) {
     out.innerHTML = '<span class="err">Connection error: ' + escapeHtml(e.message) + '</span>';
     status.textContent = 'offline';
     status.style.color = '#f85149';
+    showToast('Connection error: ' + e.message, false);
   }
 }
 
@@ -227,36 +281,90 @@ function share() {
   const code = editor.state.doc.toString();
   const url = location.origin + location.pathname + '#' + encodeURIComponent(code);
   navigator.clipboard.writeText(url).then(() => {
-    document.getElementById('status').textContent = 'URL copied!';
+    showToast('Share URL copied to clipboard!', true);
+  }).catch(() => {
+    showToast('Failed to copy URL', false);
   });
 }
 
-// Load from URL hash
-if (location.hash) {
-  try {
-    const code = decodeURIComponent(location.hash.slice(1));
-    if (code) {
-      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: code } });
-    }
-  } catch(e) {}
+// Clear output
+function clearOutput() {
+  const out = document.getElementById('output-content');
+  out.innerHTML = '<span class="empty">Output appears here — click ▶ Run</span>';
+  document.getElementById('status').textContent = '';
+}
+
+// Copy output
+function copyOutput() {
+  const out = document.getElementById('output-content');
+  const text = out.innerText || out.textContent;
+  if (text && text !== 'Output appears here — click ▶ Run') {
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('Output copied!', true);
+    });
+  } else {
+    showToast('Nothing to copy', false);
+  }
+}
+
+// Toast notifications
+function showToast(message, success) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + (success ? 'success' : 'error');
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = 'slideIn 0.3s ease reverse';
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
 }
 
 function escapeHtml(s) { return s.replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>'); }
+
+// Wire up button clicks and select changes
+document.getElementById('btn-run').addEventListener('click', run);
+document.getElementById('btn-compile').addEventListener('click', compile);
+document.getElementById('btn-check').addEventListener('click', check);
+document.getElementById('btn-share').addEventListener('click', share);
+document.getElementById('btn-clear').addEventListener('click', clearOutput);
+document.getElementById('btn-copy').addEventListener('click', copyOutput);
+document.getElementById('btn-clear-out').addEventListener('click', clearOutput);
+document.getElementById('examples').addEventListener('change', function() {
+  if (this.value && examples[this.value]) {
+    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: examples[this.value] } });
+  }
+});
 </script>
 </head>
 <body>
 <header>
   <h1>Nulang Playground</h1>
   <select id="examples"></select>
-  <button class="run" onclick="run()">▶ Run (Ctrl+Enter)</button>
-  <button class="compile" onclick="compile()">⚙ Compile</button>
-  <button class="check" onclick="check()">✓ Check</button>
-  <button onclick="share()">🔗 Share</button>
+  <button class="run" id="btn-run">▶ Run (Ctrl+Enter)</button>
+  <select id="compile-target" style="min-width: 120px;">
+    <option value="native">native</option>
+    <option value="riscv64">riscv64</option>
+    <option value="ptx">ptx</option>
+  </select>
+  <button class="compile" id="btn-compile">⚙ Compile</button>
+  <button class="check" id="btn-check">✓ Check</button>
+  <button class="secondary" id="btn-share">🔗 Share</button>
+  <button class="secondary" id="btn-clear">🗑 Clear</button>
   <span id="status"></span>
 </header>
 <main>
   <div id="editor"></div>
-  <div id="output"><span class="empty">Output appears here — click ▶ Run</span></div>
+  <div id="output">
+    <div id="output-header">
+      <h3>Output</h3>
+      <div id="output-toolbar">
+        <button id="btn-copy">📋 Copy</button>
+        <button id="btn-clear-out">🗑 Clear</button>
+      </div>
+    </div>
+    <div id="output-content"><span class="empty">Output appears here — click ▶ Run</span></div>
+  </div>
 </main>
 </body>
-</html>

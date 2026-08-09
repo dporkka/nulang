@@ -951,6 +951,15 @@ impl<'c> FnLowerer<'c> {
                     }
                     (crate::ast::BinOp::Add, true) => {
                         self.b.assign(dst, mir::RValue::StrConcat(lid, rid));
+                        // A concatenation result is always a String. The dst
+                        // local may have been created with a placeholder type
+                        // (hir_lower's `binary_type` cannot see through a
+                        // variable operand that lowers to Type::unit()), so
+                        // record the precise type here — otherwise a chained
+                        // `s + 2 + 3` lowers the second add as `Binary(Add)`
+                        // instead of `StrConcat`, and the native/AOT backends
+                        // mis-tag the pointer as an int.
+                        self.b.set_local_ty(dst, Type::string());
                     }
                     _ => {
                         self.b.assign(dst, mir::RValue::Binary(*op, lid, rid));

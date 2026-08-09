@@ -197,6 +197,7 @@ enum CrossShardMsg {
         behavior_id: u16,
         payload: Vec<Value>,
         sender: u64,
+        trace_id: Option<String>,
     },
     /// Enqueue an actor on the target shard (wake from idle/waiting).
     EnqueueActor {
@@ -1072,12 +1073,14 @@ impl Runtime {
         behavior_id: u16,
         payload: Vec<Value>,
         sender: u64,
+        trace_id: Option<String>,
     ) {
         let msg = Message {
             behavior_id,
             payload: Arc::new(payload),
             sender,
             priority: MessagePriority::Normal,
+            trace_id: trace_id.clone(),
         };
         if let Some(actor) = self.actors.get_mut(&target_id) {
             if let Err(_dropped) = actor.mailbox.push(msg) {
@@ -1087,6 +1090,7 @@ impl Runtime {
                         payload: Arc::new(Vec::new()),
                         sender,
                         priority: MessagePriority::System,
+                        trace_id: None,
                     },
                     "mailbox full (cross-shard)",
                 );
@@ -1098,6 +1102,7 @@ impl Runtime {
                     payload: Arc::new(Vec::new()),
                     sender,
                     priority: MessagePriority::System,
+                    trace_id: None,
                 },
                 "target actor not found (cross-shard)",
             );
@@ -1143,8 +1148,9 @@ impl Runtime {
                     behavior_id,
                     payload,
                     sender,
+                    trace_id,
                 } => {
-                    self.deliver_cross_shard_message(target_id, behavior_id, payload, sender);
+                    self.deliver_cross_shard_message(target_id, behavior_id, payload, sender, trace_id);
                 }
                 CrossShardMsg::EnqueueActor { actor_id, priority } => {
                     self.scheduler.enqueue_with_priority(actor_id, priority);
@@ -1669,6 +1675,7 @@ impl Runtime {
                     behavior_id,
                     payload: args.to_vec(),
                     sender: self.current_actor.unwrap_or(0),
+                    trace_id: None,
                 });
                 return;
             }
@@ -1678,6 +1685,7 @@ impl Runtime {
             payload: Arc::new(args.to_vec()),
             sender: self.current_actor.unwrap_or(0),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         if let Some(actor) = self.actors.get_mut(&target_id) {
             actor
@@ -1691,6 +1699,7 @@ impl Runtime {
                         payload: Arc::new(args.to_vec()),
                         sender: self.current_actor.unwrap_or(0),
                         priority: MessagePriority::System,
+                        trace_id: None,
                     },
                     "mailbox full",
                 );
@@ -1702,6 +1711,7 @@ impl Runtime {
                     payload: Arc::new(args.to_vec()),
                     sender: self.current_actor.unwrap_or(0),
                     priority: MessagePriority::System,
+                    trace_id: None,
                 },
                 "target actor not found",
             );
@@ -1911,6 +1921,7 @@ impl Runtime {
                 payload: Arc::new(vec![Value::int(1)]),
                 sender: 0, // DLQ system message has no sender
                 priority: MessagePriority::System,
+                trace_id: None,
             });
         }
     }

@@ -474,6 +474,19 @@ impl CryptoProvider for DefaultCryptoProvider {
         vk.verify(message, &sig).is_ok()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Factory functions — the only place concrete backend types are constructed
+// ---------------------------------------------------------------------------
+
+/// Create the default JIT backend (Cranelift via `JitSession`).
+///
+/// This is the **sole** call-site for `JitSession::new()` outside of tests.
+/// The VM calls this factory rather than importing `JitSession` directly,
+/// keeping the JIT implementation behind the `JitBackend` trait boundary.
+pub fn create_default_jit() -> Option<Box<dyn JitBackend>> {
+    crate::jit::JitSession::new().map(|j| Box::new(j) as Box<dyn JitBackend>)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

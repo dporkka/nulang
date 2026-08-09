@@ -392,3 +392,4 @@ fn collect_rvalue_field_and_consts(
         _ => {}
     }
 }
+

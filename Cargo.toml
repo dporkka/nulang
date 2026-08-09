@@ -39,13 +39,15 @@ ai-runtime = ["dep:nulang-ai", "dep:reqwest", "dep:tokio"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime", "dep:wat"]
 http-client = ["dep:reqwest", "dep:tokio"]
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio"]
-tls = ["dep:rustls", "dep:rustls-pemfile"]
+tls = []
 
 [dependencies]
 # Memory & concurrency
 mimalloc = "0.1"
 crossbeam = "0.8"
 parking_lot = "0.12"
+# OS primitives (core affinity for thread-per-core pinning, unix-only)
+libc = "0.2"
 httparse = "1"
 # HTTP client (synchronous, for standalone VM)
 ureq = "2"
@@ -101,8 +103,8 @@ wasm-encoder = { version = "0.220", optional = true }
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model", "wat"] }
 wat = { version = "1.254", optional = true }
 blake3 = "1.8"
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"], optional = true }
-rustls-pemfile = { version = "2", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+rustls-pemfile = { version = "2" }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 hex = "0.4.3"
 rand_core = { version = "0.6.4", features = ["getrandom"] }

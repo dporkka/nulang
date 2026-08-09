@@ -25,7 +25,7 @@ _(summaries of ingested external docs — RFCs, blog posts, design notes. Empty 
 
 ## Queries
 
-_(filed answers to user questions worth preserving. Empty at bootstrap.)_
+- [[queries/performance-assessment]] — assessment of the 28-proposal performance catalog plus beyond-catalog techniques (threaded dispatch, OSR, NUMA, cache-line padding, non-temporal stores, Auto-SoA) against the current tree; 14/28 shipped, 5 actionable gaps ranked.
 
 ---
 

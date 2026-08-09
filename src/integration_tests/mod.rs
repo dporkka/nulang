@@ -10044,7 +10044,9 @@ match { a: 2, b: 9 } with {
     /// Type error in defer expression is caught.
     #[test]
     fn test_defer_type_error() {
-        let source = r#"{ defer 1 + "hello"; 42 }"#;
+        // `Bool` is neither `Int` nor `String`, so this Add has no coercion
+        // and must be a type error.
+        let source = r#"{ defer 1 + true; 42 }"#;
         let err = run_source(source).expect_err("defer with type error must fail");
         let msg = format!("{}", err);
         assert!(
@@ -10053,4 +10055,47 @@ match { a: 2, b: 9 } with {
             msg
         );
     }
+
+    // -- Bootstrap self-test: emitter.nula → .nbc roundtrip ------------
+
+    /// The bootstrap emitter (`bootstrap/emitter.nula`) encodes a Core
+    /// program as JSON. This test independently verifies the `.nbc`
+    /// roundtrip for the emitted instruction sequence (ConstU + RetVal
+    /// returning 42). The emitter itself is validated via the
+    /// `bootstrap/emitter.nula` file check (type-check passes).
+    #[test]
+    fn test_bootstrap_emitter_nbc_roundtrip() {
+        use crate::bytecode::{CodeModule, Constant, Instruction};
+
+        // The instruction sequence emitted by emitter.nula:
+        // "07000000" = ConstU 0 (opcode 0x07, load constant index 0 into r0)
+        // "57000000" = RetVal (opcode 0x57, return r0)
+        let instr_words = [0x07000000u32, 0x57000000u32];
+        let instructions: Vec<Instruction> = instr_words
+            .iter()
+            .map(|&w| Instruction::decode(w).expect("valid instruction"))
+            .collect();
+        let mut module = CodeModule::new("bootstrap_test");
+        module.constants.push(Constant::Int(42));
+        module.instructions = instructions;
+        module.entry_point = Some(0);
+
+        // Roundtrip through .nbc.
+        let source_hash = *blake3::hash(b"bootstrap_test_source").as_bytes();
+        let nbc_bytes = module.to_nbc(Some(source_hash)).expect("to_nbc must succeed");
+        let artifact = CodeModule::from_nbc(&nbc_bytes).expect("from_nbc must succeed");
+
+        assert_eq!(artifact.format_version, 1);
+        assert_eq!(artifact.language_version, crate::format::constants::LANGUAGE_VERSION);
+        assert_eq!(artifact.source_hash, Some(source_hash));
+        assert_eq!(artifact.module.constants.len(), 1);
+        assert_eq!(artifact.module.instructions.len(), 2);
+
+        // Run the decoded module and verify result.
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(artifact.module);
+        let value = vm.run().expect("decoded module must execute");
+        assert_eq!(value.as_int(), Some(42), "bootstrap test must evaluate to 42");
+    }
 }
+

@@ -27,7 +27,7 @@ pub fn find_vectorizable_loops(func: &mir::Function) -> Vec<VecLoop> {
     for (header_id_usize, header_block) in func.blocks.iter().enumerate() {
         let header_id = BlockId(header_id_usize as u32);
         
-        let Terminator::Branch { cond, then_, else_ } = header_block.terminator else { continue };
+        let Terminator::Branch { cond: _, then_, else_ } = header_block.terminator else { continue };
         let body = then_;
         let exit = else_;
         

@@ -20,6 +20,44 @@ use crossbeam::deque::{Injector, Steal, Stealer, Worker};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 
+/// Best-effort pin of the calling thread to a specific logical CPU.
+///
+/// Realizes Nulang's thread-per-core model: each shard's scheduler thread is
+/// bound to its own core so it never migrates, keeping its Chase-Lev deque
+/// and ORCA state cache-hot. Returns `false` (and does nothing) when the
+/// platform lacks `sched_setaffinity` or the call fails — pinning is always
+/// an optional optimization, never a correctness requirement.
+///
+/// Enabled only when the `NULANG_PIN_CORES` env var is non-empty (opt-in).
+#[cfg(target_os = "linux")]
+pub fn pin_current_thread_to_cpu(cpu: usize) -> bool {
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        let tid = libc::syscall(libc::SYS_gettid) as libc::c_int;
+        libc::sched_setaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
+/// Non-Linux fallback: core pinning is unavailable, so report failure.
+#[cfg(not(target_os = "linux"))]
+pub fn pin_current_thread_to_cpu(_cpu: usize) -> bool {
+    false
+}
+
+/// Whether core pinning is enabled. Reads `NULANG_PIN_CORES` (non-empty =
+/// on) and caches the result after the first read so the env-mutex + String
+/// alloc isn't paid on every shard start.
+pub fn core_pinning_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NULANG_PIN_CORES")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// Lightweight, atomics-based profiling metrics for the scheduler.
 ///
 /// All counters are monotonically increasing unless reset via
@@ -44,6 +82,12 @@ pub struct SchedulerStats {
     pub empty_polls: u64,
 }
 
+/// Profiling counters touched by every worker thread. Padded to a cache
+/// line so a worker updating one counter doesn't invalidate the line holding
+/// another counter being read concurrently on a different core (false
+/// sharing). Monotonically increasing unless reset via
+/// [`Scheduler::reset_stats`].
+#[repr(align(64))]
 struct SchedulerStatsInternal {
     total_tasks_processed: AtomicU64,
     tasks_from_local_queue: AtomicU64,
@@ -91,6 +135,11 @@ impl SchedulerStatsInternal {
 /// can therefore starve lower levels; priority is a scheduling hint for
 /// latency-sensitive actors, not a fairness mechanism (fairness comes
 /// from the per-turn reduction budget, which is unchanged).
+///
+/// Padded to a cache line so the lock-free `Injector`/`Worker` deques and
+/// the counters in `SchedulerStatsInternal` don't share cache lines across
+/// the worker threads that access them concurrently.
+#[repr(align(64))]
 pub struct Scheduler {
     /// Global overflow queue for High-priority actors.
     global_high: Injector<u64>,

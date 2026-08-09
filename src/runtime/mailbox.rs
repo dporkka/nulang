@@ -26,6 +26,10 @@ pub struct Message {
     pub payload: Arc<Vec<Value>>,
     pub sender: u64, // Actor ID of sender
     pub priority: MessagePriority,
+    /// W3C traceparent for distributed tracing. When set, the receiver's
+    /// scheduler creates a child span linked to the sender's trace so
+    /// causal chains span actor and node boundaries.
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +51,11 @@ pub enum MessagePriority {
 ///
 /// All methods that access the skip-buffer take `&mut self` because they
 /// run exclusively on the single scheduler thread — no `RefCell` needed.
+///
+/// Padded to a cache line so the two `SegQueue`s (pushed from arbitrary
+/// sender threads, popped on the scheduler thread) don't share a line with
+/// the owning `Actor`'s other fields.
+#[repr(align(64))]
 pub struct Mailbox {
     system_queue: SegQueue<Message>,
     normal_queue: SegQueue<Message>,
@@ -269,6 +278,7 @@ mod tests {
             payload: Arc::new(vec![Value::int(42)]),
             sender,
             priority: MessagePriority::Normal,
+            trace_id: None,
         }
     }
 
@@ -328,6 +338,7 @@ mod tests {
                 payload: Arc::new(vec![Value::int(i)]),
                 sender: i as u64,
                 priority: MessagePriority::System,
+                trace_id: None,
             };
             mb.push(signal).unwrap();
         }

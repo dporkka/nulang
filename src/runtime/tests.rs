@@ -42,6 +42,7 @@ fn test_mailbox_push_pop() {
         payload: Arc::new(vec![Value::int(42)]),
         sender: 1,
         priority: MessagePriority::Normal,
+        trace_id: None,
     };
     assert!(mb.push(msg.clone()).is_ok());
     assert_eq!(mb.len(), 1);

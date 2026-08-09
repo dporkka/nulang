@@ -102,9 +102,7 @@ enum StepMode {
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedBreakpoint {
-    id: i64,
     pc: usize,
-    line: u32,
 }
 
 /// Mutable state consulted by the debug hook on every instruction and
@@ -113,6 +111,9 @@ struct ControlState {
     breakpoints: Vec<ResolvedBreakpoint>,
     /// Set by the server's `pause` request; consumed on the next checkpoint.
     pause_requested: bool,
+    /// `stopOnEntry` launch: the next pause (from `pause_requested`) reports
+    /// reason "entry" instead of "pause".
+    entry_pause: bool,
     /// Active stepping mode (set when a step command resumes execution).
     step: Option<StepMode>,
     /// Frame depth / line recorded at the last pause; targets for stepping.
@@ -131,6 +132,7 @@ impl ControlState {
         ControlState {
             breakpoints: Vec::new(),
             pause_requested: false,
+            entry_pause: false,
             step: None,
             step_target_depth: 0,
             step_target_line: None,
@@ -151,7 +153,12 @@ impl DebugHook for DapDebugger {
         // User pause takes priority.
         if c.pause_requested {
             c.pause_requested = false;
-            c.last_reason = "pause".to_string();
+            if c.entry_pause {
+                c.entry_pause = false;
+                c.last_reason = "entry".to_string();
+            } else {
+                c.last_reason = "pause".to_string();
+            }
             return DebugAction::Pause;
         }
         let at_resume_pc = c.resume_pc == Some(ctx.pc);
@@ -367,36 +374,45 @@ fn debug_fn_for<'a>(
         .find(|df| pc >= df.code_offset && pc < df.code_offset + df.code_len)
 }
 
-fn build_snapshot(vm: &VM) -> Json {
+fn build_snapshot(vm: &VM, program: &str) -> Json {
     let mut frames = Vec::new();
     let Some(cur) = vm.current_frame_index() else {
         return json!({ "frames": [] });
     };
-    // Walk the caller chain, bottom frame first.
+    // Walk the caller chain, current (innermost) frame first — DAP orders
+    // stackFrames top-of-stack first. Anonymous VM-plumbing frames (e.g. the
+    // synthetic top-level runner, which has no debug-functions entry) are
+    // skipped so only user code frames are reported.
     let mut chain = Vec::new();
     let mut idx = Some(cur);
     while let Some(i) = idx {
         chain.push(i);
         idx = vm.frames().get(i).and_then(|f| f.caller_idx);
     }
-    chain.reverse();
     for (id, fi) in chain.iter().enumerate() {
         let Some(f) = vm.frames().get(*fi) else { continue };
         let module = vm.modules().get(f.module_idx);
-        let name = module
-            .and_then(|m| debug_fn_for(m, f.pc))
-            .map(|df| df.name.clone())
-            .unwrap_or_else(|| "?".to_string());
+        let Some(df) = module.and_then(|m| debug_fn_for(m, f.pc)) else {
+            continue; // anonymous VM-plumbing frame
+        };
+        let name = df.name.clone();
         let line = module.and_then(|m| m.line_at(f.pc));
+        // Named locals for this frame (its registers hold its own function's
+        // locals; debug_functions maps pc -> local names).
         let mut locals = Vec::new();
+        for &(reg, ref lname) in &df.locals {
+            if let Some(lname) = lname {
+                if reg < 256 {
+                    locals.push(json!([lname, fmt_value(&f.regs[reg], vm, f.module_idx)]));
+                }
+            }
+        }
+        // Non-nil registers for the active frame (Registers scope).
+        let mut registers = Vec::new();
         if *fi == cur {
-            if let (Some(_m), Some(df)) = (module, module.and_then(|m| debug_fn_for(m, f.pc))) {
-                for &(reg, ref lname) in &df.locals {
-                    if let Some(lname) = lname {
-                        if reg < 256 {
-                            locals.push(json!([lname, fmt_value(&f.regs[reg], vm, f.module_idx)]));
-                        }
-                    }
+            for (ri, v) in f.regs.iter().enumerate() {
+                if !v.is_nil() {
+                    registers.push(json!([format!("r{}", ri), fmt_value(v, vm, f.module_idx)]));
                 }
             }
         }
@@ -407,6 +423,8 @@ fn build_snapshot(vm: &VM) -> Json {
             "pc": f.pc,
             "line": line,
             "locals": locals,
+            "registers": registers,
+            "source": program,
         }));
     }
     json!({ "frames": frames })
@@ -430,6 +448,7 @@ fn drain_output(out_buf: &Rc<RefCell<Vec<String>>>, to_server: &Sender<DebugEven
 
 fn debuggee_main(
     module: CodeModule,
+    program: String,
     control: Arc<Mutex<ControlState>>,
     to_server: Sender<DebugEvent>,
     from_server: Receiver<DebugCommand>,
@@ -490,7 +509,7 @@ fn debuggee_main(
                     match from_server.recv() {
                         Ok(DebugCommand::Resume) => resume = true,
                         Ok(DebugCommand::GetState(reply)) => {
-                            let snap = build_snapshot(&vm);
+                            let snap = build_snapshot(&vm, &program);
                             let _ = reply.send(snap);
                         }                        Ok(DebugCommand::Terminate) => return,
                         Ok(DebugCommand::Start) => {}
@@ -594,8 +613,23 @@ fn capabilities() -> Json {
     })
 }
 
+/// Ask the debuggee thread for a paused-state snapshot, waiting up to 2s so
+/// a request sent while the program is *running* fails cleanly instead of
+/// blocking the server loop forever (editors only query state while paused).
+fn request_snapshot(cmd_tx: &Sender<DebugCommand>) -> Result<Json, String> {
+    let (reply_tx, reply_rx) = crossbeam::channel::bounded(1);
+    if cmd_tx.send(DebugCommand::GetState(reply_tx)).is_err() {
+        return Err("debuggee unavailable".to_string());
+    }
+    match reply_rx.recv_timeout(std::time::Duration::from_millis(2000)) {
+        Ok(snap) => Ok(snap),
+        Err(_) => Err("debuggee is not paused".to_string()),
+    }
+}
+
 fn spawn_debuggee(
     module: Arc<CodeModule>,
+    program: String,
     stop_on_entry: bool,
     control: Arc<Mutex<ControlState>>,
     cmd_rx: Receiver<DebugCommand>,
@@ -603,6 +637,7 @@ fn spawn_debuggee(
 ) -> std::thread::JoinHandle<()> {
     if stop_on_entry {
         control.lock().pause_requested = true;
+        control.lock().entry_pause = true;
     }
     let module = (*module).clone();
     let control = control.clone();
@@ -610,7 +645,7 @@ fn spawn_debuggee(
     let event_tx = event_tx.clone();
     std::thread::Builder::new()
         .name("nulang-dap-debuggee".to_string())
-        .spawn(move || debuggee_main(module, control, event_tx, cmd_rx))
+        .spawn(move || debuggee_main(module, program, control, event_tx, cmd_rx))
         .expect("failed to spawn debuggee thread")
 }
 
@@ -654,6 +689,7 @@ fn handle_request<W: Write>(
                     *module = Some(Arc::new(cm));
                     *debuggee = Some(spawn_debuggee(
                         module.as_ref().unwrap().clone(),
+                        program.clone(),
                         stop_on_entry,
                         control.clone(),
                         cmd_rx.clone(),
@@ -690,7 +726,7 @@ fn handle_request<W: Write>(
                         let id = i as i64 + 1;
                         match m.resolve_line(line) {
                             Some((pc, actual_line)) => {
-                                c.breakpoints.push(ResolvedBreakpoint { id, pc, line: actual_line });
+                                c.breakpoints.push(ResolvedBreakpoint { pc });
                                 result.push(json!({ "id": id, "verified": true, "line": actual_line }));
                             }
                             None => result.push(json!({ "id": id, "verified": false, "line": line })),
@@ -754,12 +790,7 @@ fn handle_request<W: Write>(
             respond(writer, seq, request_seq, command, Ok(json!({})));
         }
         "stackTrace" => {
-            let (reply_tx, reply_rx) = crossbeam::channel::bounded(1);
-            if cmd_tx.send(DebugCommand::GetState(reply_tx)).is_err() {
-                respond(writer, seq, request_seq, command, Err("debuggee unavailable".to_string()));
-                return;
-            }
-            match reply_rx.recv() {
+            match request_snapshot(cmd_tx) {
                 Ok(snap) => {
                     let frames: Vec<Json> = snap
                         .get("frames")
@@ -773,7 +804,7 @@ fn handle_request<W: Write>(
                                 "name": f["name"],
                                 "line": f["line"],
                                 "column": 1,
-                                "source": { "path": f["moduleIdx"].as_i64().unwrap_or(0) }
+                                "source": { "path": f["source"] }
                             })
                         })
                         .collect();
@@ -785,7 +816,7 @@ fn handle_request<W: Write>(
                         Ok(json!({ "stackFrames": frames, "totalFrames": frames.len() })),
                     );
                 }
-                Err(_) => respond(writer, seq, request_seq, command, Err("debuggee is not paused".to_string())),
+                Err(e) => respond(writer, seq, request_seq, command, Err(e)),
             }
         }
         "scopes" => {
@@ -798,19 +829,22 @@ fn handle_request<W: Write>(
         }
         "variables" => {
             let vref = args.get("variablesReference").and_then(|v| v.as_i64()).unwrap_or(0);
+            // Odd variablesReference = Locals scope, even = Registers scope
+            // (see the `scopes` handler's encoding frameId*2+{1,2}).
+            let is_registers = vref % 2 == 0;
             let frame_id = ((vref - 1) / 2) as usize;
-            let (reply_tx, reply_rx) = crossbeam::channel::bounded(1);
-            if cmd_tx.send(DebugCommand::GetState(reply_tx)).is_err() {
-                respond(writer, seq, request_seq, command, Err("debuggee unavailable".to_string()));
-                return;
-            }
-            match reply_rx.recv() {
+            match request_snapshot(cmd_tx) {
                 Ok(snap) => {
-                    let vars: Vec<Json> = snap
+                    let frame = snap
                         .get("frames")
                         .and_then(|f| f.as_array())
-                        .and_then(|arr| arr.get(frame_id))
-                        .and_then(|f| f.get("locals"))
+                        .and_then(|arr| arr.get(frame_id));
+                    let list = if is_registers {
+                        frame.and_then(|f| f.get("registers"))
+                    } else {
+                        frame.and_then(|f| f.get("locals"))
+                    };
+                    let vars: Vec<Json> = list
                         .and_then(|l| l.as_array())
                         .map(|arr| {
                             arr.iter()
@@ -826,7 +860,7 @@ fn handle_request<W: Write>(
                         .unwrap_or_default();
                     respond(writer, seq, request_seq, command, Ok(json!({ "variables": vars })));
                 }
-                Err(_) => respond(writer, seq, request_seq, command, Err("debuggee is not paused".to_string())),
+                Err(e) => respond(writer, seq, request_seq, command, Err(e)),
             }
         }
         "evaluate" => {
@@ -836,12 +870,7 @@ fn handle_request<W: Write>(
                 .unwrap_or("")
                 .to_string();
             let frame_id = args.get("frameId").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-            let (reply_tx, reply_rx) = crossbeam::channel::bounded(1);
-            if cmd_tx.send(DebugCommand::GetState(reply_tx)).is_err() {
-                respond(writer, seq, request_seq, command, Err("debuggee unavailable".to_string()));
-                return;
-            }
-            match reply_rx.recv() {
+            match request_snapshot(cmd_tx) {
                 Ok(snap) => {
                     let found = snap
                         .get("frames")
@@ -871,7 +900,7 @@ fn handle_request<W: Write>(
                         }
                     }
                 }
-                Err(_) => respond(writer, seq, request_seq, command, Err("debuggee is not paused".to_string())),
+                Err(e) => respond(writer, seq, request_seq, command, Err(e)),
             }
         }
         "terminate" | "disconnect" => {
@@ -977,12 +1006,20 @@ where
                         // settles (finishes, or pauses with no further output
                         // for the quiescence window), then shut down.
                         loop {
-                            match event_rx.recv_timeout(std::time::Duration::from_millis(250)) {
-                                Ok(ev) => write_event(&mut writer, &mut seq, ev),
-                                Err(_) => break,
+                            // Drain everything already queued first: the
+                            // debuggee may have sent a burst (e.g. Exited +
+                            // Terminated) and finished, so a naive
+                            // `is_finished()` short-circuit would drop the
+                            // trailing events still in the queue.
+                            while let Ok(ev) = event_rx.try_recv() {
+                                write_event(&mut writer, &mut seq, ev);
                             }
                             if debuggee.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
                                 break;
+                            }
+                            match event_rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                                Ok(ev) => write_event(&mut writer, &mut seq, ev),
+                                Err(_) => break,
                             }
                         }
                         break;
@@ -1026,9 +1063,16 @@ pub(crate) mod tests {
         json!({ "seq": seq, "type": "request", "command": command, "arguments": args })
     }
 
-    /// Write `source` to a fresh temp file and return its path.
+    /// Write `source` to a fresh unique temp file and return its path.
     fn write_prog(source: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("nulang-dap-test-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "nulang-dap-test-{}-{}",
+            std::process::id(),
+            n
+        ));
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join("prog.nula");
         std::fs::write(&path, source).unwrap();
@@ -1116,5 +1160,62 @@ pub(crate) mod tests {
         // No breakpoints set -> the program runs to completion.
         assert!(msgs.iter().any(|m| m["event"] == "exited"), "expected exited, got {:#?}", msgs);
         assert!(msgs.iter().any(|m| m["event"] == "terminated"), "expected terminated, got {:#?}", msgs);
+    }
+
+    #[test]
+    fn test_state_queries_while_paused() {
+        // Breakpoint on line 2 (`let b = 2`): when paused there, local `a` is 1.
+        let source = "let a = 1 in {\n  let b = 2 in {\n    let c = a + b in c\n  }\n}";
+        let script = vec![
+            req(1, "initialize", json!({})),
+            req(2, "launch", json!({ "program": "<prog>" })),
+            req(3, "setBreakpoints", json!({ "source": { "path": "<prog>" }, "breakpoints": [ { "line": 2 } ] })),
+            req(4, "configurationDone", json!({})),
+            req(5, "stackTrace", json!({ "threadId": 1 })),
+            req(6, "scopes", json!({ "frameId": 0 })),
+            req(7, "variables", json!({ "variablesReference": 1 })),   // Locals scope of frame 0
+            req(8, "variables", json!({ "variablesReference": 2 })),   // Registers scope of frame 0
+            req(9, "evaluate", json!({ "expression": "a", "frameId": 0 })),
+        ];
+        let msgs = run_session(source, &script);
+
+        let stopped = msgs.iter().find(|m| m["event"] == "stopped");
+        assert!(stopped.is_some(), "expected a stopped event, got {:#?}", msgs);
+        assert_eq!(stopped.unwrap()["body"]["reason"], "breakpoint");
+
+        // stackTrace: frame carries a real source path (the program file).
+        let st = msgs.iter().find(|m| m["command"] == "stackTrace" && m["type"] == "response");
+        let st = st.expect("expected a stackTrace response");
+        assert!(st["success"].as_bool().unwrap_or(false), "stackTrace failed: {:#?}", st);
+        let frame = &st["body"]["stackFrames"][0];
+        assert!(frame["source"]["path"].is_string(), "source.path must be a path, got {:#?}", frame["source"]);
+        assert!(!frame["name"].as_str().unwrap_or("").is_empty());
+
+        // scopes: Locals + Registers.
+        let scopes = msgs.iter().find(|m| m["command"] == "scopes" && m["type"] == "response");
+        let scopes = scopes.expect("expected a scopes response");
+        let names: Vec<_> = scopes["body"]["scopes"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap_or("")).collect();
+        assert!(names.contains(&"Locals") && names.contains(&"Registers"), "got scopes {:#?}", names);
+
+        // variables (Locals): the paused frame exposes local `a` = 1.
+        let vars = msgs.iter().find(|m| m["command"] == "variables" && m["type"] == "response" && m["request_seq"] == 7);
+        let vars = vars.expect("expected a Locals variables response");
+        let a = vars["body"]["variables"].as_array().unwrap().iter().find(|v| v["name"] == "a");
+        assert!(a.is_some(), "local 'a' not found in {:#?}", vars);
+        assert_eq!(a.unwrap()["value"], "1");
+
+        // variables (Registers): non-nil registers are reported (r16 = LOCAL_BASE for `a`).
+        let regs = msgs.iter().find(|m| m["command"] == "variables" && m["type"] == "response" && m["request_seq"] == 8);
+        let regs = regs.expect("expected a Registers variables response");
+        assert!(
+            regs["body"]["variables"].as_array().map(|v| !v.is_empty()).unwrap_or(false),
+            "expected non-empty registers, got {:#?}",
+            regs
+        );
+
+        // evaluate "a" resolves to 1.
+        let ev = msgs.iter().find(|m| m["command"] == "evaluate" && m["type"] == "response");
+        let ev = ev.expect("expected an evaluate response");
+        assert_eq!(ev["body"]["result"], "1");
     }
 }

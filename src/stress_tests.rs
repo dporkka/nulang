@@ -483,6 +483,7 @@ fn stress_mailbox_never_drops_system_messages() {
             payload: Arc::new(vec![Value::int(i)]),
             sender: 0,
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         if let Some(a) = rt.actors.get_mut(&actor) {
             let _ = a.mailbox.push(msg);
@@ -496,6 +497,7 @@ fn stress_mailbox_never_drops_system_messages() {
             payload: Arc::new(vec![Value::int(1000 + i)]),
             sender: 0,
             priority: MessagePriority::System,
+            trace_id: None,
         };
         if let Some(a) = rt.actors.get_mut(&actor) {
             let _ = a.mailbox.push(msg);
@@ -509,6 +511,7 @@ fn stress_mailbox_never_drops_system_messages() {
             payload: Arc::new(vec![Value::int(2000 + i)]),
             sender: 0,
             priority: MessagePriority::Bulk,
+            trace_id: None,
         };
         if let Some(a) = rt.actors.get_mut(&actor) {
             let _ = a.mailbox.push(msg);
@@ -1389,6 +1392,7 @@ fn stress_mailbox_system_priority_preservation() {
             payload: Arc::new(vec![Value::int(i)]),
             sender: 0,
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         if let Some(a) = rt.actors.get_mut(&actor) {
             let _ = a.mailbox.push(msg);
@@ -1401,6 +1405,7 @@ fn stress_mailbox_system_priority_preservation() {
             payload: Arc::new(vec![Value::int(1000 + i)]),
             sender: 0,
             priority: MessagePriority::System,
+            trace_id: None,
         };
         if let Some(a) = rt.actors.get_mut(&actor) {
             let _ = a.mailbox.push(msg);

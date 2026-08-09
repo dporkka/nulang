@@ -21,9 +21,6 @@ use wasm_encoder::*;
 
 const IMPORT_ALLOC_IDX: u32 = 0; // function index of nulang_alloc
 
-const IMPORT_DISPATCH_IDX: u32 = 1; // function index of nulang_dispatch
-
-const IMPORT_LOG_IDX: u32 = 2; // function index of log
 /// Function index of `env.io_print` — used in `Call` instructions.
 const IMPORT_IO_PRINT: u32 = 3;
 /// Function index of `env.io_read` — used in `Call` instructions.
@@ -33,9 +30,6 @@ const FUNC_IMPORT_COUNT: u32 = 5;
 
 const TY_VOID_TO_I64: u32 = 0;
 
-const TY_I64_TO_I64: u32 = 1;
-
-const TY_I64I64_TO_I64: u32 = 2;
 const TY_I32I32_TO_I64: u32 = 3;
 const TY_FIXED_COUNT: u32 = 4;
 
@@ -373,36 +367,6 @@ impl WasmBackend {
         
         self.codes.function(&body);
     }
-
-    fn compute_block_order(&self, func: &mir::Function) -> Vec<BlockId> {
-        let mut order = vec![func.entry];
-        let mut seen: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
-        seen.insert(func.entry);
-        let mut i = 0;
-        while i < order.len() {
-            let bid = order[i];
-            let block = &func.blocks[bid.0 as usize];
-            match &block.terminator {
-                Terminator::Jump(t) => {
-                    if seen.insert(*t) {
-                        order.push(*t);
-                    }
-                }
-                Terminator::Branch { then_, else_, .. } => {
-                    if seen.insert(*then_) {
-                        order.push(*then_);
-                    }
-                    if seen.insert(*else_) {
-                        order.push(*else_);
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        order
-    }
-
 
     fn compile_simd_body(&self, body: &mut Function, vloop: &crate::mir_wasm_simd::VecLoop, func: &mir::Function) {
         let pm = value_layout::PAYLOAD_MASK as i64;
@@ -885,45 +849,6 @@ impl WasmBackend {
         body.instruction(&Instruction::I64And);
         body.instruction(&Instruction::I64Const(ti));
         body.instruction(&Instruction::I64Or);
-    }
-
-    // ── Terminators ────────────────────────────────────────────────
-
-    fn compile_terminator(
-        &self,
-        body: &mut Function,
-        term: &Terminator,
-        labels: &HashMap<BlockId, u32>,
-        cur: u32,
-        func: &mir::Function,
-    ) {
-        match term {
-            Terminator::Return(Some(l)) => {
-                body.instruction(&Instruction::LocalGet(l.0));
-                body.instruction(&Instruction::Return);
-            }
-            Terminator::Return(None) => {
-                body.instruction(&Instruction::I64Const(value_layout::TAG_UNIT as i64));
-                body.instruction(&Instruction::Return);
-            }
-            Terminator::Jump(t) => {
-                let tl = labels.get(t).copied().unwrap_or(0);
-                body.instruction(&Instruction::Br(if tl <= cur { cur - tl + 1 } else { 1 }));
-            }
-            Terminator::Branch { cond, then_, else_ } => {
-                body.instruction(&Instruction::LocalGet(self.mir_local(cond, func)));
-                body.instruction(&Instruction::I64Const(1));
-                body.instruction(&Instruction::I64And);
-                body.instruction(&Instruction::I32WrapI64);
-                let tl = labels.get(then_).copied().unwrap_or(0);
-                let el = labels.get(else_).copied().unwrap_or(0);
-                body.instruction(&Instruction::BrIf(if tl <= cur { cur - tl + 1 } else { 1 }));
-                body.instruction(&Instruction::Br(if el <= cur { cur - el + 1 } else { 1 }));
-            }
-            Terminator::Resume(_) | Terminator::Unterminated => {
-                body.instruction(&Instruction::Return);
-            }
-        }
     }
 
     // ── SIMD lowering ──────────────────────────────────────────────

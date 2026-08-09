@@ -538,55 +538,6 @@ pub fn aot_clear_constants() {
     });
 }
 
-/// Resolve a string from either the JIT constant pool or the AOT standalone pool.
-fn resolve_string(raw: u64) -> Option<String> {
-    // Try JIT constant pool first (for JIT-compiled code).
-    if (raw & TAG_MASK) == TAG_STRING {
-        let id = (raw & PAYLOAD_MASK) as u32;
-        // Check JIT constants
-        let jit_result = JIT_CONSTANTS.with(|cell| unsafe {
-            let cp = (*cell.get()).as_slice();
-            cp.get(id as usize).and_then(|c| match c {
-                crate::bytecode::Constant::String(s) => Some(s.clone()),
-                _ => None,
-            })
-        });
-        if jit_result.is_some() {
-            return jit_result;
-        }
-        // Fall back to AOT constants
-        AOT_CONSTANTS.with(|cell| {
-            let guard = cell.borrow();
-            if let Some(ref constants) = *guard {
-                constants.get(id as usize).and_then(|c| match c {
-                    crate::bytecode::Constant::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-            } else {
-                None
-            }
-        })
-    } else if (raw & TAG_MASK) == TAG_PTR {
-        let ptr = (raw & PAYLOAD_MASK) as *mut u8;
-        if ptr.is_null() {
-            return None;
-        }
-        unsafe {
-            let header = &*ActorHeap::header_of(ptr);
-            if header.type_tag != HeapTypeTag::String {
-                return None;
-            }
-            Some(
-                CStr::from_ptr(ptr as *const std::ffi::c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
-    } else {
-        None
-    }
-}
-
 /// Allocate via callbacks or fall back to standalone AOT heap.
 /// Check if JIT callbacks are set, and if so, use them.
 unsafe fn try_with_callbacks<R>(
@@ -797,6 +748,32 @@ pub fn resolve_string_coerce(raw: u64) -> Option<String> {
     }
     if val.is_bool() {
         return Some(val.as_bool().unwrap().to_string());
+    }
+    if (raw & TAG_MASK) == TAG_STRING {
+        // String constant from the module pool: content lives in the JIT or
+        // AOT constant pool, keyed by the payload index.
+        let id = (raw & PAYLOAD_MASK) as u32;
+        let from_jit = JIT_CONSTANTS.with(|cell| unsafe {
+            let cp = (*cell.get()).as_slice();
+            cp.get(id as usize).and_then(|c| match c {
+                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                _ => None,
+            })
+        });
+        if from_jit.is_some() {
+            return from_jit;
+        }
+        return AOT_CONSTANTS.with(|cell| {
+            let guard = cell.borrow();
+            if let Some(ref constants) = *guard {
+                constants.get(id as usize).and_then(|c| match c {
+                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+            } else {
+                None
+            }
+        });
     }
     if (raw & TAG_MASK) == TAG_PTR {
         let ptr = (raw & PAYLOAD_MASK) as *mut u8;

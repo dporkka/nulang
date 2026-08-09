@@ -1,155 +1,67 @@
-# Nulang Self-Hosting Bootstrap
+# Nulang Bootstrap Compiler
 
-> **Status:** Stage 13 — bytecode closure compilation + fn type checking.
-> **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
-> that targets the `.nbc` format (RFC 0001).
+> Self-hosting path for Nulang: a Nulang→`.nbc` compiler written in Nulang Core
+> (RFC 0002). Decouples the language from the Rust host's survival.
 
-## Architecture
+## Strategy (3-stage bootstrap)
+
+### Stage 0 (Current — Rust host)
+The existing Rust compiler (`nulang`) parses, type-checks, and compiles Nulang
+Core programs. It serves as the **host** for Stages 1–2.
+
+### Stage 1 (In Progress — Nulang Core emitter)
+`emitter.nula` — a Nulang Core program that takes a simplified AST
+representation (instruction sequence + metadata) and emits structured JSON.
+
+The Rust host (`src/bootstrap_host.rs` or `bootstrap/host.rs`) converts the
+JSON output to `.nbc` binary format (RFC 0001).
+
+This stage proves that Nulang Core can produce the `.nbc` format. The emitter
+does not parse Nulang syntax yet — it consumes a pre-lowered representation.
+
+### Stage 2 (Planned — Self-compiling)
+A full Nulang Core parser + type-checker + code generator, written in Nulang
+Core, that compiles itself. Stage 2 compiles Stage 2 source → `.nbc`, and the
+output (run on the Rust host) compiles the same source → identical `.nbc`.
+
+### Stage 3 (Planned — Independence)
+The Stage 2 `.nbc` is run on a minimal Core VM (pure interpreter, no JIT, no
+WASM, no AI, no Python — just the frozen Core opcodes). That VM can be ported
+to new hardware without the Rust toolchain, achieving full host independence.
+
+## Directory Structure
 
 ```
-source.nula
-  → compiler_core.nula      (lexer + parser + type checker + evaluator in Core)
-  → compile_hex.nula         (Core → hex bytecode emitter)
-  → fixup_hex.py             (patch jump offsets + constant pool)
-  → hex2nbc.py               (hex → .nbc binary)
-  → source.nbc               (frozen bytecode artifact)
-  → VM::run(nbc)
+bootstrap/
+├── README.md           # This file
+├── emitter.nula        # Stage 1: JSON emitter for .nbc generation
+├── host.rs             # Rust host: runs emitter, converts JSON → .nbc
+└── self_test.nula      # Minimal Nulang Core test program
 ```
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `host.nula` | Host shim |
-| `compiler_core.nula` | Lexer + Pratt parser + type checker + evaluator in Nulang Core |
-| `compile_arith.nula` | Bytecode compiler for arithmetic (prints VM instructions) |
-| `compile_hex.nula` | Hex-output bytecode compiler (u32 words as 8-char hex) |
-| `fixup_hex.py` | Patch Jmp/JmpF/JmpT offsets and ConstU indices |
-| `hex2nbc.py` | Convert hex text to .nbc binary |
-| `self_test.nula` | Core conformance target (fib(10) = 55) |
-| `spill_bug_repro.nula` | Minimal repro for spill temp clobbering bug (fixed) |
-
-## Running
+## Build & Test
 
 ```bash
-# Interactive evaluator (stdin):
-echo "1 + 2 * 3" | nulang bootstrap/compiler_core.nula
-# → 7
+# Stage 1: Run the emitter (produces JSON on stdout)
+cargo run -- bootstrap/emitter.nula
 
-# Bytecode compiler (stdin):
-echo "1 + 2 * 3" | nulang bootstrap/compile_arith.nula
-# ; 1 + 2 * 3
-#   Const1 r8
-#   Const2 r9
-#   ConstU r10 # 3
-#   IMul r9 r10 r11
-#   IAdd r8 r11 r10
-#   Halt
-# ; result in r10
-
-# Hex bytecode compiler (piped through fixup):
-echo "1 + 2 * 3" | nulang bootstrap/compile_hex.nula | python3 bootstrap/fixup_hex.py
-
-# Full .nbc pipeline:
-echo "1 + 2 * 3" | nulang bootstrap/compile_hex.nula | python3 bootstrap/fixup_hex.py | python3 bootstrap/hex2nbc.py > out.nbc
-nulang out.nbc
-# → 7
-
-# Hex compiler self-test (when stdin is empty, compiles "1 < 2 and 2 < 3"):
-nulang bootstrap/compile_hex.nula < /dev/null
-
-# Self-test (when stdin is empty):
-nulang bootstrap/compiler_core.nula < /dev/null
-# Expected: 42, 7, 9, 43
+# Run the bootstrap self-test
+cargo test -- bootstrap_host
 ```
 
+## Core Constraints
 
-## What's implemented
+The emitter uses ONLY Nulang Core (RFC 0002):
+- Expressions: `let`, `if`/`else`, `match`, function application, arithmetic
+- Types: `Int`, `Bool`, `String`, `Unit`, `Nil`, `Vec<T>`, `Map<K,V>`, records
+- Declarations: `fn`, `const`
+- Effects: `IO.print` and `IO.read` only
+- Capabilities: `val` only (implicit)
 
-### Stage 3 — Arithmetic + let bindings (2026-07-23)
-- **Lexer:** character-at-a-time scanning via `perform String.charAt` / `String.length`.
-- **Parser:** single-function Pratt parser with correct precedence and left-associativity.
-- **Let bindings:** `let x = 42 in x + 1` → 43. 2-slot environment (e0, e1).
+## References
 
-### Stage 5 — Closures with environment capture (2026-07-24)
-- **Lambdas:** `fn(x) => x + 1` — parsed inline in the Pratt prefix handler.
-- **Function application:** `f(arg)` — handled as a postfix operator with highest precedence.
-- **Environment capture:** `let a = 3 in (fn(x) => a + x)(5)` → 8.
-- **Currying:** `let add = fn(a) => fn(b) => a + b in add(3)(4)` → 7.
-
-### Stage 6 — 4-slot environment (2026-07-28)
-- **Environment:** expanded from 2 slots to 4 slots (e0..e3), supporting 4 nested `let` bindings.
-- **Lookup:** recursive `env_lookup` searches most-recent slot first for correct shadowing.
-
-### Stage 7 — if/then/else (2026-07-28)
-- **Conditional:** `if <cond> then <then> else <else>` — parsed in the Pratt prefix handler.
-- Non-zero condition values are truthy; zero is falsy.
-
-### Stage 8 — Comparisons + booleans + stdin (2026-07-28)
-- **Comparisons:** `==`, `!=`, `<`, `>`, `<=`, `>=` — all return 1 (true) or 0 (false).
-- **Boolean operators:** `and` (prec 1), `or` (prec 0), `not` (prefix).
-- **Boolean literals:** `true` → 1, `false` → 0.
-- **Stdin REPL:** reads expression from stdin, evaluates, prints result.
-
-### Stage 9 — Bytecode compiler (text) + hex output (2026-07-28)
-- **compile_arith.nula:** single-pass Pratt compiler emits VM instructions as text.
-- Supports integer literals, `+`, `-`, `*`, `/`, and parenthesized expressions.
-- Register allocation: starts at r8, linear assignment per subexpression.
-- **let bindings:** scoped variables via env (hash|reg), 4 slots. Variable refs emit Move.
-- **if/then/else:** JmpF/Jmp with position-based labels (L0e/L0x).
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF` (short-circuit), `Jmp`, `JmpF`, `Jmp`, `Halt`.
-
-### Stage 10 — Hex bytecode output + .nbc pipeline (2026-07-28)
-- **compile_hex.nula:** emits u32 instruction words as 8-char hex (one per line).
-- Adds `hex_digit` helper and `emit_hex` for hex formatting.
-- Works around Nulang string-var concatenation bug using `""` prefix trick.
-- **fixup_hex.py:** patches Jmp/JmpF/JmpT offsets and ConstU indices in a two-pass fixup.
-- **hex2nbc.py:** converts corrected hex text to `.nbc` binary (NLBC magic, header, JSON metadata).
-- **Bool/Int conversion:** comparisons return Bool-tagged values (bit 39); `and`/`or`/`if` convert Int→Bool via `ICmpEq+Not` when needed. `!=` lowered to `ICmpEq+Not`.
-- Full pipeline: `compile_hex.nula | fixup_hex.py | hex2nbc.py > out.nbc`
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Not`, `Move`, `JmpF`, `JmpT`, `Jmp`, `Halt`.
-
-### Stage 11 — Type checking (2026-07-30)
-- **Type checker:** separate `tc_pratt` pass runs before evaluation.
-- **Types:** `Int` (0), `Bool` (1), `Error` (2). Type environment mirrors value environment.
-- **Integer literals** → `Int`, `true`/`false` → `Bool`.
-- **Arithmetic** (`+`, `-`, `*`, `/`) requires `Int` operands, produces `Int`.
-- **Comparisons** (`==`, `!=`, `<`, `>`, `<=`, `>=`) require `Int` operands, produce `Bool`.
-- **Boolean ops** (`and`, `or`, `not`) require `Bool` operands, produce `Bool`.
-- **`if c then t else e`**: `c` must be `Bool`; `t` and `e` must have the same type.
-- **`let x = v in body`**: propagates type of `v` to `x` in `body`.
-- **Error reporting**: prints "Type error: expected X, got Y" and outputs 0 instead of evaluating.
-
-### Stage 12 — Type checking for closures (2026-07-31)
-- **Fn type:** `tc_pratt` returns type `Fn` (3) for closures instead of `Int` (0).
-- **Function application:** `f(arg)` validates that `f` has type `Fn`, produces "expected function" errors.
-- **Parameter typing:** closure parameters added to type environment as `Int`.
-- **Error propagation:** type errors inside closure bodies propagate outward.
-- **Currying:** `Fn` type preserved through application results for chained calls.
-
-
-### Stage 13 — Bytecode closure compilation (2026-07-31)
-- **compile_hex.nula:** emits `Closure` (0x60), `ClosureCall` (0x64), and `RetVal` (0x57) opcodes.
-- **Named functions:** `fn name(x) => body` support desugars to env binding + continuation.
-- **Function table:** `fixup_hex.py` patches placeholder function indices and Jmp offsets; `hex2nbc.py` builds `.nbc` function table from `FN_START` markers.
-- **Argument passing:** caller moves arg to r10; VM copies all registers to the new frame on `ClosureCall`.
-- **Conditionals in closures:** `(fn(x) => if x then 1 else 0)(1) = 1` — fixed `fixup_hex.py` Jmp target priority (`fn_end` before `end`).
-- **End-to-end verified:** `(fn(x) => x + 1)(5) = 6`, `fn add(x) => x + 1 add(5) = 6`, `(fn(x) => x + 1)((fn(y) => y * 2)(3)) = 7`.
-- **Limitations:** multi-fn continuation parsing; nested closures without capture support return closure values.
-
-### Unnumbered — Formal semantics proofs
-- **`types.lean`:** `canonical_forms` proved (was `sorry`).
-
-### Stage 14 — Curried closure capture (2026-08-06)
-- **Closure capture for curried functions:** `(fn(a) => fn(b) => a + b)(1)(2)` → 3.
-- Fixed CapStore/CapLoad opcode swap at body start and fn_end in `compile_hex.nula`.
-- Environment capture at definition time now correctly copies the captured parameter to r11 and maps the env to r11.
-- **`capabilities.lean`:** `cap_sendable` and `discharge_sendable` proved; `is_sendable` fixed to include `Iso`.
-
-## What remains
-
-
-- Module-level parsing (multiple `fn` definitions in one file)
-- HM type inference
-- Type ascription syntax (`x: Int`)
-- Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
+- RFC 0001: Format Stability (`.nbc` format)
+- RFC 0002: Frozen Core
+- RFC 0003: Remaining Longevity Roadmap (Item 3)
+- `src/format/nbc.rs`: `.nbc` encoder/decoder
+- `src/bytecode.rs`: Instruction encoding

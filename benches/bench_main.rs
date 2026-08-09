@@ -6,6 +6,7 @@
 mod actor_bench;
 mod dist_bench;
 mod gc_bench;
+mod interp_bench;
 mod jit_bench;
 mod persist_bench;
 mod vm_bench;
@@ -14,6 +15,7 @@ use criterion::criterion_main;
 
 criterion_main!(
     vm_bench::benches,
+    interp_bench::benches,
     actor_bench::benches,
     jit_bench::benches,
     gc_bench::benches,

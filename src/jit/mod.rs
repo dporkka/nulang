@@ -40,11 +40,10 @@ mod tests;
 
 pub use compiler::*;
 
-use std::collections::HashMap;
-
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // ---------------------------------------------------------------------------
 // Hot Counter
@@ -76,20 +75,20 @@ pub struct JitSession {
     /// pointer, region length in instructions). The length is recorded at
     /// compile time so the VM can advance pc after a JIT run without
     /// re-scanning the instruction stream.
-    compiled: HashMap<(usize, usize), (*const u8, usize)>,
+    compiled: FxHashMap<(usize, usize), (*const u8, usize)>,
     /// Per-region execution counters for already-compiled code. When a
     /// region crosses TIER2_THRESHOLD, a more aggressive compilation is
     /// attempted. Reset after each promotion attempt.
-    tier2_counters: HashMap<(usize, usize), u64>,
+    tier2_counters: FxHashMap<(usize, usize), u64>,
     /// Hot counters keyed by `(module_idx, offset)` so identical offsets in
     /// different modules do not share (or pollute) each other's counts.
     /// Per-session rather than process-global: VMs never share counters,
     /// and the single-scheduler-thread invariant means no synchronization
     /// is needed — same as `compiled` and `typed_regions`.
-    hot_counters: HashMap<(usize, usize), u64>,
+    hot_counters: FxHashMap<(usize, usize), u64>,
     /// Regions compiled through the type-directed (guard-stripped) path in
     /// `typed_compiler`, i.e. where inferred register types were available.
-    typed_regions: std::collections::HashSet<(usize, usize)>,
+    typed_regions: FxHashSet<(usize, usize)>,
     /// Reusable function builder context.
     builder_context: FunctionBuilderContext,
     /// Reusable codegen context.
@@ -133,11 +132,11 @@ impl JitSession {
 
         Some(JitSession {
             module,
-            compiled: HashMap::new(),
-            hot_counters: HashMap::new(),
-            typed_regions: std::collections::HashSet::new(),
+            compiled: FxHashMap::default(),
+            hot_counters: FxHashMap::default(),
+            typed_regions: FxHashSet::default(),
             builder_context: FunctionBuilderContext::new(),
-            tier2_counters: HashMap::new(),
+            tier2_counters: FxHashMap::default(),
             ctx,
         })
     }

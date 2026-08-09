@@ -614,6 +614,7 @@ mod tests {
             payload: Arc::new(vec![Value::int(42)]),
             sender: 99,
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         assert!(actor.send(msg.clone()).is_ok());
         let received = actor.receive().expect("should receive a message");
