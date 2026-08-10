@@ -2702,6 +2702,41 @@ mod tests {
     }
 
     #[test]
+    fn test_aot_abortive_handle_body_no_perform() {
+        // An abortive (non-resuming) `handle` whose body never `perform`s the
+        // handled effect compiles in AOT: the handler body block is unreachable
+        // and the handle value is the body value. This documents the current
+        // baseline before PerformDirect (perform → handler body) support.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"handle { 5 } { | IO.err() => 0 }"#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(5),
+            "abortive handle without a perform evaluates to the body value"
+        );
+    }
+
+    #[test]
     fn test_is_all_int_empty() {
         let mut builder = mir::FunctionBuilder::new("empty_int", Some(crate::types::Type::int()));
         let tmp = builder.add_temp(crate::types::Type::int());
