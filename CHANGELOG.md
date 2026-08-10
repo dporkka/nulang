@@ -396,6 +396,14 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **`nula new --template` library grows to 7 templates** (Experimental,
+  package manager): adds `distributed` (spawn + message-passing worker
+  actors), `ai-agent` (actor backed by `perform Inference.ask`), and
+  `web` (HTTP client via `Http.get`/`Http.post` with JSON). Each
+  validated end-to-end via `nula new` → `nula run`. The planned
+  `Http.serve`-based server template is deferred pending a CLI dispatch
+  fix (see PLAN.md Phase 4 D6).
+
 - **RFC 0014 — durable-actor re-spawn on node failure (Draft)**: design
   for PLAN.md Phase 5 deliverable 7 part (c). Specifies the
   confirmed-gone gate (`Removed` membership state via positive

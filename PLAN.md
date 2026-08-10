@@ -948,10 +948,21 @@ has a killer application demonstrating a category it wins.
 5. **VS Code extension published to marketplace.** The
    `.vscode/extension.js` scaffold exists; publish it. Same for a
    Zed extension and a Neovim plugin.
-6. **`nula` template library.** `nula new --template <name>` currently
-   supports 4 templates. Add: `--template distributed` (multi-node
-   sample), `--template ai-agent` (agent + Inference), `--template
-   web` (HTTP server + JSON), `--template cli` (already exists).
+6. **`nula` template library.** ✅ **Grew to 7 templates 2026-08-09**
+   (`distributed`, `ai-agent`, `web` added on top of `default`/`cli`/
+   `lib`/`full`). `--template distributed` spawns two message-passing
+   worker actors; `--template ai-agent` is an actor backed by
+   `perform Inference.ask`; `--template web` is an HTTP client via
+   `Http.get`/`Http.post`. The PLAN's original "web (HTTP server +
+   JSON)" framing is partially deferred: the server template uses the
+   `Http.serve` effect, which is currently only wired through the
+   integration-test harness and returns "Unhandled effect" via the CLI
+   (pre-existing gap, tracked for follow-up) — so the shipped web
+   template uses the client effects that work via the CLI. Each new
+   template was validated end-to-end (`nula new` → `nula run`); 2 new
+   tests cover all 7 templates scaffolding a valid entry point and
+   unknown-template rejection. Remaining Phase 4 D6 follow-up: swap the
+   web template to `Http.serve` once the CLI dispatch is fixed.
 7. **Speaking + writing.** One conference talk (Strange Loop, Papers
    We Love, LambdaConf), one long-form technical post per quarter
    (JIT internals, capability system, DST harness, formal semantics).
