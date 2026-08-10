@@ -111,7 +111,7 @@ impl<'a> AotContext<'a> {
 /// just control flow within the same native function). Without these edges the
 /// handler body blocks would be unreachable in the successor graph and never
 /// compiled.
-fn resuming_handler_edges(func: &mir::Function) -> Vec<(mir::BlockId, mir::BlockId)> {
+fn effect_handler_edges(func: &mir::Function) -> Vec<(mir::BlockId, mir::BlockId)> {
     let mut edges = Vec::new();
     for block in &func.blocks {
         for stmt in &block.stmts {
@@ -124,21 +124,13 @@ fn resuming_handler_edges(func: &mir::Function) -> Vec<(mir::BlockId, mir::Block
                 ..
             } = stmt
             {
-                let resuming = func
+                if let Some(body) = func
                     .handler_tables
                     .get(href.table_index as usize)
                     .and_then(|t| t.bindings.get(href.binding_index as usize))
-                    .map(|b| b.resume)
-                    .unwrap_or(false);
-                if resuming {
-                    if let Some(body) = func
-                        .handler_tables
-                        .get(href.table_index as usize)
-                        .and_then(|t| t.bindings.get(href.binding_index as usize))
-                        .map(|b| b.body)
-                    {
-                        edges.push((block.id, body));
-                    }
+                    .map(|b| b.body)
+                {
+                    edges.push((block.id, body));
                 }
             }
         }
@@ -161,7 +153,7 @@ fn compute_predecessors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::
             _ => {}
         }
     }
-    for (src, dst) in resuming_handler_edges(func) {
+    for (src, dst) in effect_handler_edges(func) {
         preds.entry(dst).or_default().push(src);
     }
     preds
@@ -178,7 +170,7 @@ fn compute_successors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::Bl
         };
         succs.insert(block.id, targets);
     }
-    for (src, dst) in resuming_handler_edges(func) {
+    for (src, dst) in effect_handler_edges(func) {
         succs.entry(src).or_default().push(dst);
     }
     succs
@@ -211,16 +203,15 @@ fn reverse_postorder(func: &mir::Function) -> Vec<mir::BlockId> {
     order
 }
 
-/// Map each resuming handler body block to its declared effect parameters
-/// (MIR locals). A `perform` passes its args into these as block params, so
-/// the handler body can read them like a callee reads parameters.
-fn resuming_handler_body_params(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::LocalId>> {
+/// Map each effect-handler body block (resuming OR abortive) to its declared
+/// effect parameters (MIR locals). A `perform` passes its args into these as
+/// block params, so the handler body can read them like a callee reads
+/// parameters.
+fn effect_handler_body_params(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::LocalId>> {
     let mut out: HashMap<mir::BlockId, Vec<mir::LocalId>> = HashMap::new();
     for table in &func.handler_tables {
         for binding in &table.bindings {
-            if binding.resume {
-                out.insert(binding.body, binding.params.clone());
-            }
+            out.insert(binding.body, binding.params.clone());
         }
     }
     out
@@ -388,12 +379,12 @@ pub enum CompileMode {
 /// Check whether a function is eligible for unboxed compilation:
 /// all params are `KnownType::Int` and the return type is Int or void.
 pub fn is_all_int(func: &mir::Function) -> bool {
-    // Functions with resuming effects must stay boxed. The perform-result and
-    // handler-param locals carry Unknown type metadata, so operations on them
-    // fall back to the NaN-tagged runtime helpers (`nulang_iadd` etc.) — which
-    // misread raw (unboxed) operands as floats. Boxed operands are properly
-    // tagged, so the helpers compute correctly.
-    if !resuming_handler_edges(func).is_empty() {
+    // Functions with handled effects (resuming or abortive) must stay boxed.
+    // The perform-result and handler-param locals carry Unknown type metadata,
+    // so operations on them fall back to the NaN-tagged runtime helpers
+    // (`nulang_iadd` etc.) — which misread raw (unboxed) operands as floats.
+    // Boxed operands are properly tagged, so the helpers compute correctly.
+    if !effect_handler_edges(func).is_empty() {
         return false;
     }
     let local_base = mir::FunctionBuilder::LOCAL_BASE as usize;
@@ -798,7 +789,7 @@ pub fn compile_mir_function_body(
 
         // Resuming handler body blocks receive their effect parameters as
         // block params (a `perform` jumps to them with the arg values).
-        let handler_body_params = resuming_handler_body_params(mir_func);
+        let handler_body_params = effect_handler_body_params(mir_func);
 
         // Create CLIF blocks — allocate block params for merge blocks.
         let mut block_map: HashMap<mir::BlockId, cranelift::prelude::Block> = HashMap::new();
@@ -809,8 +800,9 @@ pub fn compile_mir_function_body(
                 entry_block
             } else {
                 let blk = builder.create_block();
-                // Resuming handler body: force block params for its effect
-                // parameters (local_base + LocalId), in declared order.
+                // Effect-handler body (resuming or abortive): force block
+                // params for its declared effect parameters
+                // (local_base + LocalId), in declared order.
                 if let Some(params) = handler_body_params.get(&block.id) {
                     let mut regs = Vec::with_capacity(params.len());
                     for p in params {
@@ -1143,6 +1135,47 @@ fn compile_stmt(
                         let resume_val = builder.block_params(cont)[0];
                         local_vals.insert(dst_reg, resume_val);
                         handler_continuations.insert(body_block, (cont, dst_reg));
+                        return Ok(());
+                    } else {
+                        // Abortive perform: control transfers to the handler
+                        // body and never returns. Jump to it with the effect
+                        // args as its block params; the handler body computes
+                        // the handle expression's value and `PopHandler +
+                        // Jump(join)` merges it at the join block (whose
+                        // live-ins already carry the merge). The remainder of
+                        // this block (after the perform) is dead — bind dst to
+                        // a dummy and let it compile into a fresh continuation
+                        // so the block graph stays valid; the real value flows
+                        // from the handler body path.
+                        let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+                        let handler_block = *block_map.get(&binding.body).ok_or_else(|| {
+                            AotCompileError::Internal(format!(
+                                "abortive handler body block {} not mapped",
+                                binding.body.0
+                            ))
+                        })?;
+                        let param_regs = block_params
+                            .get(&binding.body)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut jump_args: Vec<BlockArg> = Vec::with_capacity(param_regs.len());
+                        for (arg, _param_reg) in args.iter().zip(param_regs.iter()) {
+                            let arg_reg = mir::FunctionBuilder::LOCAL_BASE + arg.0;
+                            jump_args.push(BlockArg::from(
+                                *local_vals.get(&arg_reg).ok_or_else(|| {
+                                    AotCompileError::Internal(format!(
+                                        "perform arg local {} uninitialized",
+                                        arg.0
+                                    ))
+                                })?,
+                            ));
+                        }
+                        builder.ins().jump(handler_block, &jump_args);
+                        let cont = builder.create_block();
+                        builder.switch_to_block(cont);
+                        // Dead-value binding so the (dead) post-perform code
+                        // compiles; never executed.
+                        local_vals.insert(dst_reg, builder.ins().iconst(types::I64, 0));
                         return Ok(());
                     }
                 }
@@ -3003,6 +3036,92 @@ mod tests {
             crate::vm::Value::from_raw(raw).as_int(),
             Some(12),
             "handler param x must receive 5, resume 6, then a*2 = 12"
+        );
+    }
+
+    #[test]
+    fn test_aot_abortive_handler_with_param() {
+        // An abortive handler (no `resume`): `perform CustomErr.raise(7)`
+        // transfers control to the handler body, which receives x = 7 and
+        // computes 7 + 100 = 107. The post-perform `a * 2` is dead (control
+        // never returns from an abortive perform).
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            effect CustomErr { raise: Int -> Int }
+            fn f() -> Int {
+                handle {
+                    let a = perform CustomErr.raise(7)
+                    a * 2
+                } { | CustomErr.raise(x) => x + 100 }
+            }
+            fn main() { f() }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(107),
+            "abortive handler must receive x = 7 and yield 7 + 100 = 107 (post-perform code is dead)"
+        );
+    }
+
+    #[test]
+    fn test_aot_abortive_handler_no_param() {
+        // Abortive handler with no effect argument: the handle body's literal
+        // is bypassed, control goes to the handler body.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            effect Boom { go: -> Int }
+            fn f() -> Int {
+                handle {
+                    let a = perform Boom.go()
+                    a + 1
+                } { | Boom.go() => 99 }
+            }
+            fn main() { f() }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(99),
+            "abortive handler with no args must yield the handler body result"
         );
     }
 
