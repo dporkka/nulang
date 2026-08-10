@@ -557,6 +557,32 @@ pub fn compile_mir_function_body(
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert(h_name, func_ref);
         }
+        // perform helpers: nulang_aot_perform_N(eff, op, arg0..argN-1) -> i64
+        const AOT_PERFORM_HELPERS: [&str; 9] = [
+            "nulang_aot_perform_0",
+            "nulang_aot_perform_1",
+            "nulang_aot_perform_2",
+            "nulang_aot_perform_3",
+            "nulang_aot_perform_4",
+            "nulang_aot_perform_5",
+            "nulang_aot_perform_6",
+            "nulang_aot_perform_7",
+            "nulang_aot_perform_8",
+        ];
+        for (n, h_name) in AOT_PERFORM_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // effect name const
+            h_sig.params.push(AbiParam::new(types::I64)); // op name const
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64));
+            }
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
         // receive helpers: nulang_aot_receive_match_N(id0..idN-1) -> i64,
         // nulang_aot_receive_payload(i) -> i64
         const AOT_RECEIVE_HELPERS: [&str; 8] = [
@@ -1090,11 +1116,60 @@ fn compile_rvalue(
             ))
         }
         mir::RValue::Perform {
+            effect,
+            op,
+            args,
             resolved_handler: None,
-            ..
-        } => Err(AotCompileError::Unsupported(
-            "Perform with dynamic dispatch is not supported in the native backend".into(),
-        )),
+        } => {
+            // Builtin effect dispatch (no statically-resolved user handler):
+            // route through `nulang_aot_perform_N`, which calls the callbacks'
+            // `perform_builtin_effect_in_module` for IO/Actor/Timer/Test/Otp/
+            // Http/Workflow builtins, matching the bytecode VM's unbound-
+            // effect path. The effect/op strings are interned into the module
+            // pool during the pre-scan, so `compile_const` emits resolvable
+            // TAG_STRING constants.
+            let eff_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(effect.clone()),
+                mode,
+                constants,
+            )?;
+            let op_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(op.clone()),
+                mode,
+                constants,
+            )?;
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                let reg = mir::FunctionBuilder::LOCAL_BASE + a.0;
+                arg_vals.push(local_vals.get(&reg).copied().ok_or_else(|| {
+                    AotCompileError::Internal(format!("Perform arg local {} uninitialized", a.0))
+                })?);
+            }
+            let helper_name = match arg_vals.len() {
+                0 => "nulang_aot_perform_0",
+                1 => "nulang_aot_perform_1",
+                2 => "nulang_aot_perform_2",
+                3 => "nulang_aot_perform_3",
+                4 => "nulang_aot_perform_4",
+                5 => "nulang_aot_perform_5",
+                6 => "nulang_aot_perform_6",
+                7 => "nulang_aot_perform_7",
+                8 => "nulang_aot_perform_8",
+                n => {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "Perform with {} args (max 8 in AOT)",
+                        n
+                    )))
+                }
+            };
+            let mut call_args = Vec::with_capacity(arg_vals.len() + 2);
+            call_args.push(eff_val);
+            call_args.push(op_val);
+            call_args.extend(arg_vals);
+            call_helper(builder, helpers, helper_name, &call_args)
+        }
 
         // ---- Record ----
         mir::RValue::Record(fields) => {
@@ -2433,6 +2508,77 @@ mod tests {
             total,
             Some(10),
             "spawned Counter should run Add natively through the Runtime"
+        );
+    }
+
+    #[test]
+    fn test_aot_runtime_native_effect() {
+        // `perform Test.echo(n)` in an AOT-compiled behavior (no statically-
+        // resolved handler) must route through the Runtime's builtin-effect
+        // path: the installed test handler receives the arg and its return
+        // value is written to the actor's state by the native body.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Store {
+                state got: Int = 0
+                behavior Set(n: Int) { self.got = perform Test.echo(n) }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+
+        let mut rt = crate::runtime::Runtime::new();
+        rt.register_aot_module(aot);
+        // Mock the builtin: Test.echo returns double its integer arg. This is
+        // intercepted by `check_test_handler` before real dispatch, so it
+        // proves the AOT perform routed through the Runtime builtin path.
+        rt.install_test_handler("Test.echo", |regs| {
+            regs.get(0)
+                .and_then(|v| v.as_int())
+                .map(|n| crate::vm::Value::int(n * 2))
+        });
+
+        // Set is the module's only behavior (index 0).
+        let id = rt
+            .spawn_from_module(&code, 0, Vec::new())
+            .as_actor_id()
+            .expect("Store spawn");
+        assert!(
+            rt.actors.get(&id).unwrap().aot_targets[0].is_some(),
+            "Set should be AOT-wired"
+        );
+
+        rt.send_message_by_id(id, 0, &[crate::vm::Value::int(7)]);
+        rt.run_scheduler();
+
+        let got = rt
+            .actors
+            .get(&id)
+            .and_then(|a| a.get_state_field("got"))
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            got,
+            Some(14),
+            "AOT-native perform must route through the Runtime test handler"
         );
     }
 

@@ -540,7 +540,7 @@ pub fn aot_clear_constants() {
 
 /// Allocate via callbacks or fall back to standalone AOT heap.
 /// Check if JIT callbacks are set, and if so, use them.
-unsafe fn try_with_callbacks<R>(
+pub(crate) unsafe fn try_with_callbacks<R>(
     f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks) -> R,
 ) -> Option<R> {
     JIT_CALLBACKS.with(|cell| {

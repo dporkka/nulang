@@ -29,7 +29,7 @@ use distributed_context::DistributedContext;
 mod agent;
 #[cfg(feature = "ai-runtime")]
 mod ai_impls;
-mod callbacks;
+pub(crate) mod callbacks;
 pub mod crdt;
 pub mod crdt_manager;
 pub mod crdt_reg;

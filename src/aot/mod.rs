@@ -570,6 +570,68 @@ pub unsafe extern "C" fn nulang_aot_spawn(behavior_idx: u64) -> u64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AOT builtin effect dispatch
+// ---------------------------------------------------------------------------
+// `perform <Effect>.<op>(args...)` in an AOT-compiled behavior with no
+// statically-resolved user handler (`resolved_handler: None`) lowers to an
+// arity-matched `nulang_aot_perform_N` call. The helper resolves the effect/
+// op strings (TAG_STRING constants from the module pool), collects the boxed
+// args, and routes through the current callbacks' `perform_builtin_effect_in_module`,
+// which (via the real Runtime) dispatches IO/Actor/Timer/Test/Otp/Http/Workflow
+// builtins exactly as the bytecode VM does. This covers the dominant
+// builtin-effect usage without continuations. Dynamically-handled user
+// effects (an active handler for the same effect at runtime) are not
+// supported by the native backend — the compile-time `resolved_handler: None`
+// only guarantees no *lexical* handler, matching the bytecode fallback for
+// unbound effects. Outside an actor context the helper degrades to nil.
+
+macro_rules! define_aot_perform {
+    ($name:ident, $($arg:ident),*) => {
+        /// Perform a builtin effect from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(eff_raw: u64, op_raw: u64 $(, $arg: u64)*) -> u64 {
+            let effect = crate::jit::runtime::resolve_string_coerce(eff_raw).unwrap_or_default();
+            let op = crate::jit::runtime::resolve_string_coerce(op_raw).unwrap_or_default();
+            let regs = [$(crate::vm::Value::from_bits($arg)),*];
+            // The module is only needed by `perform_builtin_effect_in_module`
+            // for a few effects (Otp/Http resolve against it); the common
+            // IO/Actor/Timer path ignores it.
+            let module = AOT_DISPATCH.with(|c| {
+                c.borrow()
+                    .and_then(|t| unsafe { (&*t.module).code_module() })
+                    .map(|cm| cm as *const crate::bytecode::CodeModule)
+                    .unwrap_or(std::ptr::null())
+            });
+            crate::jit::runtime::try_with_callbacks(|cb| {
+                if module.is_null() {
+                    cb.perform_builtin_effect(&effect, Some(&op), &[], &regs)
+                } else {
+                    cb.perform_builtin_effect_in_module(
+                        &effect,
+                        Some(&op),
+                        unsafe { &*module },
+                        &regs,
+                    )
+                }
+            })
+            .flatten()
+            .unwrap_or_else(crate::vm::Value::nil)
+            .as_raw()
+        }
+    };
+}
+
+define_aot_perform!(nulang_aot_perform_0,);
+define_aot_perform!(nulang_aot_perform_1, a0);
+define_aot_perform!(nulang_aot_perform_2, a0, a1);
+define_aot_perform!(nulang_aot_perform_3, a0, a1, a2);
+define_aot_perform!(nulang_aot_perform_4, a0, a1, a2, a3);
+define_aot_perform!(nulang_aot_perform_5, a0, a1, a2, a3, a4);
+define_aot_perform!(nulang_aot_perform_6, a0, a1, a2, a3, a4, a5);
+define_aot_perform!(nulang_aot_perform_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_perform!(nulang_aot_perform_8, a0, a1, a2, a3, a4, a5, a6, a7);
+
 thread_local! {
     /// Standalone actor registry: actor id → raw actor pointer. Populated by
     /// the AOT driver so `send` from native behavior code can deliver into a
@@ -937,6 +999,22 @@ impl crate::vm::ActorVmCallbacks for AotRuntimeCallbacks {
         }
     }
 
+    fn perform_builtin_effect_in_module(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        module: &crate::bytecode::CodeModule,
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
+        // Delegate to the bytecode callbacks, which route the Test/Otp/Http/
+        // Actor/IO/Timer/Workflow builtin effects through the real Runtime.
+        // `AotRuntimeCallbacks` has the same shape (runtime + actor_id), so
+        // this gives AOT-compiled `perform` the exact bytecode semantics.
+        let mut bc =
+            crate::runtime::callbacks::BytecodeRuntimeCallbacks::new(self.runtime, self.actor_id);
+        bc.perform_builtin_effect_in_module(effect_name, op_name, module, regs)
+    }
+
     fn emit_event(&mut self, event: &str, args: &[crate::vm::Value]) {
         // SAFETY: as above.
         unsafe { (*self.runtime).emit_event(self.actor_id, event, args) };
@@ -1096,6 +1174,17 @@ fn collect_rvalue_field_and_consts(
             let c = crate::bytecode::Constant::String(field.clone());
             if !constants.contains(&c) {
                 constants.push(c);
+            }
+        }
+        mir::RValue::Perform { effect, op, .. } => {
+            // Intern both strings so AOT codegen can emit the effect/op as
+            // TAG_STRING constants resolved back to content at dispatch time
+            // by `nulang_aot_perform_N` (via the module constant pool).
+            for s in [effect, op] {
+                let c = crate::bytecode::Constant::String(s.clone());
+                if !constants.contains(&c) {
+                    constants.push(c);
+                }
             }
         }
         _ => {}
