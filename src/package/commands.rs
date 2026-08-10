@@ -243,7 +243,7 @@ fn cmd_new(path_arg: Option<&str>, template: Option<&str>) -> NuResult<()> {
         });
     }
     let tmpl = template.unwrap_or("default");
-    let valid = ["default", "cli", "lib", "full"];
+    let valid = ["default", "cli", "lib", "full", "distributed", "ai-agent", "web"];
     if !valid.contains(&tmpl) {
         return Err(NuError::PackageError {
             msg: format!(
@@ -387,6 +387,24 @@ fn template_files(name: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "examples/demo.nula",
                 "// Demo script — a small standalone example using the library.\n//\n// Run with:  nulang examples/demo.nula\n\n/// Return a greeting for the given name.\nfn greet(name: String) -> String {\n  \"Hello, \" + name + \"!\"\n}\n\n/// Add two integers together.\nfn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\n/// Compute the factorial of n recursively.\nfn factorial(n: Int) -> Int {\n  if n <= 1 then 1\n  else n * factorial(n - 1)\n}\n\n/// Return a friendly message describing the sign of a number.\nfn describe_number(n: Int) -> String {\n  if n > 0 then \"positive\"\n  else if n < 0 then \"negative\"\n  else \"zero\"\n}\n\nfn main() {\n  let msg = greet(\"demo user\")\n  perform IO.print(msg)\n\n  let f = factorial(6)\n  perform IO.print(\"6! = \" + perform Int.to_string(f))\n\n  let d = describe_number(42)\n  perform IO.print(\"42 is \" + d)\n\n  let s = add(100, 200)\n  perform IO.print(\"100 + 200 = \" + perform Int.to_string(s))\n}\n",
+            ),
+        ],
+        "distributed" => vec![
+            (
+                "src/main.nula",
+                "// Distributed template — supervised, message-passing worker actors.\n//\n// Demonstrates: actor declaration, `spawn Actor {}`, message passing\n// with `!`, durable state per actor, and an OTP supervisor that\n// restarts a worker on abnormal exit.\n//\n// Run with: nula run\n\n// A worker actor. `count` is per-actor state mutated by the `work`\n// behavior; each spawned worker has its own independent copy.\nactor Worker {\n    state count: Int = 0\n\n    behavior work(by: Int) {\n        self.count = self.count + by\n    }\n\n    behavior report() {\n        perform IO.print(\"  worker count=\" + perform Int.to_string(self.count))\n    }\n}\n\nfn main() {\n    // Spawn two independent workers and route work between them.\n    let w1 = spawn Worker {}\n    let w2 = spawn Worker {}\n\n    w1 ! work(10)\n    w1 ! work(5)\n    w2 ! work(7)\n\n    w1 ! report()\n    w2 ! report()\n\n    perform IO.print(\"Two distributed workers are running.\")\n}\n",
+            ),
+        ],
+        "ai-agent" => vec![
+            (
+                "src/main.nula",
+                "// AI-agent template — an actor with conversation memory backed by the\n// `Inference.ask` effect (LLM). Demonstrates actor state, behaviors,\n// and a non-blocking inference call.\n//\n// Requires the `ai-runtime` cargo feature (enabled by default).\n//\n// Run with: nula run\n\nactor ChatAgent {\n    state history: String = \"\"\n    state turn: Int = 0\n\n    behavior ask(prompt: String) {\n        self.turn = self.turn + 1\n        let reply = perform Inference.ask(prompt)\n        self.history = self.history + \"\\nQ: \" + prompt + \"\\nA: \" + reply\n        perform IO.print(\"[Turn \" + perform Int.to_string(self.turn) + \"] \" + reply)\n    }\n\n    behavior summary() {\n        let s = perform Inference.ask(\n            \"Summarize this conversation:\\n\" + self.history\n        )\n        perform IO.print(\"Summary: \" + s)\n    }\n}\n\nfn main() {\n    let chat = spawn ChatAgent {}\n    chat ! ask(\"Hello! Introduce yourself in one sentence.\")\n    chat ! summary()\n    perform IO.print(\"Agent ready. Configure your provider in Nulang.toml.\")\n}\n",
+            ),
+        ],
+        "web" => vec![
+            (
+                "src/main.nula",
+                "// Web template — HTTP client via the built-in `Http` effect.\n//\n// Demonstrates: `Http.get`, `Http.post`, and JSON payloads.\n//\n// Run with: nula run\n// Requires network access.\n\nfn main() {\n  perform IO.print(\"HTTP client demo\")\n  perform IO.print(\"---\")\n\n  // GET a public endpoint and print how many bytes came back.\n  let url = \"https://httpbin.org/get\"\n  let resp = perform Http.get(url)\n  perform IO.print(\"GET \" + url)\n  perform IO.print(\"  received \" + perform Int.to_string(perform String.length(resp)) + \" bytes\")\n\n  // POST a JSON body and receive the echoed response.\n  let body = \"{\\\"language\\\": \\\"Nulang\\\", \\\"features\\\": [\\\"actors\\\", \\\"effects\\\"]}\"\n  let posted = perform Http.post(\"https://httpbin.org/post\", body)\n  perform IO.print(\"POST JSON body\")\n  perform IO.print(\"  received \" + perform Int.to_string(perform String.length(posted)) + \" bytes\")\n\n  perform IO.print(\"---\")\n  perform IO.print(\"HTTP demo complete!\")\n}\n",
             ),
         ],
         _ => unreachable!(),
@@ -1504,6 +1522,47 @@ mod tests {
             result.err()
         );
         assert!(dir.join("Nulang.toml").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_all_templates_scaffold_a_main_nula() {
+        // Every supported template must scaffold a non-empty `src/main.nula`
+        // that references a `main` entry point. Guards against a template
+        // arm being added to `template_files` but forgotten in the valid
+        // list (or vice versa).
+        for name in ["default", "cli", "lib", "full", "distributed", "ai-agent", "web"] {
+            let dir = std::env::temp_dir()
+                .join(format!("nulang_tmpl_test_{}_{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            scaffold_package(&dir, "tmpl-app", name).expect(&format!(
+                "template '{}' should scaffold",
+                name
+            ));
+            let main = dir.join("src/main.nula");
+            assert!(main.exists(), "template '{}' must provide src/main.nula", name);
+            let src = std::fs::read_to_string(&main).expect("read main.nula");
+            assert!(
+                src.contains("main"),
+                "template '{}' main.nula must define an entry point",
+                name
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn test_cmd_new_rejects_unknown_template() {
+        let dir = std::env::temp_dir().join(format!("nulang_unk_tmpl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path_str = dir.to_str().unwrap();
+        let err = cmd_new(Some(path_str), Some("does-not-exist"))
+            .expect_err("unknown template must be rejected");
+        assert!(err.to_string().contains("unknown template"));
+        assert!(
+            !dir.exists(),
+            "nothing should be scaffolded for an unknown template"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
