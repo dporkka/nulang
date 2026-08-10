@@ -3966,6 +3966,114 @@ fn test_three_node_cluster_survives_hard_node_failure_and_rejoin() {
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c2]);
 }
 
+/// End-to-end coverage of PLAN.md Phase 5 deliverable 7 parts (a)+(b)
+/// through the REAL failure-detection path, not a direct call to
+/// `handle_node_failed`. A local actor on survivor A monitors a remote
+/// actor on node B; B's transport is killed hard (no graceful Leave);
+/// A's failure detector marks B `Failed`; that `NodeFailed` action runs
+/// `handle_node_failed`, which (a) invalidates A's `RemoteActorCache`
+/// entry for B's actor and (b) delivers `DOWN`-with-`noconnection`
+/// (payload code 6) to the local watcher. The cross-node registration
+/// is set up on the registry directly because the D8 *send* side
+/// (`perform Actor.monitor` reaching a remote target) is not yet wired —
+/// the receive side (`Packet::Monitor` → `remote_monitors.register`) is
+/// exercised by the packet round-trip test; this test drives the
+/// failure→DOWN half of the chain.
+#[test]
+fn test_node_death_delivers_down_to_local_watcher_via_failure_detector() {
+    use crate::runtime::supervision::RemoteLink;
+
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    let local_node_a = rt_a.distributed.node_id.unwrap();
+
+    rt_b.join_cluster(addr_a);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    // The remote actor B hosts, and a local watcher on A.
+    let remote_target_id = 5555u64;
+    let watcher = rt_a.spawn_actor(Box::new(|| vec![]));
+
+    // Register A's local watcher as monitoring a remote actor on B.
+    // (See test doc: D8 send-side wiring is not yet present, so register
+    // directly; the DOWN delivery path is what we're proving.)
+    let target = RemoteLink {
+        node_id: node_b,
+        actor_id: remote_target_id,
+    };
+    rt_a.remote_monitors.register(
+        target,
+        RemoteLink {
+            node_id: local_node_a,
+            actor_id: watcher,
+        },
+    );
+
+    // Prime A's remote cache with the doomed node's actor so we can prove
+    // invalidation fires too.
+    rt_a.distributed
+        .resolver
+        .as_mut()
+        .unwrap()
+        .record_remote_send(node_b, remote_target_id);
+    assert!(
+        rt_a.distributed
+            .resolver
+            .as_mut()
+            .unwrap()
+            .cache_mut()
+            .get(node_b, remote_target_id)
+            .is_some(),
+        "cache must hold the doomed remote actor before failure"
+    );
+
+    // Kill B's transport hard — no graceful Leave packet.
+    shutdown_nodes(&mut [&mut rt_b]);
+
+    // A must detect B's failure via heartbeat timeout + suspicion window
+    // (real wall-clock time), which fires `handle_node_failed`.
+    pump_until_peer_failed(&mut [&mut rt_a], node_b, Duration::from_secs(20));
+
+    // (a) A's cache entry for B's actor is invalidated.
+    assert!(
+        rt_a.distributed
+            .resolver
+            .as_mut()
+            .unwrap()
+            .cache_mut()
+            .get(node_b, remote_target_id)
+            .is_none(),
+        "cache entry for the failed node's actor must be invalidated"
+    );
+
+    // (b) The local watcher received DOWN-with-noconnection (code 6).
+    let down = rt_a
+        .actors
+        .get_mut(&watcher)
+        .unwrap()
+        .mailbox
+        .pop()
+        .expect("local watcher must receive a DOWN when the remote node dies");
+    assert_eq!(down.behavior_id, 0, "DOWN is a system message");
+    assert_eq!(
+        down.payload[0].as_int(),
+        Some(remote_target_id as i64),
+        "DOWN target must be the remote actor id"
+    );
+    assert_eq!(down.payload[1].as_int(), Some(watcher as i64));
+    assert_eq!(down.payload[2].as_int(), Some(6), "noconnection code");
+
+    // The registry entry for the dead node is dropped.
+    assert!(
+        rt_a.remote_monitors.get_watchers(target).is_none(),
+        "monitor registry entry for the dead node must be dropped"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a]);
+}
+
 /// The self-healing path (Phase 5 deliverable 2): when a node goes quiet,
 /// the survivor's failure detector marks it Failed and the cluster probe
 /// re-establishes contact — once the quiet node processes again, the probe
