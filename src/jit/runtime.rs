@@ -988,6 +988,41 @@ define_aot_send!(nulang_aot_send_7, a0, a1, a2, a3, a4, a5, a6);
 define_aot_send!(nulang_aot_send_8, a0, a1, a2, a3, a4, a5, a6, a7);
 
 // ---------------------------------------------------------------------------
+// AOT event emission
+// ---------------------------------------------------------------------------
+// `emit Event(args)` in an AOT-compiled behavior lowers to an arity-matched
+// `nulang_aot_emit_N` call. The helper resolves the event name (a TAG_STRING
+// constant from the module pool), packs the boxed args, and routes through the
+// current callbacks' `emit_event`, which records the event on the target actor
+// (`actor.event_log`) exactly as the bytecode `Emit` opcode does. Outside an
+// actor context it is a no-op.
+
+macro_rules! define_aot_emit {
+    ($name:ident, $($arg:ident),*) => {
+        /// Emit an event from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(event_raw: u64 $(, $arg: u64)*) {
+            let event = resolve_string_coerce(event_raw).unwrap_or_default();
+            let args = [$(Value::from_bits($arg)),*];
+            let _ = try_with_callbacks(|cb| {
+                cb.emit_event(&event, &args);
+                true
+            });
+        }
+    };
+}
+
+define_aot_emit!(nulang_aot_emit_0,);
+define_aot_emit!(nulang_aot_emit_1, a0);
+define_aot_emit!(nulang_aot_emit_2, a0, a1);
+define_aot_emit!(nulang_aot_emit_3, a0, a1, a2);
+define_aot_emit!(nulang_aot_emit_4, a0, a1, a2, a3);
+define_aot_emit!(nulang_aot_emit_5, a0, a1, a2, a3, a4);
+define_aot_emit!(nulang_aot_emit_6, a0, a1, a2, a3, a4, a5);
+define_aot_emit!(nulang_aot_emit_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_emit!(nulang_aot_emit_8, a0, a1, a2, a3, a4, a5, a6, a7);
+
+// ---------------------------------------------------------------------------
 // AOT selective receive
 // ---------------------------------------------------------------------------
 // `receive { | Behavior(params) => ... }` in an AOT-compiled behavior lowers
@@ -1108,5 +1143,9 @@ mod tests {
         let _ = super::nulang_aot_receive_payload as unsafe extern "C" fn(u64) -> u64;
         let _ = super::nulang_aot_receive_pop as unsafe extern "C" fn() -> u64;
         let _ = super::nulang_aot_spawn_push as unsafe extern "C" fn(u64, u64);
+        let _ = super::nulang_aot_emit_0 as unsafe extern "C" fn(u64);
+        let _ = super::nulang_aot_emit_1 as unsafe extern "C" fn(u64, u64);
+        let _ = super::nulang_aot_emit_8
+            as unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64);
     }
 }

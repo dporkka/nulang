@@ -1118,6 +1118,14 @@ fn collect_field_and_consts(
                 constants.push(c);
             }
         }
+        mir::Stmt::Emit { event, .. } => {
+            // Intern the event name so AOT codegen can emit it as a TAG_STRING
+            // constant resolved back to content by `nulang_aot_emit_N`.
+            let c = crate::bytecode::Constant::String(event.clone());
+            if !constants.contains(&c) {
+                constants.push(c);
+            }
+        }
         _ => {}
     }
 }

@@ -583,6 +583,30 @@ pub fn compile_mir_function_body(
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert(h_name, func_ref);
         }
+        // emit helpers: nulang_aot_emit_N(event, arg0..argN-1) -> void
+        const AOT_EMIT_HELPERS: [&str; 9] = [
+            "nulang_aot_emit_0",
+            "nulang_aot_emit_1",
+            "nulang_aot_emit_2",
+            "nulang_aot_emit_3",
+            "nulang_aot_emit_4",
+            "nulang_aot_emit_5",
+            "nulang_aot_emit_6",
+            "nulang_aot_emit_7",
+            "nulang_aot_emit_8",
+        ];
+        for (n, h_name) in AOT_EMIT_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // event name const
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64));
+            }
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
         // receive helpers: nulang_aot_receive_match_N(id0..idN-1) -> i64,
         // nulang_aot_receive_payload(i) -> i64
         const AOT_RECEIVE_HELPERS: [&str; 8] = [
@@ -1007,9 +1031,47 @@ fn compile_stmt(
             )?;
             Ok(())
         }
-        mir::Stmt::Emit { .. } => Err(AotCompileError::Unsupported(
-            "Emit: effect emission requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::Stmt::Emit { event, args } => {
+            // `emit Event(args)` routes through `nulang_aot_emit_N`, which
+            // calls the callbacks' `emit_event` to record the event on the
+            // current actor (actor.event_log), matching the bytecode Emit
+            // opcode. The event name is interned during the pre-scan.
+            let event_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(event.clone()),
+                mode,
+                constants,
+            )?;
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                let reg = mir::FunctionBuilder::LOCAL_BASE + a.0;
+                arg_vals.push(local_vals.get(&reg).copied().ok_or_else(|| {
+                    AotCompileError::Internal(format!("Emit arg local {} uninitialized", a.0))
+                })?);
+            }
+            let helper_name = match arg_vals.len() {
+                0 => "nulang_aot_emit_0",
+                1 => "nulang_aot_emit_1",
+                2 => "nulang_aot_emit_2",
+                3 => "nulang_aot_emit_3",
+                4 => "nulang_aot_emit_4",
+                5 => "nulang_aot_emit_5",
+                6 => "nulang_aot_emit_6",
+                7 => "nulang_aot_emit_7",
+                8 => "nulang_aot_emit_8",
+                n => {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "Emit with {} args (max 8 in AOT)",
+                        n
+                    )))
+                }
+            };
+            let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+            call_args.push(event_val);
+            call_args.extend(arg_vals);
+            call_void_helper(builder, helpers, helper_name, &call_args)?;
+            Ok(())
+        }
         mir::Stmt::StateSet { field, src } => {
             let c = crate::bytecode::Constant::String(field.clone());
             let field_val = compile_const(builder, &c, mode, constants)?;
@@ -2579,6 +2641,63 @@ mod tests {
             got,
             Some(14),
             "AOT-native perform must route through the Runtime test handler"
+        );
+    }
+
+    #[test]
+    fn test_aot_runtime_native_emit() {
+        // `emit Incremented(n)` in an AOT-compiled behavior must route through
+        // the Runtime's `emit_event`, recording the event on `actor.event_log`
+        // exactly as the bytecode Emit opcode does.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                behavior inc(n: Int) { emit Incremented(n) }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+
+        let mut rt = crate::runtime::Runtime::new();
+        rt.register_aot_module(aot);
+        let id = rt
+            .spawn_from_module(&code, 0, Vec::new())
+            .as_actor_id()
+            .expect("Counter spawn");
+        assert!(
+            rt.actors.get(&id).unwrap().aot_targets[0].is_some(),
+            "inc should be AOT-wired"
+        );
+
+        rt.send_message_by_id(id, 0, &[crate::vm::Value::int(7)]);
+        rt.run_scheduler();
+
+        let log = &rt.actors.get(&id).expect("actor").event_log;
+        assert_eq!(log.len(), 1, "one event should be emitted");
+        assert_eq!(log[0].0, "Incremented", "event name should match");
+        assert_eq!(
+            log[0].1.first().and_then(|v| v.as_int()),
+            Some(7),
+            "event arg should be delivered"
         );
     }
 
