@@ -37,6 +37,10 @@ sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp", "dep:tokio"]
 ai-runtime = ["dep:nulang-ai", "dep:reqwest", "dep:tokio"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime", "dep:wat"]
+# WasmFX stack-switching backend: depends on wasm-backend, and additionally
+# enables wasmtime's GC support (required for exception tags, which carry
+# `suspend` payloads).
+wasmfx-backend = ["wasm-backend", "wasmtime/gc-null"]
 http-client = ["dep:reqwest", "dep:tokio"]
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio"]
 tls = []

@@ -630,6 +630,7 @@ fn main() {
             }
         }
     }
+    return;
 
     if let Some(path) = opts.check_file {
         let source = match std::fs::read_to_string(&path) {
@@ -851,6 +852,10 @@ fn print_help() {
     if cfg!(feature = "wasm-backend") {
         println!("                   wasm*: IO.print/read only (no user-defined effect");
         println!("                   handlers, no actor mailbox)");
+    }
+    if cfg!(feature = "wasmfx-backend") {
+        println!("                   wasmfx*: suspending effects lower to WasmFX stack");
+        println!("                   switching (LLM.ask, Signal.wait, ReceiveWait)");
     }
     println!("  --target <t>     Target ISA for native backend: native (default) | ptx | riscv64");
     if cfg!(feature = "wasm-backend") {
@@ -1471,6 +1476,57 @@ fn run_source(
             nulang::wasm_runtime::aot_compile(&wasm_file, &cwasm_file)?;
             println!("Wrote {} (precompiled)", cwasm_file);
             return Ok(());
+        }
+        #[cfg(feature = "wasmfx-backend")]
+        "wasmfx" => {
+            let wasm_file = out_file.unwrap_or("out.wasm");
+            let hir = nulang::hir_lower::lower_module(&ast);
+            let mir = nulang::mir_lower::lower_module(&hir)?;
+            let mut wasmfx_backend = nulang::wasmfx_backend::WasmFxBackend::new();
+            let wasm_bytes = wasmfx_backend.compile(&mir, "main")?;
+            if verbose {
+                println!("=== WASMFX ({}) bytes ===", wasm_bytes.len());
+            }
+            std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError {
+                    msg: format!("failed to write {}: {}", wasm_file, e),
+                    span: Span::default(),
+                }
+            })?;
+            println!("Wrote {} ({} bytes, WasmFX)", wasm_file, wasm_bytes.len());
+            return Ok(());
+        }
+        #[cfg(feature = "wasmfx-backend")]
+        "wasmfx-run" => {
+            let wasm_file = out_file.unwrap_or("out.wasm");
+            let hir = nulang::hir_lower::lower_module(&ast);
+            let mir = nulang::mir_lower::lower_module(&hir)?;
+            let mut wasmfx_backend = nulang::wasmfx_backend::WasmFxBackend::new();
+            let wasm_bytes = wasmfx_backend.compile(&mir, "main")?;
+            if verbose {
+                println!("=== WASMFX ({}) bytes ===", wasm_bytes.len());
+            }
+            std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError {
+                    msg: format!("failed to write {}: {}", wasm_file, e),
+                    span: Span::default(),
+                }
+            })?;
+            let mut runtime = nulang::wasmfx_runtime::WasmFxRuntime::new(&wasm_bytes)?;
+            let result = runtime.run()?;
+            let result_str = result.to_string_repr();
+            if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
+                println!("{}", result_str);
+            }
+            return Ok(());
+        }
+        #[cfg(not(feature = "wasmfx-backend"))]
+        "wasmfx" | "wasmfx-run" => {
+            return Err(nulang::types::NuError::VMError {
+                msg: "wasmfx backend not compiled in. Rebuild with --features wasmfx-backend"
+                    .into(),
+                span: Span::default(),
+            })
         }
         #[cfg(not(feature = "wasm-backend"))]
         "wasm" | "wasm-run" | "wasm-aot" => Err(nulang::types::NuError::VMError {

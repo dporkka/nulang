@@ -8,6 +8,12 @@ pub mod aot;
 pub mod ast;
 pub mod backends;
 pub mod bytecode;
+#[cfg(feature = "wasmfx-backend")]
+pub mod cir;
+#[cfg(feature = "wasmfx-backend")]
+pub mod cir_analysis;
+#[cfg(feature = "wasmfx-backend")]
+pub mod cir_lower;
 pub mod cranelift_utils;
 pub mod dap;
 pub mod core_vm;
@@ -57,5 +63,9 @@ pub mod vm;
 pub mod wasm_component_runtime;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
+#[cfg(feature = "wasmfx-backend")]
+pub mod wasmfx_backend;
+#[cfg(feature = "wasmfx-backend")]
+pub mod wasmfx_runtime;
 pub mod wasm_types;
 pub mod witgen;
