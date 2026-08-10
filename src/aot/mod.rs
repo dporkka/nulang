@@ -96,6 +96,7 @@ impl AotModule {
                         &mut field_map,
                         &mut next_field_id,
                         &mut constants,
+                        &mir_module.foreign_functions,
                     );
                 }
             }
@@ -108,6 +109,7 @@ impl AotModule {
                         &mut field_map,
                         &mut next_field_id,
                         &mut constants,
+                        &mir_module.foreign_functions,
                     );
                 }
             }
@@ -168,6 +170,7 @@ impl AotModule {
                 ctx2.func_ids[idx] = ub_fid;
                 ctx2.field_map = field_map.clone();
                 ctx2.constants = constants.clone();
+                ctx2.foreign_functions = mir_module.foreign_functions.clone();
                 codegen::compile_mir_function_body(
                     &mut ctx2,
                     func,
@@ -198,6 +201,7 @@ impl AotModule {
                 ctx.func_ids = func_ids.clone();
                 ctx.field_map = field_map.clone();
                 ctx.constants = constants.clone();
+                ctx.foreign_functions = mir_module.foreign_functions.clone();
                 codegen::compile_mir_function_body(
                     &mut ctx,
                     func,
@@ -1100,10 +1104,17 @@ fn collect_field_and_consts(
     field_map: &mut std::collections::HashMap<String, u8>,
     next_field_id: &mut u8,
     constants: &mut Vec<crate::bytecode::Constant>,
+    foreign_functions: &[mir::ForeignFunction],
 ) {
     match stmt {
         mir::Stmt::Assign { op, .. } => {
-            collect_rvalue_field_and_consts(op, field_map, next_field_id, constants);
+            collect_rvalue_field_and_consts(
+                op,
+                field_map,
+                next_field_id,
+                constants,
+                foreign_functions,
+            );
         }
         mir::Stmt::StoreFieldNamed { field, .. } => {
             field_map.entry(field.clone()).or_insert_with(|| {
@@ -1135,6 +1146,7 @@ fn collect_rvalue_field_and_consts(
     field_map: &mut std::collections::HashMap<String, u8>,
     next_field_id: &mut u8,
     constants: &mut Vec<crate::bytecode::Constant>,
+    foreign_functions: &[mir::ForeignFunction],
 ) {
     match rv {
         mir::RValue::Const(c) => {
@@ -1175,7 +1187,13 @@ fn collect_rvalue_field_and_consts(
                 if !constants.contains(&c) {
                     constants.push(c);
                 }
-                collect_rvalue_field_and_consts(rv, field_map, next_field_id, constants);
+                collect_rvalue_field_and_consts(
+                    rv,
+                    field_map,
+                    next_field_id,
+                    constants,
+                    foreign_functions,
+                );
             }
         }
         mir::RValue::StateGet { field } => {
@@ -1192,6 +1210,19 @@ fn collect_rvalue_field_and_consts(
                 let c = crate::bytecode::Constant::String(s.clone());
                 if !constants.contains(&c) {
                     constants.push(c);
+                }
+            }
+        }
+        mir::RValue::FFICall { idx, .. } => {
+            // Intern the library and symbol names so AOT codegen can emit them
+            // as TAG_STRING constants resolved back to content at call time by
+            // `nulang_aot_ffi_call_N` (via the module constant pool).
+            if let Some(ff) = foreign_functions.get(*idx) {
+                for s in [&ff.library, &ff.symbol] {
+                    let c = crate::bytecode::Constant::String(s.clone());
+                    if !constants.contains(&c) {
+                        constants.push(c);
+                    }
                 }
             }
         }

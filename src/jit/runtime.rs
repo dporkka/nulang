@@ -1065,6 +1065,101 @@ define_aot_ask!(nulang_aot_ask_7, a0, a1, a2, a3, a4, a5, a6);
 define_aot_ask!(nulang_aot_ask_8, a0, a1, a2, a3, a4, a5, a6, a7);
 
 // ---------------------------------------------------------------------------
+// AOT foreign function calls
+// ---------------------------------------------------------------------------
+// `extern "..." { fn sym(args) -> ret }` invoked from AOT-compiled code lowers
+// to an arity-matched `nulang_aot_ffi_call_N` call. The helper receives the
+// library and symbol names as TAG_STRING pool constants, a bit-packed
+// signature (low 3 bits = return CType tag, then 3 bits per parameter), and
+// the boxed argument values. It resolves the native function through the
+// global FFI registry (the same `resolve_or_load` + `call_native` path the
+// bytecode FFICall opcode uses), marshals CStr parameters into temporary
+// CStrings, and invokes it. CStr returns are rejected at compile time (the
+// AOT backend has no module pool to intern the result string into) and the
+// sandbox allow-list is not applied because AOT native code is trusted.
+
+fn aot_ctype_from_tag(tag: u64) -> crate::ffi::marshal::CType {
+    match tag {
+        0 => crate::ffi::marshal::CType::I64,
+        1 => crate::ffi::marshal::CType::F64,
+        2 => crate::ffi::marshal::CType::Bool,
+        3 => crate::ffi::marshal::CType::CStr,
+        4 => crate::ffi::marshal::CType::VoidPtr,
+        _ => crate::ffi::marshal::CType::Unit,
+    }
+}
+
+fn aot_ffi_call_impl(lib_raw: u64, sym_raw: u64, sig: u64, args: &[u64]) -> Value {
+    let library = resolve_string_coerce(lib_raw).unwrap_or_default();
+    let symbol = resolve_string_coerce(sym_raw).unwrap_or_default();
+    let ret_tag = sig & 0b111;
+    let mut params: Vec<crate::ffi::marshal::CType> = Vec::with_capacity(args.len());
+    for i in 0..args.len() {
+        let tag = (sig >> (3 + 3 * i as u32)) & 0b111;
+        params.push(aot_ctype_from_tag(tag));
+    }
+    let ret = aot_ctype_from_tag(ret_tag);
+    let signature = crate::ffi::marshal::Signature::new(params.clone(), ret);
+    let func = {
+        let registry = crate::ffi::native::FFI_REGISTRY
+            .get_or_init(|| std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new()));
+        let mut reg = match registry.lock() {
+            Ok(r) => r,
+            Err(_) => return Value::nil(),
+        };
+        // SAFETY: the signature encodes the declared extern type; resolution
+        // finds a pre-registered function or loads the shared library.
+        match unsafe { reg.resolve_or_load(&library, &symbol, signature) } {
+            Ok(f) => f,
+            Err(_) => return Value::nil(),
+        }
+    };
+    // Marshal CStr parameters: copy Nulang string values into temporary
+    // CStrings whose pointers remain valid for the duration of the call.
+    let mut cstrings: Vec<std::ffi::CString> = Vec::new();
+    let mut cargs: Vec<Value> = Vec::with_capacity(args.len());
+    for (i, p) in params.iter().enumerate() {
+        if *p == crate::ffi::marshal::CType::CStr {
+            let bytes = resolve_string_coerce(args[i]).unwrap_or_default();
+            let c = match std::ffi::CString::new(bytes) {
+                Ok(c) => c,
+                Err(_) => return Value::nil(),
+            };
+            cargs.push(Value::ptr(c.as_ptr() as *mut u8));
+            cstrings.push(c);
+        } else {
+            cargs.push(Value::from_bits(args[i]));
+        }
+    }
+    // SAFETY: func.ptr points to a function whose ABI matches the signature.
+    match unsafe { crate::ffi::marshal::call_native(&func, &cargs) } {
+        Ok(v) => v,
+        Err(_) => Value::nil(),
+    }
+}
+
+macro_rules! define_aot_ffi_call {
+    ($name:ident, $($arg:ident),*) => {
+        /// Invoke a foreign function from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            lib_raw: u64,
+            sym_raw: u64,
+            sig: u64 $(, $arg: u64)*,
+        ) -> u64 {
+            let args = [$($arg),*];
+            aot_ffi_call_impl(lib_raw, sym_raw, sig, &args).as_raw()
+        }
+    };
+}
+
+define_aot_ffi_call!(nulang_aot_ffi_call_0,);
+define_aot_ffi_call!(nulang_aot_ffi_call_1, a0);
+define_aot_ffi_call!(nulang_aot_ffi_call_2, a0, a1);
+define_aot_ffi_call!(nulang_aot_ffi_call_3, a0, a1, a2);
+define_aot_ffi_call!(nulang_aot_ffi_call_4, a0, a1, a2, a3);
+
+// ---------------------------------------------------------------------------
 // AOT selective receive
 // ---------------------------------------------------------------------------
 // `receive { | Behavior(params) => ... }` in an AOT-compiled behavior lowers

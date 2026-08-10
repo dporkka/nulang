@@ -82,6 +82,8 @@ pub struct AotContext<'a> {
     pub field_map: HashMap<String, u8>,
     /// Module constant pool (for String constant resolution).
     pub constants: Vec<crate::bytecode::Constant>,
+    /// Module foreign-function declarations, indexed by `RValue::FFICall.idx`.
+    pub foreign_functions: Vec<mir::ForeignFunction>,
 }
 impl<'a> AotContext<'a> {
     pub fn new(module: &'a mut JITModule, builder_context: &'a mut FunctionBuilderContext) -> Self {
@@ -96,6 +98,7 @@ impl<'a> AotContext<'a> {
             mode: CompileMode::Boxed,
             field_map: HashMap::new(),
             constants: Vec::new(),
+            foreign_functions: Vec::new(),
         }
     }
 }
@@ -508,6 +511,16 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     if !effect_handler_edges(func).is_empty() {
         return false;
     }
+    // FFICall crosses into the runtime with boxed argument values; an unboxed
+    // (raw) Int argument would be misread by the FFI marshaller. Functions
+    // that call foreign functions must stay boxed.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::FFICall { .. }, .. }) {
+                return false;
+            }
+        }
+    }
     let local_base = mir::FunctionBuilder::LOCAL_BASE as usize;
     for param in &func.params {
         let reg = local_base + param.0 as usize;
@@ -823,6 +836,29 @@ pub fn compile_mir_function_body(
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert(h_name, func_ref);
         }
+        // ffi helpers: nulang_aot_ffi_call_N(lib, sym, sig, arg0..argN-1) -> i64
+        const AOT_FFI_CALL_HELPERS: [&str; 5] = [
+            "nulang_aot_ffi_call_0",
+            "nulang_aot_ffi_call_1",
+            "nulang_aot_ffi_call_2",
+            "nulang_aot_ffi_call_3",
+            "nulang_aot_ffi_call_4",
+        ];
+        for (n, h_name) in AOT_FFI_CALL_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // library (TAG_STRING)
+            h_sig.params.push(AbiParam::new(types::I64)); // symbol (TAG_STRING)
+            h_sig.params.push(AbiParam::new(types::I64)); // bit-packed signature
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64));
+            }
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
         // receive helpers: nulang_aot_receive_match_N(id0..idN-1) -> i64,
         // nulang_aot_receive_payload(i) -> i64
         const AOT_RECEIVE_HELPERS: [&str; 8] = [
@@ -1113,6 +1149,7 @@ pub fn compile_mir_function_body(
                     mode,
                     constants,
                     field_map,
+                    &aot.foreign_functions,
                     &mir_func.handler_tables,
                     &block_map,
                     &block_params,
@@ -1233,6 +1270,7 @@ fn compile_stmt(
     mode: CompileMode,
     constants: &[crate::bytecode::Constant],
     field_map: &HashMap<String, u8>,
+    foreign_functions: &[mir::ForeignFunction],
     handler_tables: &[mir::HandlerTableDef],
     block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
     block_params: &HashMap<mir::BlockId, Vec<u32>>,
@@ -1479,6 +1517,7 @@ fn compile_stmt(
                 mode,
                 constants,
                 field_map,
+                foreign_functions,
             )?;
             let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
             local_vals.insert(reg, val);
@@ -1598,6 +1637,7 @@ fn compile_rvalue(
     mode: CompileMode,
     constants: &[crate::bytecode::Constant],
     field_map: &HashMap<String, u8>,
+    foreign_functions: &[mir::ForeignFunction],
 ) -> AotResult<Value> {
     match rv {
         mir::RValue::Const(c) => compile_const(builder, c, mode, constants),
@@ -1906,9 +1946,133 @@ fn compile_rvalue(
         mir::RValue::ReceiveCommit => Err(AotCompileError::Unsupported(
             "ReceiveCommit: receive commit requires the bytecode backend (unavailable with --backend native)".into(),
         )),
-        mir::RValue::FFICall { .. } => Err(AotCompileError::Unsupported(
-            "FFICall: foreign function calls require the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::RValue::FFICall { idx, args } => {
+            let def = foreign_functions.get(*idx).ok_or_else(|| {
+                AotCompileError::Internal(format!(
+                    "FFICall: foreign function {} not declared",
+                    idx
+                ))
+            })?;
+            // Map declared Nulang types to C ABI types.
+            let mut params: Vec<crate::ffi::marshal::CType> =
+                Vec::with_capacity(def.params.len());
+            for p in &def.params {
+                let ctype = crate::ffi::marshal::ffi_type_to_ctype(
+                    &crate::ffi::marshal::nulang_type_to_ffi_type(p).ok_or_else(|| {
+                        AotCompileError::Unsupported(format!(
+                            "FFICall: unsupported parameter type for {}",
+                            def.symbol
+                        ))
+                    })?,
+                )
+                .ok_or_else(|| {
+                    AotCompileError::Unsupported(format!(
+                        "FFICall: unsupported parameter type for {}",
+                        def.symbol
+                    ))
+                })?;
+                if ctype == crate::ffi::marshal::CType::VoidPtr {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "FFICall: VoidPtr parameter for {} (unsupported in AOT)",
+                        def.symbol
+                    )));
+                }
+                params.push(ctype);
+            }
+            let ret = crate::ffi::marshal::ffi_type_to_ctype(
+                &crate::ffi::marshal::nulang_type_to_ffi_type(&def.ret).ok_or_else(|| {
+                    AotCompileError::Unsupported(format!(
+                        "FFICall: unsupported return type for {}",
+                        def.symbol
+                    ))
+                })?,
+            )
+            .ok_or_else(|| {
+                AotCompileError::Unsupported(format!(
+                    "FFICall: unsupported return type for {}",
+                    def.symbol
+                ))
+            })?;
+            if ret == crate::ffi::marshal::CType::CStr {
+                return Err(AotCompileError::Unsupported(format!(
+                    "FFICall: C string returns for {} (unsupported in AOT)",
+                    def.symbol
+                )));
+            }
+            if args.len() > 4 {
+                return Err(AotCompileError::Unsupported(format!(
+                    "FFICall: {} args (max 4 in AOT)",
+                    args.len()
+                )));
+            }
+            if args.len() != def.params.len() {
+                return Err(AotCompileError::Internal(format!(
+                    "FFICall: {} args but {} declared params for {}",
+                    args.len(),
+                    def.params.len(),
+                    def.symbol
+                )));
+            }
+            // Bit-pack the signature: low 3 bits = return CType tag, then 3
+            // bits per parameter (I64=0, F64=1, Bool=2, CStr=3, VoidPtr=4,
+            // Unit=5).
+            let ctype_tag = |c: crate::ffi::marshal::CType| -> u64 {
+                match c {
+                    crate::ffi::marshal::CType::I64 => 0,
+                    crate::ffi::marshal::CType::F64 => 1,
+                    crate::ffi::marshal::CType::Bool => 2,
+                    crate::ffi::marshal::CType::CStr => 3,
+                    crate::ffi::marshal::CType::VoidPtr => 4,
+                    crate::ffi::marshal::CType::Unit => 5,
+                }
+            };
+            let mut sig: u64 = ctype_tag(ret);
+            for (i, c) in params.iter().enumerate() {
+                sig |= ctype_tag(*c) << (3 + 3 * i);
+            }
+            // Library and symbol are interned into the constant pool during
+            // the pre-scan, so compile_const resolves their pool indices and
+            // the helper recovers their content via resolve_string_coerce.
+            let lib_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(def.library.clone()),
+                mode,
+                constants,
+            )?;
+            let sym_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(def.symbol.clone()),
+                mode,
+                constants,
+            )?;
+            let sig_val = builder.ins().iconst(types::I64, sig as i64);
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|id| {
+                    let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                    local_vals.get(&reg).copied().ok_or_else(|| {
+                        AotCompileError::Internal(format!(
+                            "FFICall arg local {} uninitialized",
+                            id.0
+                        ))
+                    })
+                })
+                .collect::<AotResult<Vec<_>>>()?;
+            let helper_name = match arg_vals.len() {
+                0 => "nulang_aot_ffi_call_0",
+                1 => "nulang_aot_ffi_call_1",
+                2 => "nulang_aot_ffi_call_2",
+                3 => "nulang_aot_ffi_call_3",
+                4 => "nulang_aot_ffi_call_4",
+                _ => unreachable!(),
+            };
+            let mut call_args = Vec::with_capacity(arg_vals.len() + 3);
+            call_args.push(lib_val);
+            call_args.push(sym_val);
+            call_args.push(sig_val);
+            call_args.extend(arg_vals);
+            call_helper(builder, helpers, helper_name, &call_args)
+        }
         mir::RValue::Migrate { .. } => Err(AotCompileError::Unsupported(
             "Migrate: actor migration requires the bytecode backend (unavailable with --backend native)".into(),
         )),
@@ -1952,6 +2116,7 @@ fn compile_rvalue(
                     mode,
                     constants,
                     field_map,
+                    foreign_functions,
                 )?;
                 let name_val = builder.ins().iconst(types::I64, name_idx);
                 call_void_helper(builder, helpers, "nulang_aot_spawn_push", &[name_val, val])?;
@@ -3570,6 +3735,60 @@ mod tests {
         let raw = aot.run().expect("native run");
         let val = crate::vm::Value::from_raw(raw);
         assert_eq!(val, crate::vm::Value::bool(true), "CapabilityCheck must yield true");
+    }
+
+    #[test]
+    fn test_aot_ffi_call() {
+        // `extern { fn double_int(x: Int) -> Int }` invoked from AOT-compiled
+        // code must resolve the pre-registered native function through the
+        // global FFI registry (the same resolve_or_load + call_native path the
+        // bytecode FFICall opcode uses) and deliver its result.
+        extern "C" fn double_int(x: i64) -> i64 {
+            x * 2
+        }
+        let sig = crate::ffi::marshal::Signature::new(
+            vec![crate::ffi::marshal::CType::I64],
+            crate::ffi::marshal::CType::I64,
+        );
+        // SAFETY: double_int's ABI matches the declared signature.
+        unsafe {
+            crate::ffi::native::register_native_function(
+                "double_int",
+                double_int as *const core::ffi::c_void,
+                sig,
+            )
+            .expect("register");
+        }
+
+        let mut builder = mir::FunctionBuilder::new("main", Some(crate::types::Type::int()));
+        let arg = builder.add_temp(crate::types::Type::int());
+        let out = builder.add_temp(crate::types::Type::int());
+        builder.assign(arg, mir::RValue::Const(crate::bytecode::Constant::Int(21)));
+        builder.assign(out, mir::RValue::FFICall { idx: 0, args: vec![arg] });
+        builder.terminate(mir::Terminator::Return(Some(out)));
+        let func = builder.build();
+        let module = mir::Module {
+            name: "ffi".into(),
+            functions: vec![func],
+            behaviors: vec![],
+            actor_metadata: vec![],
+            compensation_of: vec![],
+            parallel_branches_of: vec![],
+            foreign_functions: vec![mir::ForeignFunction {
+                library: "".into(), // pre-registered under (None, "double_int")
+                symbol: "double_int".into(),
+                params: vec![crate::types::Type::Primitive(crate::types::PrimitiveType::Int)],
+                ret: crate::types::Type::Primitive(crate::types::PrimitiveType::Int),
+            }],
+        };
+        let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        let val = crate::vm::Value::from_raw(raw);
+        assert_eq!(
+            val.as_int(),
+            Some(42),
+            "FFI double_int(21) should deliver 21 * 2 = 42"
+        );
     }
 
     #[test]
