@@ -154,7 +154,13 @@ fn compute_predecessors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::
         }
     }
     for (src, dst) in effect_handler_edges(func) {
-        preds.entry(dst).or_default().push(src);
+        // Multiple performs from the same block are the same predecessor;
+        // dedup so live-in analysis doesn't over-approximate (which would
+        // pull post-perform locals into a handler body's block params).
+        let v = preds.entry(dst).or_default();
+        if !v.contains(&src) {
+            v.push(src);
+        }
     }
     preds
 }
@@ -201,6 +207,77 @@ fn reverse_postorder(func: &mir::Function) -> Vec<mir::BlockId> {
     dfs(func.entry, &succs, &mut visited, &mut order);
     order.reverse();
     order
+}
+
+/// Count how many resuming `perform`s target each resuming handler body block.
+/// When a resuming handler is invoked more than once, the handler body needs a
+/// continuation-index block param so its `Terminator::Resume` can dispatch back
+/// to the right perform site's continuation.
+fn resuming_perform_count(func: &mir::Function) -> HashMap<mir::BlockId, usize> {
+    let mut out: HashMap<mir::BlockId, usize> = HashMap::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign {
+                op:
+                    mir::RValue::Perform {
+                        resolved_handler: Some(href),
+                        ..
+                    },
+                ..
+            } = stmt
+            {
+                if let Some(binding) = func
+                    .handler_tables
+                    .get(href.table_index as usize)
+                    .and_then(|t| t.bindings.get(href.binding_index as usize))
+                {
+                    if binding.resume {
+                        *out.entry(binding.body).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// For each resuming handler body, the destination registers of its resuming
+/// `perform`s in program order, minus the last. When a handler is performed
+/// more than once in one block, a later continuation may read an earlier
+/// perform's result; that result must be threaded through the shared handler
+/// body and dispatch chain back into the continuation. The last perform's
+/// destination is never a "prior" for any continuation, so it is dropped.
+fn handler_threaded_dsts(func: &mir::Function) -> HashMap<mir::BlockId, Vec<u32>> {
+    let local_base = mir::FunctionBuilder::LOCAL_BASE as u32;
+    let mut per_body: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign {
+                dst,
+                op:
+                    mir::RValue::Perform {
+                        resolved_handler: Some(href),
+                        ..
+                    },
+                ..
+            } = stmt
+            {
+                if let Some(binding) = func
+                    .handler_tables
+                    .get(href.table_index as usize)
+                    .and_then(|t| t.bindings.get(href.binding_index as usize))
+                {
+                    if binding.resume {
+                        per_body.entry(binding.body).or_default().push(local_base + dst.0);
+                    }
+                }
+            }
+        }
+    }
+    for v in per_body.values_mut() {
+        v.pop();
+    }
+    per_body
 }
 
 /// Map each effect-handler body block (resuming OR abortive) to its declared
@@ -274,7 +351,7 @@ fn compile_terminator_with_params(
     local_vals: &HashMap<u32, Value>,
     _mode: CompileMode,
     current_block: mir::BlockId,
-    handler_continuations: &HashMap<mir::BlockId, (cranelift::prelude::Block, u32)>,
+    handler_continuations: &HashMap<mir::BlockId, Vec<(cranelift::prelude::Block, u32)>>,
 ) -> AotResult<()> {
     match term {
         mir::Terminator::Return(val) => {
@@ -325,7 +402,7 @@ fn compile_terminator_with_params(
             // Resuming handler body: restore the continuation by jumping back
             // to the block that follows the originating `perform`, passing the
             // resume value into the perform's destination local.
-            let (cont, _dst_reg) = *handler_continuations.get(&current_block).ok_or_else(|| {
+            let conts = handler_continuations.get(&current_block).ok_or_else(|| {
                 AotCompileError::Internal(
                     "Terminator::Resume in a block with no captured continuation".into(),
                 )
@@ -334,8 +411,52 @@ fn compile_terminator_with_params(
             let v = *local_vals
                 .get(&reg)
                 .ok_or_else(|| AotCompileError::Internal("resume value uninitialized".into()))?;
-            let args = vec![BlockArg::from(v)];
-            builder.ins().jump(cont, &args);
+            if conts.len() == 1 {
+                let args = vec![BlockArg::from(v)];
+                builder.ins().jump(conts[0].0, &args);
+                return Ok(());
+            }
+            // Multiple perform sites share this handler body. Dispatch on the
+            // continuation-index block param (position = block_params.len())
+            // to the matching continuation. Each continuation receives the
+            // resume value plus the threaded prior perform results it needs
+            // (the first i threaded params for the i-th continuation).
+            let idx_pos = block_params.get(&current_block).map(|p| p.len()).unwrap_or(0);
+            let cur = builder.current_block().ok_or_else(|| {
+                AotCompileError::Internal("Resume outside a block".into())
+            })?;
+            let hparams = builder.block_params(cur);
+            let mut idx_val = hparams[idx_pos];
+            let mut resume_val = v;
+            // Threaded prior perform results, ordered as in the perform sites.
+            let mut threaded: Vec<Value> = hparams[idx_pos + 1..].to_vec();
+            for (i, (cont, _dst)) in conts.iter().enumerate() {
+                let idx_const = builder.ins().iconst(types::I64, i as i64);
+                let eq = builder.ins().icmp(IntCC::Equal, idx_val, idx_const);
+                let mut args: Vec<BlockArg> = vec![BlockArg::from(resume_val)];
+                args.extend(threaded[..i].iter().copied().map(BlockArg::from));
+                if i == conts.len() - 1 {
+                    // Last case: unconditional.
+                    builder.ins().jump(*cont, &args);
+                } else {
+                    // Fall-through chain. The next link can't read this block's
+                    // SSA values, so carry the dispatch index, resume value,
+                    // and threaded results as the next block's params.
+                    let next = builder.create_block();
+                    for _ in 0..(2 + threaded.len()) {
+                        builder.append_block_param(next, types::I64);
+                    }
+                    let mut else_args: Vec<BlockArg> =
+                        vec![BlockArg::from(idx_val), BlockArg::from(resume_val)];
+                    else_args.extend(threaded.iter().copied().map(BlockArg::from));
+                    builder.ins().brif(eq, *cont, &args, next, &else_args);
+                    builder.switch_to_block(next);
+                    let nparams = builder.block_params(next);
+                    idx_val = nparams[0];
+                    resume_val = nparams[1];
+                    threaded = nparams[2..].to_vec();
+                }
+            }
             Ok(())
         }
         mir::Terminator::Unterminated => Err(AotCompileError::Internal(
@@ -790,6 +911,58 @@ pub fn compile_mir_function_body(
         // Resuming handler body blocks receive their effect parameters as
         // block params (a `perform` jumps to them with the arg values).
         let handler_body_params = effect_handler_body_params(mir_func);
+        // A resuming handler invoked more than once needs a continuation-index
+        // block param (appended last) so its `Terminator::Resume` can dispatch
+        // to the right perform site's continuation.
+        let resuming_counts = resuming_perform_count(mir_func);
+        // Resuming handler bodies invoked from >= 2 perform sites: their
+        // `Terminator::Resume` must dispatch on a continuation-index param.
+        let multi_cont_bodies: HashSet<mir::BlockId> = resuming_counts
+            .iter()
+            .filter(|(_, &c)| c >= 2)
+            .map(|(&b, _)| b)
+            .collect();
+        // Prior perform destinations that must thread through a shared
+        // resuming handler body so later continuations can read earlier
+        // perform results.
+        let handler_threaded_dsts = handler_threaded_dsts(mir_func);
+        // Guard: multi-perform resuming handlers with perform sites in
+        // DIFFERENT MIR blocks would need per-block threading the same-block
+        // model can't express. Reject rather than silently mis-wire.
+        for body in &multi_cont_bodies {
+            let mut sites: Vec<mir::BlockId> = mir_func
+                .blocks
+                .iter()
+                .filter(|b| {
+                    b.stmts.iter().any(|s| {
+                        matches!(
+                            s,
+                            mir::Stmt::Assign {
+                                op: mir::RValue::Perform {
+                                    resolved_handler: Some(href),
+                                    ..
+                                },
+                                ..
+                            } if mir_func
+                                .handler_tables
+                                .get(href.table_index as usize)
+                                .and_then(|t| t.bindings.get(href.binding_index as usize))
+                                .map(|x| x.resume && x.body == *body)
+                                .unwrap_or(false)
+                        )
+                    })
+                })
+                .map(|b| b.id)
+                .collect();
+            sites.sort_by_key(|x| x.0);
+            sites.dedup();
+            if sites.len() > 1 {
+                return Err(AotCompileError::Unsupported(
+                    "multi-perform resuming handler with perform sites across multiple blocks is not yet supported by the native backend"
+                        .into(),
+                ));
+            }
+        }
 
         // Create CLIF blocks — allocate block params for merge blocks.
         let mut block_map: HashMap<mir::BlockId, cranelift::prelude::Block> = HashMap::new();
@@ -833,6 +1006,19 @@ pub fn compile_mir_function_body(
                         block_params.insert(block.id, all);
                     }
                 }
+                // Multiple resuming performs of this handler: append the
+                // continuation-index param and the threaded prior-dest params
+                // (not local regs, so kept out of `block_params`). cont_idx
+                // sits at CLIF position `block_params.len()`; the threaded
+                // params follow it.
+                if resuming_counts.get(&block.id).copied().unwrap_or(0) >= 2 {
+                    builder.append_block_param(blk, types::I64);
+                    if let Some(td) = handler_threaded_dsts.get(&block.id) {
+                        for _ in td {
+                            builder.append_block_param(blk, types::I64);
+                        }
+                    }
+                }
                 blk
             };
             block_map.insert(block.id, clif_block);
@@ -859,12 +1045,14 @@ pub fn compile_mir_function_body(
             eprintln!("  block_params: {:?}", block_params);
         }
 
-        // Continuation map: resuming handler body block -> (continuation clif
-        // block, dst local reg). Populated when a resuming `perform` is
-        // compiled; read by the handler body's `Terminator::Resume`.
+        // Continuation map: resuming handler body block -> the continuations
+        // created by each `perform` site (in perform order). Populated when a
+        // resuming `perform` is compiled; read by the handler body's
+        // `Terminator::Resume`. More than one entry means Resume dispatches on
+        // the continuation-index block param.
         let mut handler_continuations: HashMap<
             mir::BlockId,
-            (cranelift::prelude::Block, u32),
+            Vec<(cranelift::prelude::Block, u32)>,
         > = HashMap::new();
 
         // Compile blocks in topological order.
@@ -883,6 +1071,10 @@ pub fn compile_mir_function_body(
                 }
             }
 
+            // Per-block continuation thread: destination regs of prior
+            // resuming performs in this block, threaded into later
+            // continuations so they can read earlier perform results.
+            let mut cont_thread: Vec<u32> = Vec::new();
             for stmt in &block.stmts {
                 compile_stmt(
                     &mut builder,
@@ -899,6 +1091,9 @@ pub fn compile_mir_function_body(
                     &block_map,
                     &block_params,
                     &mut handler_continuations,
+                    &multi_cont_bodies,
+                    &handler_threaded_dsts,
+                    &mut cont_thread,
                 )?;
             }
             compile_terminator_with_params(
@@ -1015,7 +1210,10 @@ fn compile_stmt(
     handler_tables: &[mir::HandlerTableDef],
     block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
     block_params: &HashMap<mir::BlockId, Vec<u32>>,
-    handler_continuations: &mut HashMap<mir::BlockId, (cranelift::prelude::Block, u32)>,
+    handler_continuations: &mut HashMap<mir::BlockId, Vec<(cranelift::prelude::Block, u32)>>,
+    multi_cont_bodies: &HashSet<mir::BlockId>,
+    handler_threaded_dsts: &HashMap<mir::BlockId, Vec<u32>>,
+    cont_thread: &mut Vec<u32>,
 ) -> AotResult<()> {
     match stmt {
         mir::Stmt::Assign {
@@ -1098,43 +1296,101 @@ fn compile_stmt(
                     if binding.resume {
                         let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
                         let body_block = binding.body;
-                        if handler_continuations.contains_key(&body_block) {
-                            return Err(AotCompileError::Unsupported(
-                                "multiple performs of a single resuming handler are not yet supported by the native backend"
-                                    .into(),
-                            ));
-                        }
-                        // Continuation block receives the resume value into dst.
+                        // Continuation block receives the resume value into dst,
+                        // plus (for a handler invoked from multiple perform
+                        // sites) the prior perform results this site's tail may
+                        // read — threaded through from earlier continuations.
                         let cont = builder.create_block();
                         builder.append_block_param(cont, types::I64);
-                        // Jump to the handler body, passing each effect arg as
-                        // its declared parameter (block param) in order.
+                        for _ in cont_thread.iter() {
+                            builder.append_block_param(cont, types::I64);
+                        }
+                        // Jump to the handler body. The handler body's block
+                        // params are its effect parameters (first, in declared
+                        // order) then any merge live-ins; for a handler invoked
+                        // from multiple perform sites a continuation-index param
+                        // and the threaded prior-dest params follow. Effect args
+                        // fill the effect params; live-ins are copied through; the
+                        // index identifies which perform's continuation Resume
+                        // must return to.
                         let handler_block = *block_map.get(&body_block).ok_or_else(|| {
                             AotCompileError::Internal(format!(
                                 "handler body block {} not mapped",
                                 body_block.0
                             ))
                         })?;
+                        let effect_regs: Vec<u32> = binding
+                            .params
+                            .iter()
+                            .map(|p| mir::FunctionBuilder::LOCAL_BASE + p.0)
+                            .collect();
                         let param_regs = block_params.get(&body_block).cloned().unwrap_or_default();
-                        let mut jump_args: Vec<BlockArg> = Vec::with_capacity(param_regs.len());
-                        for (arg, _param_reg) in args.iter().zip(param_regs.iter()) {
-                            let arg_reg = mir::FunctionBuilder::LOCAL_BASE + arg.0;
-                            jump_args.push(BlockArg::from(
+                        let mut arg_iter = args.iter();
+                        let mut jump_args: Vec<BlockArg> =
+                            Vec::with_capacity(param_regs.len() + 1);
+                        for (i, reg) in param_regs.iter().enumerate() {
+                            let v = if i < effect_regs.len() {
+                                let arg = arg_iter.next().ok_or_else(|| {
+                                    AotCompileError::Internal(format!(
+                                        "fewer effect args than params for handler body {}",
+                                        body_block.0
+                                    ))
+                                })?;
+                                let arg_reg = mir::FunctionBuilder::LOCAL_BASE + arg.0;
                                 *local_vals.get(&arg_reg).ok_or_else(|| {
                                     AotCompileError::Internal(format!(
                                         "perform arg local {} uninitialized",
                                         arg.0
                                     ))
-                                })?,
+                                })?
+                            } else {
+                                *local_vals.get(reg).ok_or_else(|| {
+                                    AotCompileError::Internal(format!(
+                                        "handler live-in local {} uninitialized at perform",
+                                        reg
+                                    ))
+                                })?
+                            };
+                            jump_args.push(BlockArg::from(v));
+                        }
+                        let conts = handler_continuations.entry(body_block).or_default();
+                        let idx = conts.len();
+                        if multi_cont_bodies.contains(&body_block) {
+                            jump_args.push(BlockArg::from(
+                                builder.ins().iconst(types::I64, idx as i64),
                             ));
+                            // Threaded slots: this site's prior perform results
+                            // (real values, in order), then dummies for the rest.
+                            let thread_total = handler_threaded_dsts
+                                .get(&body_block)
+                                .map(|v| v.len())
+                                .unwrap_or(0);
+                            for j in 0..thread_total {
+                                let v = if j < cont_thread.len() {
+                                    *local_vals.get(&cont_thread[j]).ok_or_else(|| {
+                                        AotCompileError::Internal(format!(
+                                            "threaded perform result local {} uninitialized",
+                                            cont_thread[j]
+                                        ))
+                                    })?
+                                } else {
+                                    builder.ins().iconst(types::I64, 0)
+                                };
+                                jump_args.push(BlockArg::from(v));
+                            }
                         }
                         builder.ins().jump(handler_block, &jump_args);
                         // Continue the rest of this block in the continuation;
-                        // dst = the resume value.
+                        // dst = the resume value, prior results rebound to the
+                        // threaded params.
                         builder.switch_to_block(cont);
-                        let resume_val = builder.block_params(cont)[0];
-                        local_vals.insert(dst_reg, resume_val);
-                        handler_continuations.insert(body_block, (cont, dst_reg));
+                        let cparams = builder.block_params(cont);
+                        local_vals.insert(dst_reg, cparams[0]);
+                        for (j, reg) in cont_thread.iter().enumerate() {
+                            local_vals.insert(*reg, cparams[1 + j]);
+                        }
+                        conts.push((cont, dst_reg));
+                        cont_thread.push(dst_reg);
                         return Ok(());
                     } else {
                         // Abortive perform: control transfers to the handler
@@ -2183,14 +2439,6 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         eprintln!("=== MIR for {:?} ===", source);
-        for f in &mir_module.functions {
-            for b in &f.blocks {
-                for st in &b.stmts {
-                    eprintln!("  {:?}", st);
-                }
-                eprintln!("  term: {:?}", b.terminator);
-            }
-        }
         let aot = crate::aot::AotModule::compile(&mir_module);
         match aot {
             Ok(m) => {
@@ -3123,6 +3371,50 @@ mod tests {
             crate::vm::Value::from_raw(raw).as_int(),
             Some(99),
             "abortive handler with no args must yield the handler body result"
+        );
+    }
+
+    #[test]
+    fn test_aot_resuming_handler_multi_perform() {
+        // Two performs of the SAME resuming handler in one handle body. Each
+        // perform gets its own continuation; the handler body's Resume
+        // dispatches on the continuation-index block param.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            effect Echo { run: Int -> Int }
+            fn f() -> Int {
+                handle {
+                    let a = perform Echo.run(1)
+                    let b = perform Echo.run(2)
+                    a + b
+                } { | Echo.run(x) resume => x + 10 }
+            }
+            fn main() { f() }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(23),
+            "a = 1+10 = 11, b = 2+10 = 12, a+b = 23"
         );
     }
 
