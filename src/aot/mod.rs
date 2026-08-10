@@ -128,6 +128,9 @@ impl AotModule {
             for _ in &func.params {
                 sig.params.push(AbiParam::new(types::I64));
             }
+            for _ in &func.captures {
+                sig.params.push(AbiParam::new(types::I64));
+            }
             sig.returns.push(AbiParam::new(types::I64));
             let fid = jit_module
                 .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)
@@ -142,6 +145,9 @@ impl AotModule {
                 let ub_name = format!("nulang_fn_{}_unboxed", idx);
                 let mut ub_sig = jit_module.make_signature();
                 for _ in &func.params {
+                    ub_sig.params.push(AbiParam::new(types::I64));
+                }
+                for _ in &func.captures {
                     ub_sig.params.push(AbiParam::new(types::I64));
                 }
                 ub_sig.returns.push(AbiParam::new(types::I64));
@@ -401,6 +407,9 @@ impl AotModule {
                 crate::jit::runtime::aot_set_constants(&self.constants);
             }
         }
+        // Arm the compiled-function context so captured closures can resolve
+        // their target's native entry point.
+        set_aot_module_ctx(self);
 
         // Call the compiled function. Signature: extern "C" fn() -> u64
         // (for the entry point with no params).
@@ -409,6 +418,7 @@ impl AotModule {
 
         // Clean up.
         crate::jit::runtime::aot_clear_constants();
+        clear_aot_module_ctx();
         let _ = crate::jit::runtime::aot_take_heap();
 
         Ok(result)
@@ -488,7 +498,10 @@ pub fn set_aot_dispatch(target: Option<AotDispatchTarget>) {
         // SAFETY: `t.module` outlives the dispatched native call (owned by the
         // Runtime or the standalone driver's local). `aot_set_constants` copies
         // the slice.
-        unsafe { crate::jit::runtime::aot_set_constants(&(*t.module).constants()) };
+        unsafe {
+            crate::jit::runtime::aot_set_constants(&(*t.module).constants());
+            set_aot_module_ctx(&*t.module);
+        }
     }
     AOT_DISPATCH.with(|c| *c.borrow_mut() = target);
 }
@@ -497,6 +510,7 @@ pub fn set_aot_dispatch(target: Option<AotDispatchTarget>) {
 pub fn clear_aot_dispatch() {
     AOT_DISPATCH.with(|c| *c.borrow_mut() = None);
     crate::jit::runtime::aot_clear_constants();
+    clear_aot_module_ctx();
 }
 
 thread_local! {
@@ -504,6 +518,41 @@ thread_local! {
     /// `nulang_aot_spawn` call (armed by the driver around dispatch).
     static AOT_SPAWN_CTX: std::cell::RefCell<*const AotModule> =
         std::cell::RefCell::new(std::ptr::null());
+    /// The `AotModule` whose compiled function table resolves the next
+    /// `nulang_aot_resolve_fn` call (armed around dispatch, so captured
+    /// closures can look up their target's native entry point).
+    static AOT_MODULE_CTX: std::cell::RefCell<*const AotModule> =
+        std::cell::RefCell::new(std::ptr::null());
+}
+
+/// Arm the module whose compiled function table resolves closure targets.
+/// The caller must clear it after dispatch.
+pub fn set_aot_module_ctx(module: &AotModule) {
+    AOT_MODULE_CTX.with(|c| *c.borrow_mut() = module as *const AotModule);
+}
+
+/// Disarm the compiled-function context.
+pub fn clear_aot_module_ctx() {
+    AOT_MODULE_CTX.with(|c| *c.borrow_mut() = std::ptr::null());
+}
+
+/// Native-code entry point for captured-closure dispatch: resolve a compiled
+/// function pointer by MIR function index from the armed module context.
+/// Returns the pointer as u64 (0 when no module is armed or the index is out
+/// of range). Defined here (not in `jit/runtime.rs`) because it needs
+/// `AotModule`; the JIT linker resolves it by symbol name at link time.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_resolve_fn(fn_idx: u64) -> u64 {
+    let module = AOT_MODULE_CTX.with(|c| *c.borrow());
+    if module.is_null() {
+        return 0;
+    }
+    let m = unsafe { &*module };
+    m.compiled_funcs
+        .get(fn_idx as usize)
+        .copied()
+        .map(|p| p as u64)
+        .unwrap_or(0)
 }
 
 /// Arm the module the next `nulang_aot_spawn` (from native behavior code)

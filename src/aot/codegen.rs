@@ -521,6 +521,26 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // Captured closures allocate a closure object holding boxed capture values
+    // and dispatch through a runtime helper; the capture slots must be tagged.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::Closure { captures, .. },
+                    ..
+                } if !captures.is_empty()
+            ) {
+                return false;
+            }
+        }
+    }
+    // Lifted closure functions receive captured values as trailing boxed
+    // params; an unboxed variant would misread them as raw ints.
+    if !func.captures.is_empty() {
+        return false;
+    }
     let local_base = mir::FunctionBuilder::LOCAL_BASE as usize;
     for param in &func.params {
         let reg = local_base + param.0 as usize;
@@ -548,9 +568,14 @@ pub fn compile_mir_function_body(
     mode: CompileMode,
 ) -> AotResult<()> {
     aot.mode = mode;
-    // Reconstruct the signature for the codegen context.
+    // Reconstruct the signature for the codegen context. Lifted closure
+    // functions receive their captured values as trailing params (in capture
+    // order), appended after the explicit params.
     let mut sig = aot.module.make_signature();
     for _ in &mir_func.params {
+        sig.params.push(AbiParam::new(types::I64));
+    }
+    for _ in &mir_func.captures {
         sig.params.push(AbiParam::new(types::I64));
     }
     sig.returns.push(AbiParam::new(types::I64));
@@ -859,6 +884,56 @@ pub fn compile_mir_function_body(
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert(h_name, func_ref);
         }
+        // closure helpers: nulang_aot_make_closure_N(fn_idx, cap0..capN-1)
+        // -> i64 and nulang_aot_call_closure_N(closure, arg0..argN-1) -> i64
+        const AOT_MAKE_CLOSURE_HELPERS: [&str; 9] = [
+            "nulang_aot_make_closure_0",
+            "nulang_aot_make_closure_1",
+            "nulang_aot_make_closure_2",
+            "nulang_aot_make_closure_3",
+            "nulang_aot_make_closure_4",
+            "nulang_aot_make_closure_5",
+            "nulang_aot_make_closure_6",
+            "nulang_aot_make_closure_7",
+            "nulang_aot_make_closure_8",
+        ];
+        for (n, h_name) in AOT_MAKE_CLOSURE_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // fn index
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64)); // captures
+            }
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
+        const AOT_CALL_CLOSURE_HELPERS: [&str; 9] = [
+            "nulang_aot_call_closure_0",
+            "nulang_aot_call_closure_1",
+            "nulang_aot_call_closure_2",
+            "nulang_aot_call_closure_3",
+            "nulang_aot_call_closure_4",
+            "nulang_aot_call_closure_5",
+            "nulang_aot_call_closure_6",
+            "nulang_aot_call_closure_7",
+            "nulang_aot_call_closure_8",
+        ];
+        for (n, h_name) in AOT_CALL_CLOSURE_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // closure value
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64)); // explicit args
+            }
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
         // receive helpers: nulang_aot_receive_match_N(id0..idN-1) -> i64,
         // nulang_aot_receive_payload(i) -> i64
         const AOT_RECEIVE_HELPERS: [&str; 8] = [
@@ -960,13 +1035,21 @@ pub fn compile_mir_function_body(
             }
         }
 
-        // Track which locals hold zero-capture closures for call resolution.
+        // Track which locals hold zero-capture closures for call resolution,
+        // and which hold captured closures (those calls dispatch through the
+        // runtime closure helper with the stored capture values).
         let mut closure_targets: HashMap<u32, usize> = HashMap::new();
+        let mut captured_closure_locals: HashSet<u32> = HashSet::new();
         let mut local_vals: HashMap<u32, Value> = HashMap::new();
 
         for (i, param_id) in mir_func.params.iter().enumerate() {
             let reg = local_base + param_id.0;
             let val = builder.block_params(entry_block)[i];
+            local_vals.insert(reg, val);
+        }
+        for (i, cap_id) in mir_func.captures.iter().enumerate() {
+            let reg = local_base + cap_id.0;
+            let val = builder.block_params(entry_block)[mir_func.params.len() + i];
             local_vals.insert(reg, val);
         }
 
@@ -1145,6 +1228,7 @@ pub fn compile_mir_function_body(
                     &h,
                     &call_targets,
                     &mut closure_targets,
+                    &mut captured_closure_locals,
                     &mut local_vals,
                     mode,
                     constants,
@@ -1266,6 +1350,7 @@ fn compile_stmt(
     helpers: &HashMap<&str, FuncRef>,
     call_targets: &HashMap<usize, FuncRef>,
     closure_targets: &mut HashMap<u32, usize>,
+    captured_closure_locals: &mut HashSet<u32>,
     local_vals: &mut HashMap<u32, Value>,
     mode: CompileMode,
     constants: &[crate::bytecode::Constant],
@@ -1501,9 +1586,10 @@ fn compile_stmt(
                 }
             }
             if let mir::RValue::Closure { func, captures } = op {
-                if captures.is_empty() {
-                    let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
-                    closure_targets.insert(reg, *func);
+                let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+                closure_targets.insert(reg, *func);
+                if !captures.is_empty() {
+                    captured_closure_locals.insert(reg);
                 }
             }
             let val = compile_rvalue(
@@ -1513,6 +1599,7 @@ fn compile_stmt(
                 helpers,
                 call_targets,
                 closure_targets,
+                captured_closure_locals,
                 local_vals,
                 mode,
                 constants,
@@ -1633,6 +1720,7 @@ fn compile_rvalue(
     helpers: &HashMap<&str, FuncRef>,
     call_targets: &HashMap<usize, FuncRef>,
     closure_targets: &mut HashMap<u32, usize>,
+    captured_closure_locals: &HashSet<u32>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
     constants: &[crate::bytecode::Constant],
@@ -1669,6 +1757,45 @@ fn compile_rvalue(
                             "indirect call: closure target unknown at compile time".into(),
                         )
                     })?;
+                    if captured_closure_locals.contains(&reg) {
+                        // Captured closure: the explicit args travel with the
+                        // closure value; the helper reads the stored capture
+                        // values and dispatches to the compiled target with
+                        // (args + captures). Mirrors the bytecode ClosureCall.
+                        let closure_val = local_vals.get(&reg).ok_or_else(|| {
+                            AotCompileError::Internal("closure value uninitialized".into())
+                        })?;
+                        let arg_vals: Vec<Value> =
+                            args.iter()
+                                .map(|id| {
+                                    let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                                    local_vals.get(&reg).copied().ok_or_else(|| {
+                                        AotCompileError::Internal("call arg uninitialized".into())
+                                    })
+                                })
+                                .collect::<AotResult<Vec<_>>>()?;
+                        let helper_name = match arg_vals.len() {
+                            0 => "nulang_aot_call_closure_0",
+                            1 => "nulang_aot_call_closure_1",
+                            2 => "nulang_aot_call_closure_2",
+                            3 => "nulang_aot_call_closure_3",
+                            4 => "nulang_aot_call_closure_4",
+                            5 => "nulang_aot_call_closure_5",
+                            6 => "nulang_aot_call_closure_6",
+                            7 => "nulang_aot_call_closure_7",
+                            8 => "nulang_aot_call_closure_8",
+                            n => {
+                                return Err(AotCompileError::Unsupported(format!(
+                                    "closure call with {} args (max 8 in AOT)",
+                                    n
+                                )))
+                            }
+                        };
+                        let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+                        call_args.push(*closure_val);
+                        call_args.extend(arg_vals);
+                        return call_helper(builder, helpers, helper_name, &call_args);
+                    }
                     call_targets.get(&target_idx).copied().ok_or_else(|| {
                         AotCompileError::Internal(format!(
                             "call target fn {} not compiled yet",
@@ -1696,9 +1823,44 @@ fn compile_rvalue(
                 let idx = builder.ins().iconst(types::I64, *func as i64);
                 Ok(emit_tag_int(builder, idx))
             } else {
-                Err(AotCompileError::Unsupported(
-                    "closures with captures".into(),
-                ))
+                // Allocate a closure object carrying the captured values and
+                // return it as a TAG_CLOSURE value. The lifted target function
+                // receives the captures as trailing params when dispatched.
+                let fn_val = builder.ins().iconst(types::I64, *func as i64);
+                let cap_vals: Vec<Value> =
+                    captures
+                        .iter()
+                        .map(|id| {
+                            let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                            local_vals.get(&reg).copied().ok_or_else(|| {
+                                AotCompileError::Internal(format!(
+                                    "closure capture local {} uninitialized",
+                                    id.0
+                                ))
+                            })
+                        })
+                        .collect::<AotResult<Vec<_>>>()?;
+                let helper_name = match cap_vals.len() {
+                    0 => "nulang_aot_make_closure_0",
+                    1 => "nulang_aot_make_closure_1",
+                    2 => "nulang_aot_make_closure_2",
+                    3 => "nulang_aot_make_closure_3",
+                    4 => "nulang_aot_make_closure_4",
+                    5 => "nulang_aot_make_closure_5",
+                    6 => "nulang_aot_make_closure_6",
+                    7 => "nulang_aot_make_closure_7",
+                    8 => "nulang_aot_make_closure_8",
+                    n => {
+                        return Err(AotCompileError::Unsupported(format!(
+                            "closure with {} captures (max 8 in AOT)",
+                            n
+                        )))
+                    }
+                };
+                let mut call_args = Vec::with_capacity(cap_vals.len() + 1);
+                call_args.push(fn_val);
+                call_args.extend(cap_vals);
+                call_helper(builder, helpers, helper_name, &call_args)
             }
         }
 
@@ -2112,6 +2274,7 @@ fn compile_rvalue(
                     helpers,
                     call_targets,
                     closure_targets,
+                    captured_closure_locals,
                     local_vals,
                     mode,
                     constants,
@@ -3750,6 +3913,76 @@ mod tests {
             val.as_int(),
             Some(42),
             "FFI double_int(21) should deliver 21 * 2 = 42"
+        );
+    }
+
+    #[test]
+    fn test_aot_closure_capture() {
+        // A closure capturing an enclosing local must allocate a closure
+        // object carrying the capture, and a call through it must dispatch to
+        // the lifted target with (explicit args + captures) — mirroring the
+        // bytecode Closure/CapStore/CapLoad/ClosureCall path.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = "let a = 40 in let add = fn(x) { x + a } in add(2)";
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        let val = crate::vm::Value::from_raw(raw);
+        assert_eq!(
+            val.as_int(),
+            Some(42),
+            "closure capturing a=40 applied to 2 should yield 42"
+        );
+    }
+
+    #[test]
+    fn test_aot_closure_capture_two_vars() {
+        // Two captured locals exercise the multi-capture make/call helpers
+        // (closure object with two capture slots; total call arity 3).
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = "let a = 30 in let b = 10 in let f = fn(x) { a + b + x } in f(2)";
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        let val = crate::vm::Value::from_raw(raw);
+        assert_eq!(
+            val.as_int(),
+            Some(42),
+            "closure capturing a=30, b=10 applied to 2 should yield 42"
         );
     }
 

@@ -2,7 +2,8 @@
 
 use crate::bytecode::Constant;
 use crate::value_layout::{
-    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR, TAG_STRING,
+    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_CLOSURE, TAG_INT, TAG_MASK, TAG_PTR,
+    TAG_STRING,
 };
 use crate::vm::Value;
 use std::cell::UnsafeCell;
@@ -1158,6 +1159,172 @@ define_aot_ffi_call!(nulang_aot_ffi_call_1, a0);
 define_aot_ffi_call!(nulang_aot_ffi_call_2, a0, a1);
 define_aot_ffi_call!(nulang_aot_ffi_call_3, a0, a1, a2);
 define_aot_ffi_call!(nulang_aot_ffi_call_4, a0, a1, a2, a3);
+
+// ---------------------------------------------------------------------------
+// AOT closures with captures
+// ---------------------------------------------------------------------------
+// A captured closure in AOT-compiled code is a `TAG_CLOSURE` value pointing at
+// a heap object `[fn_idx, cap_count, cap0, ..., capN-1]` allocated from the
+// actor heap (TypeTag::Closure). Creation lowers to an arity-matched
+// `nulang_aot_make_closure_N`; calling a captured closure lowers to an
+// arity-matched `nulang_aot_call_closure_N`, which reads the function index
+// and captured values back out, resolves the compiled function pointer through
+// the armed AOT module (`nulang_aot_resolve_fn`), and invokes it with
+// (explicit args + captures) — matching the lifted function's
+// param-then-capture signature.
+
+macro_rules! define_aot_make_closure {
+    ($name:ident, $($cap:ident),*) => {
+        /// Allocate a closure object carrying fn_idx and the captured values.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(fn_idx: u64 $(, $cap: u64)*) -> u64 {
+            let count: usize = 0 $(+ { let _ = stringify!($cap); 1 })*;
+            let Some(ptr) = alloc_obj(2 + count * 8, HeapTypeTag::Closure) else {
+                return Value::nil().as_raw();
+            };
+            let slot = ptr as *mut u64;
+            *slot = fn_idx;
+            *slot.add(1) = count as u64;
+            let caps = [$($cap),*];
+            for (i, c) in caps.iter().enumerate() {
+                *slot.add(2 + i) = *c;
+            }
+            (TAG_CLOSURE | ptr as u64)
+        }
+    };
+}
+
+define_aot_make_closure!(nulang_aot_make_closure_0,);
+define_aot_make_closure!(nulang_aot_make_closure_1, a0);
+define_aot_make_closure!(nulang_aot_make_closure_2, a0, a1);
+define_aot_make_closure!(nulang_aot_make_closure_3, a0, a1, a2);
+define_aot_make_closure!(nulang_aot_make_closure_4, a0, a1, a2, a3);
+define_aot_make_closure!(nulang_aot_make_closure_5, a0, a1, a2, a3, a4);
+define_aot_make_closure!(nulang_aot_make_closure_6, a0, a1, a2, a3, a4, a5);
+define_aot_make_closure!(nulang_aot_make_closure_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_make_closure!(nulang_aot_make_closure_8, a0, a1, a2, a3, a4, a5, a6, a7);
+
+/// Invoke a compiled function pointer with a flat boxed-arg list (explicit
+/// args followed by captured values), dispatching on the total arity.
+unsafe fn call_closure_dispatch(fn_ptr: u64, all: &[u64]) -> u64 {
+    match all.len() {
+        0 => {
+            let f: unsafe extern "C" fn() -> u64 = std::mem::transmute(fn_ptr);
+            f()
+        }
+        1 => {
+            let f: unsafe extern "C" fn(u64) -> u64 = std::mem::transmute(fn_ptr);
+            f(all[0])
+        }
+        2 => {
+            let f: unsafe extern "C" fn(u64, u64) -> u64 = std::mem::transmute(fn_ptr);
+            f(all[0], all[1])
+        }
+        3 => {
+            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 = std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2])
+        }
+        4 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64) -> u64 = std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3])
+        }
+        5 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3], all[4])
+        }
+        6 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3], all[4], all[5])
+        }
+        7 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6])
+        }
+        8 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7])
+        }
+        9 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8])
+        }
+        10 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9])
+        }
+        11 => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+                std::mem::transmute(fn_ptr);
+            f(
+                all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9],
+                all[10],
+            )
+        }
+        12 => {
+            let f: unsafe extern "C" fn(
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+            ) -> u64 = std::mem::transmute(fn_ptr);
+            f(
+                all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9],
+                all[10], all[11],
+            )
+        }
+        _ => Value::nil().as_raw(),
+    }
+}
+
+macro_rules! define_aot_call_closure {
+    ($name:ident, $($arg:ident),*) => {
+        /// Invoke a captured closure: read fn_idx + captures, then dispatch.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(closure_raw: u64 $(, $arg: u64)*) -> u64 {
+            let ptr = (closure_raw & PAYLOAD_MASK) as *mut u64;
+            if ptr.is_null() {
+                return Value::nil().as_raw();
+            }
+            let fn_idx = *ptr;
+            let cap_count = *ptr.add(1) as usize;
+            let fn_ptr = crate::aot::nulang_aot_resolve_fn(fn_idx);
+            if fn_ptr == 0 {
+                return Value::nil().as_raw();
+            }
+            let args = [$($arg),*];
+            let mut all: Vec<u64> = Vec::with_capacity(args.len() + cap_count);
+            all.extend_from_slice(&args);
+            for i in 0..cap_count {
+                all.push(*ptr.add(2 + i));
+            }
+            call_closure_dispatch(fn_ptr, &all)
+        }
+    };
+}
+
+define_aot_call_closure!(nulang_aot_call_closure_0,);
+define_aot_call_closure!(nulang_aot_call_closure_1, a0);
+define_aot_call_closure!(nulang_aot_call_closure_2, a0, a1);
+define_aot_call_closure!(nulang_aot_call_closure_3, a0, a1, a2);
+define_aot_call_closure!(nulang_aot_call_closure_4, a0, a1, a2, a3);
+define_aot_call_closure!(nulang_aot_call_closure_5, a0, a1, a2, a3, a4);
+define_aot_call_closure!(nulang_aot_call_closure_6, a0, a1, a2, a3, a4, a5);
+define_aot_call_closure!(nulang_aot_call_closure_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_call_closure!(nulang_aot_call_closure_8, a0, a1, a2, a3, a4, a5, a6, a7);
 
 // ---------------------------------------------------------------------------
 // AOT selective receive
