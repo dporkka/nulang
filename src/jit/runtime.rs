@@ -1023,6 +1023,48 @@ define_aot_emit!(nulang_aot_emit_7, a0, a1, a2, a3, a4, a5, a6);
 define_aot_emit!(nulang_aot_emit_8, a0, a1, a2, a3, a4, a5, a6, a7);
 
 // ---------------------------------------------------------------------------
+// AOT synchronous ask
+// ---------------------------------------------------------------------------
+// `ask actor behavior(args)` in AOT-compiled code lowers to an arity-matched
+// `nulang_aot_ask_N` call. The helper packs the boxed args and routes through
+// the current callbacks' `ask_actor`, which performs a synchronous
+// request-response (`Runtime::ask_actor_sync` under the actor runtime, the
+// same path the bytecode `Ask` opcode takes). Outside an actor context it
+// degrades to nil, matching the standalone VM's default.
+
+macro_rules! define_aot_ask {
+    ($name:ident, $($arg:ident),*) => {
+        /// Perform a synchronous ask (request-response) from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            actor_raw: u64,
+            behavior_raw: u64 $(, $arg: u64)*,
+        ) -> u64 {
+            let args = [$(Value::from_bits($arg)),*];
+            try_with_callbacks(|cb| {
+                cb.ask_actor(
+                    Value::from_bits(actor_raw),
+                    behavior_raw as u16,
+                    &args,
+                )
+                .as_raw()
+            })
+            .unwrap_or(Value::nil().as_raw())
+        }
+    };
+}
+
+define_aot_ask!(nulang_aot_ask_0,);
+define_aot_ask!(nulang_aot_ask_1, a0);
+define_aot_ask!(nulang_aot_ask_2, a0, a1);
+define_aot_ask!(nulang_aot_ask_3, a0, a1, a2);
+define_aot_ask!(nulang_aot_ask_4, a0, a1, a2, a3);
+define_aot_ask!(nulang_aot_ask_5, a0, a1, a2, a3, a4);
+define_aot_ask!(nulang_aot_ask_6, a0, a1, a2, a3, a4, a5);
+define_aot_ask!(nulang_aot_ask_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_ask!(nulang_aot_ask_8, a0, a1, a2, a3, a4, a5, a6, a7);
+
+// ---------------------------------------------------------------------------
 // AOT selective receive
 // ---------------------------------------------------------------------------
 // `receive { | Behavior(params) => ... }` in an AOT-compiled behavior lowers
