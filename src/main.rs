@@ -839,11 +839,12 @@ fn print_help() {
     println!("  --emit-stdlib-docs <dir>  Generate per-effect stdlib Markdown docs into <dir>");
     println!("  --lsp            Start Language Server (stdio)");
     println!("  --dap            Start Debug Adapter (stdio; program via launch request)");
-    print!("  --backend <b>    Backend: bytecode (default) | native");
+    print!("  --backend <b>    Backend: bytecode (default) | native | core-vm");
     if cfg!(feature = "wasm-backend") {
         print!(" | wasm | wasm-run | wasm-aot");
     }
     println!();
+    println!("                   core-vm: frozen Core interpreter (Stage 3 bootstrap)");
     println!("                   native: pure-functional subset only (no effects,");
     println!("                   actors, or FFI — errors name the unsupported");
     println!("                   construct; use bytecode for full-language programs)");
@@ -1402,7 +1403,6 @@ fn run_source(
     target: &str,
 ) -> NuResult<()> {
     let ast = run_frontend(source, file_path, verbose)?;
-
     match backend {
         #[cfg(feature = "wasm-backend")]
         "wasm" => {
@@ -1556,9 +1556,36 @@ fn run_source(
             }
             Ok(())
         }
+        "core-vm" => {
+            // Core VM backend: compile to bytecode, then run through minimal interpreter.
+            let m = compile_with_new_pipeline(&ast, "main")?;
+            if verbose {
+                println!("=== Core VM (Stage 3) ===");
+                println!("{}", disassemble(&m));
+            }
+            let mut vm = nulang::core_vm::CoreVM::new();
+            let module_idx = vm.load_module_from_code(&m).map_err(|e| nulang::types::NuError::VMError {
+                msg: e,
+                span: Span::default(),
+            })?;
+            let entry = m.entry_point.unwrap_or(0);
+            let value = vm.run(module_idx, entry).map_err(|e| nulang::types::NuError::VMError {
+                msg: e,
+                span: Span::default(),
+            })?;
+            let result_str = if let Some(s) = vm.resolve_display_string(value) {
+                s
+            } else {
+                nulang::vm::Value::from_raw(value).to_string_repr()
+            };
+            if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
+                println!("{}", result_str);
+            }
+            Ok(())
+        }
         _ => Err(nulang::types::NuError::VMError {
             msg: format!(
-                "unknown backend '{}' (expected bytecode | native{})",
+                "unknown backend '{}' (expected bytecode | native | core-vm{})",
                 backend,
                 if cfg!(feature = "wasm-backend") {
                     " | wasm | wasm-run | wasm-aot"

@@ -10,6 +10,7 @@ pub mod backends;
 pub mod bytecode;
 pub mod cranelift_utils;
 pub mod dap;
+pub mod core_vm;
 pub mod docgen;
 pub mod dst;
 pub mod effect_checker;
