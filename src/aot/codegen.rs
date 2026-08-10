@@ -1632,10 +1632,11 @@ fn compile_rvalue(
         )),
         mir::RValue::Receive => call_helper(builder, helpers, "nulang_aot_receive_pop", &[]),
         mir::RValue::SelfRef => call_helper(builder, helpers, "nulang_aot_self_ref", &[]),
-        mir::RValue::CapabilityCheck { .. } => Err(AotCompileError::Unsupported(
-            "CapabilityCheck: capability checking requires the bytecode backend (unavailable with --backend native)"
-                .into(),
-        )),
+        mir::RValue::CapabilityCheck { .. } => {
+            // Capabilities are compile-time only; the check is always true at
+            // runtime (the bytecode backend emits Const1 for this opcode).
+            Ok(builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1))
+        }
         mir::RValue::StateGet { field } => {
             let c = crate::bytecode::Constant::String(field.clone());
             let field_val = compile_const(builder, &c, mode, constants)?;
@@ -3123,6 +3124,34 @@ mod tests {
             Some(99),
             "abortive handler with no args must yield the handler body result"
         );
+    }
+
+    #[test]
+    fn test_aot_capability_check_is_true() {
+        // Capability checks are compile-time only; the AOT backend must
+        // compile `CapabilityCheck` to tagged true (the bytecode backend
+        // emits Const1). No source syntax currently produces CapCheck, so
+        // this is exercised at the MIR level.
+        let mut builder = mir::FunctionBuilder::new("main", Some(crate::types::Type::bool()));
+        let tmp = builder.add_temp(crate::types::Type::int());
+        let out = builder.add_temp(crate::types::Type::bool());
+        builder.assign(tmp, mir::RValue::Const(crate::bytecode::Constant::Int(1)));
+        builder.assign(out, mir::RValue::CapabilityCheck { val: tmp });
+        builder.terminate(mir::Terminator::Return(Some(out)));
+        let func = builder.build();
+        let module = mir::Module {
+            name: "capcheck".into(),
+            functions: vec![func],
+            behaviors: vec![],
+            actor_metadata: vec![],
+            compensation_of: vec![],
+            parallel_branches_of: vec![],
+            foreign_functions: vec![],
+        };
+        let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        let val = crate::vm::Value::from_raw(raw);
+        assert_eq!(val, crate::vm::Value::bool(true), "CapabilityCheck must yield true");
     }
 
     #[test]
