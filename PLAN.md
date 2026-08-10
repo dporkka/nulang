@@ -961,8 +961,16 @@ has a killer application demonstrating a category it wins.
    template uses the client effects that work via the CLI. Each new
    template was validated end-to-end (`nula new` → `nula run`); 2 new
    tests cover all 7 templates scaffolding a valid entry point and
-   unknown-template rejection. Remaining Phase 4 D6 follow-up: swap the
-   web template to `Http.serve` once the CLI dispatch is fixed.
+   unknown-template rejection.
+   **Follow-up resolved 2026-08-09 (`a6b0172`):** the standalone-VM
+   `Http.serve` dispatch gap is fixed — `StandaloneVmCallbacks` now
+   handles `Http.serve` (was "Unhandled effect"), proven by
+   `test_http_serve_standalone` making a real request. The web template
+   nonetheless stays an HTTP **client** (`Http.get`/`Http.post`): a pure
+   standalone `Http.serve` program exits when `main` returns (the leaked
+   listener thread dies with the process), so a server template needs a
+   blocking program shape that doesn't fit the one-shot `nula run` model.
+   A runtime-backed or blocking program can use `Http.serve` directly.
 7. **Speaking + writing.** One conference talk (Strange Loop, Papers
    We Love, LambdaConf), one long-form technical post per quarter
    (JIT internals, capability system, DST harness, formal semantics).

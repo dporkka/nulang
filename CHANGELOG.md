@@ -396,6 +396,18 @@ in this version; they are recorded here to establish their tier.
 
 ### Added since 1.0.0-frozen — 2026-08-09
 
+- **`Http.serve` works in the standalone (actor-free) VM** (Stable, `Http`
+  effect): previously only the runtime-backed callbacks handled `serve`,
+  so an actor-free program (`nulang file.nula` with no actor decl) got
+  "Unhandled effect". `StandaloneVmCallbacks` now dispatches `Http.serve`
+  with the handler's module + function-table index, binding
+  `HttpServerState` directly; the server is leaked so it keeps serving for
+  the process lifetime. Regression test `test_http_serve_standalone`
+  proves an actor-free program binds a port and serves a request
+  end-to-end. Note: a pure standalone `Http.serve` program still exits
+  when `main` returns (the process dies), so run it from a runtime-backed
+  or blocking program.
+
 - **`nula new --template` library grows to 7 templates** (Experimental,
   package manager): adds `distributed` (spawn + message-passing worker
   actors), `ai-agent` (actor backed by `perform Inference.ask`), and
