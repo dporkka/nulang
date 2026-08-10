@@ -1160,10 +1160,17 @@ anything.
    remote watchers and inbound `Packet::Down` delivers DOWN to local
    watchers (previously all three were silently dropped). Part (c) —
    supervisor-policy-driven re-spawn of durable actors on a healthy node —
-   remains deliberately unimplemented: it requires the
-   old-node-confirmed-gone gate that only a split-brain resolver decision
-   (not a bare failure-detection signal) provides; the safety rationale is
-   documented in the `handle_node_failed` doc comment.
+   is **designed but not implemented**: **RFC 0014** specifies the
+   confirmed-gone gate (new `Removed` membership state via positive
+   `NodeGoodbye` or a majority-gated `removal_confirmation_timeout`
+   promotion), a gossip-replicated durable-actor location directory with
+   epoch-based two-live-copies resolution (self-demote), snapshot
+   replication to a deterministic shadow node at `checkpoint_actor`, a new
+   `RestartPolicy::RespawnOnNodeLoss` supervisor policy, and reuse of the
+   existing `Packet::MigrateActor`/`receive_migrated_actor` transport.
+   It requires the old-node-confirmed-gone gate that a bare
+   failure-detection signal cannot provide; the safety rationale is
+   documented in the `handle_node_failed` doc comment and RFC 0014 §1.
    **Original analysis (kept for provenance):** zero grep hits for
    `failover`/`rehome`/`migrat` logic across
    `distribution.rs`/`distributed.rs`. `ClusterState` already detects
