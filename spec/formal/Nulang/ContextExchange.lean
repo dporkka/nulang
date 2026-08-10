@@ -86,12 +86,23 @@ theorem context_exchange (Γ : Ctx) (σ τ : Ty) (e : Expr) (ρ : Ty)
   | nilLit Γ' => exact hasType.nilLit (τ :: σ :: Γ')
   | @var Γ' n ρ' h_lookup =>
       -- h_lookup: (σ::τ::Γ').get? n = some ρ'
-      -- Need: (τ::σ::Γ').get? (swap01_idx n) = some ρ'
-      -- where swap01_idx 0 = 1, swap01_idx 1 = 0, else n
-      simp [swap01]
-      -- The variable case is the key: we need to look up the right index
-      -- in the swapped context.
-      sorry
+      -- Need: hasType (τ::σ::Γ') (swap01 (.var n)) ρ'
+      -- swap01 (.var 0) = .var 1, swap01 (.var 1) = .var 0, else .var n
+      have h_swap : swap01 (.var n) = .var (match n with | 0 => 1 | 1 => 0 | _ => n) := by
+        simp [swap01]
+      -- Actually, we need to compute the swapped index and look it up.
+      -- Case analysis on n.
+      by_cases h0 : n = 0
+      · subst h0; simp [swap01, Ctx.get, List.get?] at h_lookup ⊢; exact hasType.var (τ :: σ :: Γ') 1 ρ' (by simpa using h_lookup)
+      · by_cases h1 : n = 1
+        · subst h1; simp [swap01, Ctx.get, List.get?] at h_lookup ⊢; exact hasType.var (τ :: σ :: Γ') 0 ρ' (by simpa using h_lookup)
+        · -- n ≥ 2: index unchanged, both contexts agree on tail
+          simp [swap01, Ctx.get, List.get?] at h_lookup ⊢
+          -- h_lookup: Γ'.get? (n-2) = some ρ' after simplifications
+          -- Actually, (σ::τ::Γ').get? n = Γ'.get? (n-2) for n≥2
+          -- And (τ::σ::Γ').get? n = Γ'.get? (n-2) for n≥2
+          -- So the results are identical
+          simpa [Nat.sub_add_comm] using h_lookup
   | binop Γ' op e₁ e₂ τ₁ τ₂ ρ' h₁ h₂ hop =>
       simp [swap01]
       exact hasType.binop (τ :: σ :: Γ') op _ _ τ₁ τ₂ ρ'
