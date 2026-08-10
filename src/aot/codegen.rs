@@ -23,7 +23,7 @@ use cranelift_module::{Linkage, Module};
 use std::collections::{HashMap, HashSet};
 
 use crate::mir;
-use crate::type_metadata::{KnownType, TypeMetadata};
+use crate::type_metadata::{CapabilityMetadata, KnownType, TypeMetadata};
 
 // Reuse NaN-tag constants and CLIF helpers from `cranelift_utils`.
 use crate::cranelift_utils::{emit_sext48, emit_tag_bool, emit_tag_int, TAG_BOOL_I64, TAG_NIL_I64};
@@ -74,6 +74,8 @@ pub struct AotContext<'a> {
     pub helpers: HashMap<&'static str, FuncRef>,
     /// FuncIds of already-compiled functions, indexed by MIR function index.
     pub func_ids: Vec<cranelift_module::FuncId>,
+    /// Capability metadata for each register.
+    pub cap_metadata: CapabilityMetadata,
     /// Compilation mode: boxed (NaN-tagged) or unboxed (raw i64 for Int).
     pub mode: CompileMode,
     /// Module-wide field name → slot index mapping for records.
@@ -90,6 +92,7 @@ impl<'a> AotContext<'a> {
             codegen_ctx,
             helpers: HashMap::new(),
             func_ids: Vec::new(),
+            cap_metadata: CapabilityMetadata::new(),
             mode: CompileMode::Boxed,
             field_map: HashMap::new(),
             constants: Vec::new(),
@@ -358,6 +361,7 @@ pub fn compile_mir_function_body(
     let builder_ctx: &mut FunctionBuilderContext = aot.builder_context;
     let local_base = mir::FunctionBuilder::LOCAL_BASE;
     let type_meta = mir_func.type_metadata.clone();
+    aot.cap_metadata = CapabilityMetadata::from_mir_function(mir_func);
 
     // Analyze block predecessors.
     let preds = compute_predecessors(mir_func);
@@ -527,6 +531,97 @@ pub fn compile_mir_function_body(
                 .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert("nulang_aot_state_set", func_ref);
+        }
+        // send helpers: nulang_aot_send_N(target, behavior, arg0..argN-1) -> void
+        const AOT_SEND_HELPERS: [&str; 9] = [
+            "nulang_aot_send_0",
+            "nulang_aot_send_1",
+            "nulang_aot_send_2",
+            "nulang_aot_send_3",
+            "nulang_aot_send_4",
+            "nulang_aot_send_5",
+            "nulang_aot_send_6",
+            "nulang_aot_send_7",
+            "nulang_aot_send_8",
+        ];
+        for (n, h_name) in AOT_SEND_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // target actor ref
+            h_sig.params.push(AbiParam::new(types::I64)); // behavior index
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64));
+            }
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
+        // receive helpers: nulang_aot_receive_match_N(id0..idN-1) -> i64,
+        // nulang_aot_receive_payload(i) -> i64
+        const AOT_RECEIVE_HELPERS: [&str; 8] = [
+            "nulang_aot_receive_match_1",
+            "nulang_aot_receive_match_2",
+            "nulang_aot_receive_match_3",
+            "nulang_aot_receive_match_4",
+            "nulang_aot_receive_match_5",
+            "nulang_aot_receive_match_6",
+            "nulang_aot_receive_match_7",
+            "nulang_aot_receive_match_8",
+        ];
+        for (n, h_name) in AOT_RECEIVE_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            for _ in 0..=n {
+                h_sig.params.push(AbiParam::new(types::I64));
+            }
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_receive_payload", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_receive_payload", func_ref);
+        }
+        // receive_pop: () -> i64 (pop-any mailbox receive)
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_receive_pop", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_receive_pop", func_ref);
+        }
+        // spawn_push: (i64, i64) -> () (queue one spawn init pair)
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_spawn_push", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_spawn_push", func_ref);
+        }
+        // spawn: (i64) -> i64 (create a standalone actor)
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_spawn", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_spawn", func_ref);
         }
         // Helper to register a call target FuncRef.
         let mut register_call_target = |n: usize| {
@@ -758,6 +853,65 @@ fn compile_stmt(
     field_map: &HashMap<String, u8>,
 ) -> AotResult<()> {
     match stmt {
+        mir::Stmt::Assign {
+            dst,
+            op: mir::RValue::ReceiveCommit,
+        } => {
+            // No-op in AOT: the standalone receive_match already removed the
+            // matched message from the mailbox.
+            let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+            local_vals.insert(dst_reg, builder.ins().iconst(types::I64, 0));
+            Ok(())
+        }
+        mir::Stmt::Assign {
+            dst,
+            op:
+                mir::RValue::ReceiveMatch {
+                    behavior_ids,
+                    max_params,
+                }
+                | mir::RValue::ReceiveWait {
+                    behavior_ids,
+                    max_params,
+                    ..
+                },
+        } => {
+            let helper_name = match behavior_ids.len() {
+                1 => "nulang_aot_receive_match_1",
+                2 => "nulang_aot_receive_match_2",
+                3 => "nulang_aot_receive_match_3",
+                4 => "nulang_aot_receive_match_4",
+                5 => "nulang_aot_receive_match_5",
+                6 => "nulang_aot_receive_match_6",
+                7 => "nulang_aot_receive_match_7",
+                8 => "nulang_aot_receive_match_8",
+                n => {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "receive with {} candidate behaviors (max 8 in AOT)",
+                        n
+                    )))
+                }
+            };
+            let call_args: Vec<Value> = behavior_ids
+                .iter()
+                .map(|id| builder.ins().iconst(types::I64, *id as i64))
+                .collect();
+            let arm_val = call_helper(builder, helpers, helper_name, &call_args)?;
+            let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+            local_vals.insert(dst_reg, arm_val);
+            // Payload temps are the contiguous locals dst+1 .. dst+max_params.
+            for i in 0..*max_params {
+                let idx_const = builder.ins().iconst(types::I64, i as i64);
+                let pv = call_helper(
+                    builder,
+                    helpers,
+                    "nulang_aot_receive_payload",
+                    &[idx_const],
+                )?;
+                local_vals.insert(dst_reg + 1 + i as u32, pv);
+            }
+            Ok(())
+        }
         mir::Stmt::Assign { dst, op } => {
             if let mir::RValue::Closure { func, captures } = op {
                 if captures.is_empty() {
@@ -1107,16 +1261,12 @@ fn compile_rvalue(
         mir::RValue::SignalWait { .. } => Err(AotCompileError::Unsupported(
             "SignalWait: workflow signals require the bytecode backend (unavailable with --backend native)".into(),
         )),
-        mir::RValue::Receive => Err(AotCompileError::Unsupported(
-            "Receive: mailbox receive requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
-        mir::RValue::ReceiveMatch { .. } => Err(AotCompileError::Unsupported(
-            "ReceiveMatch: selective receive requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
-        mir::RValue::ReceiveWait { .. } => Err(AotCompileError::Unsupported(
-            "ReceiveWait: timed selective receive requires the bytecode backend (unavailable with --backend native)"
-                .into(),
-        )),
+        // Handled by the Assign arm (multi-register write); never reached here.
+        mir::RValue::ReceiveMatch { .. } | mir::RValue::ReceiveWait { .. } => {
+            Err(AotCompileError::Internal(
+                "ReceiveMatch/ReceiveWait must be compiled via the Assign arm".into(),
+            ))
+        }
         mir::RValue::ReceiveCommit => Err(AotCompileError::Unsupported(
             "ReceiveCommit: receive commit requires the bytecode backend (unavailable with --backend native)".into(),
         )),
@@ -1126,6 +1276,7 @@ fn compile_rvalue(
         mir::RValue::Migrate { .. } => Err(AotCompileError::Unsupported(
             "Migrate: actor migration requires the bytecode backend (unavailable with --backend native)".into(),
         )),
+        mir::RValue::Receive => call_helper(builder, helpers, "nulang_aot_receive_pop", &[]),
         mir::RValue::SelfRef => call_helper(builder, helpers, "nulang_aot_self_ref", &[]),
         mir::RValue::CapabilityCheck { .. } => Err(AotCompileError::Unsupported(
             "CapabilityCheck: capability checking requires the bytecode backend (unavailable with --backend native)"
@@ -1136,12 +1287,85 @@ fn compile_rvalue(
             let field_val = compile_const(builder, &c, mode, constants)?;
             call_helper(builder, helpers, "nulang_aot_state_get", &[field_val])
         }
-        mir::RValue::Spawn { .. } => Err(AotCompileError::Unsupported(
-            "Spawn: actor spawning requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
-        mir::RValue::Send { .. } => Err(AotCompileError::Unsupported(
-            "Send: fire-and-forget message send requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::RValue::Spawn {
+            behavior_idx,
+            init,
+            target_node,
+        } => {
+            if target_node.is_some() {
+                return Err(AotCompileError::Unsupported(
+                    "Spawn: remote spawn (spawn@node) requires distribution (unavailable with --backend native)"
+                        .into(),
+                ));
+            }
+            // Queue each init pair: (name const idx, value).
+            for (name, val_rv) in init {
+                let name_idx = constants
+                    .iter()
+                    .position(|k| matches!(k, crate::bytecode::Constant::String(s) if s == name))
+                    .unwrap_or(0) as i64;
+                let val = compile_rvalue(
+                    builder,
+                    val_rv,
+                    type_meta,
+                    helpers,
+                    call_targets,
+                    closure_targets,
+                    local_vals,
+                    mode,
+                    constants,
+                    field_map,
+                )?;
+                let name_val = builder.ins().iconst(types::I64, name_idx);
+                call_void_helper(builder, helpers, "nulang_aot_spawn_push", &[name_val, val])?;
+            }
+            let behavior_val = builder.ins().iconst(types::I64, *behavior_idx as i64);
+            call_helper(builder, helpers, "nulang_aot_spawn", &[behavior_val])
+        }
+        mir::RValue::Send {
+            actor,
+            behavior_idx,
+            args,
+            ..
+        } => {
+            // target actor ref
+            let actor_reg = mir::FunctionBuilder::LOCAL_BASE + actor.0;
+            let target = local_vals.get(&actor_reg).copied().ok_or_else(|| {
+                AotCompileError::Internal(format!("Send target local {} uninitialized", actor.0))
+            })?;
+            let behavior_val = builder.ins().iconst(types::I64, *behavior_idx as i64);
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for a in args {
+                let reg = mir::FunctionBuilder::LOCAL_BASE + a.0;
+                arg_vals.push(local_vals.get(&reg).copied().ok_or_else(|| {
+                    AotCompileError::Internal(format!("Send arg local {} uninitialized", a.0))
+                })?);
+            }
+            let helper_name = match arg_vals.len() {
+                0 => "nulang_aot_send_0",
+                1 => "nulang_aot_send_1",
+                2 => "nulang_aot_send_2",
+                3 => "nulang_aot_send_3",
+                4 => "nulang_aot_send_4",
+                5 => "nulang_aot_send_5",
+                6 => "nulang_aot_send_6",
+                7 => "nulang_aot_send_7",
+                8 => "nulang_aot_send_8",
+                n => {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "Send with {} args (max 8 in AOT)",
+                        n
+                    )))
+                }
+            };
+            let mut call_args = Vec::with_capacity(arg_vals.len() + 2);
+            call_args.push(target);
+            call_args.push(behavior_val);
+            call_args.extend(arg_vals);
+            call_void_helper(builder, helpers, helper_name, &call_args)?;
+            // `send` evaluates to unit; emit the unit constant.
+            Ok(builder.ins().iconst(types::I64, crate::value_layout::TAG_UNIT as i64))
+        }
         mir::RValue::Ask { .. } => Err(AotCompileError::Unsupported(
             "Ask: request-response requires the bytecode backend (unavailable with --backend native)".into(),
         )),
@@ -1697,11 +1921,11 @@ mod tests {
 
     #[test]
     fn test_aot_compile_actor_state_access() {
-        // Actor behaviors using StateGet/StateSet/SelfRef must compile under
-        // --backend native. Previously they were rejected with an AOT
-        // Unsupported error naming the state op. After wiring, the only
-        // remaining blocker is the top-level `spawn` (Spawn), so the compile
-        // error must now be about Spawn — proving the state ops lowered.
+        // Actor behaviors using StateGet/StateSet/SelfRef plus top-level
+        // spawn+send must all compile under --backend native. Previously the
+        // state ops and spawn were rejected with AOT Unsupported errors;
+        // after wiring, the whole actor lifecycle (state access, spawn, send)
+        // lowers without error.
         use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
@@ -1731,13 +1955,8 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module);
         let err = aot.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            err.contains("Spawn"),
-            "expected compile to fail only on Spawn, got: {}",
-            err
-        );
-        assert!(
-            !err.contains("StateGet") && !err.contains("StateSet") && !err.contains("SelfRef"),
-            "state access ops should no longer be unsupported, got: {}",
+            err.is_empty(),
+            "spawn + send + state access should all compile natively, got: {}",
             err
         );
     }
@@ -1775,13 +1994,279 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile of pure-compute behavior should succeed");
         let ptr = aot
-            .fn_ptr_for_behavior("double")
+            .fn_ptr_for_behavior("Doubler.double")
             .expect("behavior 'double' should be compiled");
         // Boxed calling convention: extern "C" fn(u64) -> u64.
         let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(ptr) };
         let result = f(crate::vm::Value::int(21).as_raw());
         let got = crate::vm::Value::from_bits(result).as_int();
         assert_eq!(got, Some(42));
+    }
+
+    #[test]
+    fn test_aot_dispatch_actor_behavior() {
+        // End-to-end native dispatch: a message routed through the
+        // aot_behavior_adapter must run the AOT-compiled behavior body and
+        // mutate the actor's durable state via the callback bridge.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                state count: Int = 0
+                behavior add(n: Int) { self.count = self.count + n }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module)
+            .expect("AOT compile of stateful behavior should succeed");
+        let native = aot
+            .fn_ptr_for_behavior("Counter.add")
+            .expect("behavior 'Counter.add' should be compiled");
+
+        // Standalone actor with an `add` behavior dispatched through native code.
+        let mut actor = crate::runtime::Actor::new(7, "Counter", 64);
+        actor.set_state_field("count", crate::vm::Value::int(0));
+        actor.register_behavior("add", crate::aot::aot_behavior_adapter);
+
+        // Deliver `add(5)` then `add(7)`.
+        let constants = aot.constants();
+        crate::aot::set_aot_behavior_target(native, constants);
+        (actor.behavior_table[0].handler_fn)(&mut actor, &[crate::vm::Value::int(5)]);
+        crate::aot::set_aot_behavior_target(native, constants);
+        (actor.behavior_table[0].handler_fn)(&mut actor, &[crate::vm::Value::int(7)]);
+
+        let count = actor.get_state_field("count").and_then(|v| v.as_int());
+        assert_eq!(
+            count,
+            Some(12),
+            "AOT-native behavior should accumulate state"
+        );
+    }
+
+    #[test]
+    fn test_aot_native_send() {
+        // Native message passing end-to-end: A's behavior executes a `send`
+        // through the compiled `nulang_aot_send_N` helper, which delivers into
+        // B's mailbox via the standalone registry; the driver then dispatches
+        // the queued message through B's native behavior, mutating B's state.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor B {
+                state count: Int = 0
+                behavior add(n: Int) { self.count = self.count + n }
+            }
+            actor A {
+                behavior fire(target, n: Int) { send target add(n) }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module)
+            .expect("AOT compile of send behaviors should succeed");
+        let fire = aot
+            .fn_ptr_for_behavior("A.fire")
+            .expect("behavior 'A.fire' should be compiled");
+        let add = aot
+            .fn_ptr_for_behavior("B.add")
+            .expect("behavior 'B.add' should be compiled");
+        let constants = aot.constants();
+
+        let mut b = crate::runtime::Actor::new(2, "B", 64);
+        b.set_state_field("count", crate::vm::Value::int(0));
+        b.register_behavior("add", crate::aot::aot_behavior_adapter);
+        let mut a = crate::runtime::Actor::new(1, "A", 64);
+        a.register_behavior("fire", crate::aot::aot_behavior_adapter);
+        crate::aot::register_aot_actor(&mut b);
+        crate::aot::register_aot_actor(&mut a);
+
+        // Dispatch A.fire(B_ref, 5): the native body sends `add(5)` to B.
+        crate::aot::set_aot_behavior_target(fire, constants);
+        (a.behavior_table[0].handler_fn)(
+            &mut a,
+            &[crate::vm::Value::actor_ref(2), crate::vm::Value::int(5)],
+        );
+
+        // B's mailbox must hold the queued message; dispatch it natively.
+        let msg = b.mailbox.pop().expect("B should have received the message");
+        assert_eq!(msg.behavior_id, 0, "add is B's first behavior (module index 0)");
+        crate::aot::set_aot_behavior_target(add, constants);
+        (b.behavior_table[msg.behavior_id as usize].handler_fn)(&mut b, &msg.payload);
+
+        let count = b.get_state_field("count").and_then(|v| v.as_int());
+        assert_eq!(count, Some(5), "native send must deliver and mutate B's state");
+
+        crate::aot::unregister_aot_actor(2);
+        crate::aot::unregister_aot_actor(1);
+    }
+
+    #[test]
+    fn test_aot_native_receive() {
+        // Selective receive in native code: Run() executes a `receive` that
+        // pops a queued Add(5) from the actor's mailbox, binds n, and
+        // accumulates it — all through AOT-compiled code + callbacks.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                state total: Int = 0
+                behavior Add(n: Int) { self.total = self.total + n }
+                behavior Run() { receive { | Add(n) => self.total = self.total + n } }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module)
+            .expect("AOT compile of receive behavior should succeed");
+        let run = aot
+            .fn_ptr_for_behavior("Counter.Run")
+            .expect("behavior 'Counter.Run' should be compiled");
+        let constants = aot.constants();
+
+        let mut c = crate::runtime::Actor::new(1, "Counter", 64);
+        c.set_state_field("total", crate::vm::Value::int(0));
+        c.register_behavior("Add", crate::aot::aot_behavior_adapter);
+        c.register_behavior("Run", crate::aot::aot_behavior_adapter);
+        crate::aot::register_aot_actor(&mut c);
+
+        // Queue an Add(5) message (behavior_id 0 = module index of Add).
+        c.mailbox.push_local(crate::runtime::Message {
+            behavior_id: 0,
+            payload: std::sync::Arc::new(vec![crate::vm::Value::int(5)]),
+            sender: 0,
+            priority: crate::runtime::MessagePriority::Normal,
+            trace_id: None,
+        });
+
+        // Dispatch Run(): its native body selectively receives the message.
+        crate::aot::set_aot_behavior_target(run, constants);
+        (c.behavior_table[1].handler_fn)(&mut c, &[]);
+
+        let total = c.get_state_field("total").and_then(|v| v.as_int());
+        assert_eq!(total, Some(5), "native receive must deliver the payload");
+
+        crate::aot::unregister_aot_actor(1);
+    }
+
+    #[test]
+    fn test_aot_native_spawn() {
+        // Spawn in native code: Factory.make(base) runs `spawn Counter {
+        // total = base }`, creating a fresh Counter with init state applied
+        // and its behaviors registered — all through AOT-compiled code.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                state total: Int = 0
+                behavior Add(n: Int) { self.total = self.total + n }
+                behavior GetTotal() { self.total }
+            }
+            actor Factory {
+                behavior make(base: Int) { spawn Counter { total = base } }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module)
+            .expect("AOT compile of spawn behavior should succeed");
+        let make = aot
+            .fn_ptr_for_behavior("Factory.make")
+            .expect("behavior 'Factory.make' should be compiled");
+        let constants = aot.constants();
+
+        let mut factory = crate::runtime::Actor::new(10, "Factory", 64);
+        factory.register_behavior("make", crate::aot::aot_behavior_adapter);
+        crate::aot::register_aot_actor(&mut factory);
+
+        let before = crate::aot::aot_actor_ids();
+        crate::aot::set_aot_behavior_target(make, constants);
+        crate::aot::set_aot_spawn_ctx(&aot);
+        (factory.behavior_table[0].handler_fn)(&mut factory, &[crate::vm::Value::int(7)]);
+        crate::aot::clear_aot_spawn_ctx();
+        crate::aot::unregister_aot_actor(10);
+
+        let after = crate::aot::aot_actor_ids();
+        let spawned: Vec<u64> = after.into_iter().filter(|id| !before.contains(id)).collect();
+        assert_eq!(spawned.len(), 1, "spawn must create exactly one actor");
+        let spawned_id = spawned[0];
+        let c = crate::aot::aot_spawned_actor(spawned_id)
+            .expect("spawned actor should be in the ownership registry");
+        // SAFETY: the spawned actor is owned by the module registry.
+        let c = unsafe { &mut *c };
+        assert_eq!(c.name, "Counter", "spawned actor must have the right type name");
+        let total = c.get_state_field("total").and_then(|v| v.as_int());
+        assert_eq!(total, Some(7), "spawn init must set total to base");
+        let has_add = c
+            .behavior_table
+            .iter()
+            .any(|e| e.name == "Add");
+        assert!(has_add, "spawned actor must register its behaviors");
+        crate::aot::unregister_aot_actor(spawned_id);
     }
 
     #[test]

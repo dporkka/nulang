@@ -953,6 +953,130 @@ pub unsafe extern "C" fn nulang_aot_state_set(field_name_raw: u64, value: u64) {
     try_with_callbacks(|cb| cb.set_state_field(&field, Value::from_bits(value)));
 }
 
+// ---------------------------------------------------------------------------
+// AOT fire-and-forget message send
+// ---------------------------------------------------------------------------
+// `send actor behavior(args...)` in an AOT-compiled behavior lowers to a call
+// to one of these arity-matched helpers (0..8 payload args). The helper packs
+// the boxed args and routes through the current callbacks' `send_message`,
+// which delivers to the target actor's mailbox (scheduler path) or a
+// registered standalone actor (AOT dispatch path). Outside an actor context
+// it is a no-op, matching the bytecode VM's outside-an-actor contract.
+
+macro_rules! define_aot_send {
+    ($name:ident, $($arg:ident),*) => {
+        /// Send a fire-and-forget actor message from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(target_raw: u64, behavior_raw: u64 $(, $arg: u64)*) {
+            let args = [$(Value::from_bits($arg)),*];
+            let _ = try_with_callbacks(|cb| {
+                cb.send_message(Value::from_bits(target_raw), behavior_raw as u16, &args);
+                true
+            });
+        }
+    };
+}
+
+define_aot_send!(nulang_aot_send_0,);
+define_aot_send!(nulang_aot_send_1, a0);
+define_aot_send!(nulang_aot_send_2, a0, a1);
+define_aot_send!(nulang_aot_send_3, a0, a1, a2);
+define_aot_send!(nulang_aot_send_4, a0, a1, a2, a3);
+define_aot_send!(nulang_aot_send_5, a0, a1, a2, a3, a4);
+define_aot_send!(nulang_aot_send_6, a0, a1, a2, a3, a4, a5);
+define_aot_send!(nulang_aot_send_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_send!(nulang_aot_send_8, a0, a1, a2, a3, a4, a5, a6, a7);
+
+// ---------------------------------------------------------------------------
+// AOT selective receive
+// ---------------------------------------------------------------------------
+// `receive { | Behavior(params) => ... }` in an AOT-compiled behavior lowers
+// to an arity-matched `nulang_aot_receive_match_N` call with the candidate
+// behavior ids as raw u64s. The helper scans the current actor's mailbox (via
+// the callbacks' `try_receive_match`), returns the matched arm index as a
+// boxed Int — or the arm count when nothing matched, mirroring the VM's
+// ReceiveMatch contract — and stashes the payload for
+// `nulang_aot_receive_payload`, which the codegen calls once per parameter
+// slot. Timed receive (`after ms`) behaves as untimed in AOT: no suspension.
+
+thread_local! {
+    /// Payload of the most recent AOT receive match, read by
+    /// `nulang_aot_receive_payload`.
+    static AOT_RECEIVE_PAYLOAD: std::cell::RefCell<Vec<Value>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+thread_local! {
+    /// Pending `(name_const_idx, value)` init pairs for the next AOT spawn,
+    /// pushed by `nulang_aot_spawn_push` and drained by `nulang_aot_spawn`.
+    static AOT_SPAWN_INIT: std::cell::RefCell<Vec<(u64, Value)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// Queue one `(name, value)` init pair for the next `nulang_aot_spawn`.
+/// `name_idx` is the position of the field name in the module constant pool.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_spawn_push(name_idx: u64, value: u64) {
+    AOT_SPAWN_INIT.with(|c| {
+        c.borrow_mut().push((name_idx, Value::from_bits(value)));
+    });
+}
+
+/// Drain the queued spawn init pairs (used by `aot::nulang_aot_spawn`).
+pub fn take_aot_spawn_init() -> Vec<(u64, Value)> {
+    AOT_SPAWN_INIT.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+macro_rules! define_aot_receive {
+    ($name:ident, $($id:ident),*) => {
+        /// Selective receive from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name($($id: u64),*) -> u64 {
+            let ids: Vec<u16> = vec![$($id as u16),*];
+            match try_with_callbacks(|cb| cb.try_receive_match(&ids)).flatten() {
+                Some((idx, payload)) => {
+                    AOT_RECEIVE_PAYLOAD.with(|c| *c.borrow_mut() = payload);
+                    Value::int(idx as i64).as_raw()
+                }
+                None => Value::int(ids.len() as i64).as_raw(),
+            }
+        }
+    };
+}
+
+define_aot_receive!(nulang_aot_receive_match_1, id0);
+define_aot_receive!(nulang_aot_receive_match_2, id0, id1);
+define_aot_receive!(nulang_aot_receive_match_3, id0, id1, id2);
+define_aot_receive!(nulang_aot_receive_match_4, id0, id1, id2, id3);
+define_aot_receive!(nulang_aot_receive_match_5, id0, id1, id2, id3, id4);
+define_aot_receive!(nulang_aot_receive_match_6, id0, id1, id2, id3, id4, id5);
+define_aot_receive!(nulang_aot_receive_match_7, id0, id1, id2, id3, id4, id5, id6);
+define_aot_receive!(nulang_aot_receive_match_8, id0, id1, id2, id3, id4, id5, id6, id7);
+
+/// Read the i-th payload value of the most recent AOT receive match (boxed),
+/// or nil when out of range.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_receive_payload(idx: u64) -> u64 {
+    AOT_RECEIVE_PAYLOAD.with(|c| {
+        c.borrow()
+            .get(idx as usize)
+            .map(|v| v.as_raw())
+            .unwrap_or_else(|| Value::nil().as_raw())
+    })
+}
+
+/// Legacy pop-any receive (`RValue::Receive`): pops the next mailbox message
+/// and returns its first payload value (boxed), or nil when the mailbox is
+/// empty or no actor is active. The behavior id is discarded — the MIR
+/// contract only consumes the first payload value.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_receive_pop() -> u64 {
+    try_with_callbacks(|cb| cb.try_receive())
+        .flatten()
+        .map(|(_, first)| first.as_raw())
+        .unwrap_or_else(|| Value::nil().as_raw())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -975,5 +1099,14 @@ mod tests {
         let _ = super::nulang_aot_self_ref as unsafe extern "C" fn() -> u64;
         let _ = super::nulang_aot_state_get as unsafe extern "C" fn(u64) -> u64;
         let _ = super::nulang_aot_state_set as unsafe extern "C" fn(u64, u64);
+        let _ = super::nulang_aot_send_0 as unsafe extern "C" fn(u64, u64);
+        let _ = super::nulang_aot_send_1 as unsafe extern "C" fn(u64, u64, u64);
+        let _ = super::nulang_aot_send_2 as unsafe extern "C" fn(u64, u64, u64, u64);
+        let _ = super::nulang_aot_send_8 as unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
+        let _ = super::nulang_aot_receive_match_1 as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_aot_receive_match_2 as unsafe extern "C" fn(u64, u64) -> u64;
+        let _ = super::nulang_aot_receive_payload as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_aot_receive_pop as unsafe extern "C" fn() -> u64;
+        let _ = super::nulang_aot_spawn_push as unsafe extern "C" fn(u64, u64);
     }
 }
