@@ -48,6 +48,11 @@ pub struct AotModule {
     field_map: std::collections::HashMap<String, u8>,
     /// Constant pool (String literals), for runtime string resolution.
     constants: Vec<crate::bytecode::Constant>,
+    /// The bytecode `CodeModule` compiled from the same MIR, retained so a
+    /// native behavior can spawn real Runtime actors through
+    /// `Runtime::spawn_from_module` (which needs a CodeModule). Built
+    /// best-effort alongside the AOT code.
+    code_module: Option<crate::bytecode::CodeModule>,
 }
 
 impl AotModule {
@@ -267,6 +272,10 @@ impl AotModule {
             .map(|fid| jit_module.get_finalized_function(*fid))
             .collect();
 
+        // Best-effort bytecode companion so native spawn can route through
+        // `Runtime::spawn_from_module`.
+        let code_module = crate::mir_codegen::compile_mir(mir_module, &mir_module.name).ok();
+
         Ok(AotModule {
             jit_module,
             builder_context,
@@ -276,7 +285,13 @@ impl AotModule {
             entry_idx,
             field_map,
             constants,
+            code_module,
         })
+    }
+
+    /// The bytecode `CodeModule` compiled from the same MIR, if it compiled.
+    pub fn code_module(&self) -> Option<&crate::bytecode::CodeModule> {
+        self.code_module.as_ref()
     }
 
     /// Look up a compiled behavior's native entry pointer by name.
@@ -499,14 +514,52 @@ pub fn clear_aot_spawn_ctx() {
     AOT_SPAWN_CTX.with(|c| *c.borrow_mut() = std::ptr::null());
 }
 
-/// Native-code entry point for `RValue::Spawn`: creates a standalone actor of
-/// the type whose first behavior is at module index `behavior_idx`, applying
-/// any queued init pairs. Returns the new actor's id (boxed), or nil if no
-/// spawn context is armed. Defined here (not in `jit/runtime.rs`) because it
-/// needs `AotModule`; the JIT linker resolves it by symbol name at link time.
+/// Native-code entry point for `RValue::Spawn`: creates an actor of the type
+/// whose first behavior is at module index `behavior_idx`, applying any queued
+/// init pairs. When dispatched inside the real actor `Runtime` (the armed
+/// `AOT_DISPATCH` target carries a non-null runtime), the spawn routes through
+/// `Runtime::spawn_from_module` so the new actor joins the scheduler and gets
+/// AOT-wired; otherwise it creates a boxed standalone actor. Returns the new
+/// actor's id (boxed), or nil when no context is armed. Defined here (not in
+/// `jit/runtime.rs`) because it needs `AotModule`; the JIT linker resolves it
+/// by symbol name at link time.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_aot_spawn(behavior_idx: u64) -> u64 {
     let init = crate::jit::runtime::take_aot_spawn_init();
+    let dispatch = AOT_DISPATCH.with(|c| *c.borrow());
+    if let Some(t) = dispatch {
+        let module = unsafe { &*t.module };
+        if !t.runtime.is_null() {
+            // Real Runtime path: spawn through the scheduler so the new actor
+            // is a live runtime actor (and its behaviors are AOT-wired).
+            if let Some(code) = module.code_module() {
+                let init: Vec<(String, crate::vm::Value)> = init
+                    .iter()
+                    .map(|(idx, v)| {
+                        let name = module
+                            .constants()
+                            .get(*idx as usize)
+                            .and_then(|c| match c {
+                                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        (name, *v)
+                    })
+                    .collect();
+                let val =
+                    unsafe { (*t.runtime).spawn_from_module(code, behavior_idx as usize, init) };
+                return val.as_raw();
+            }
+            return crate::vm::Value::nil().as_raw();
+        }
+        // Standalone path: spawn a boxed standalone actor.
+        return match module.spawn_actor(behavior_idx as usize, init) {
+            Some(id) => crate::vm::Value::actor_ref(id).as_raw(),
+            None => crate::vm::Value::nil().as_raw(),
+        };
+    }
+    // Fallback: standalone spawn via the explicit spawn context.
     let module = AOT_SPAWN_CTX.with(|c| *c.borrow());
     if module.is_null() {
         return crate::vm::Value::nil().as_raw();

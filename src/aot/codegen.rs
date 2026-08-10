@@ -2344,6 +2344,99 @@ mod tests {
     }
 
     #[test]
+    fn test_aot_runtime_native_spawn() {
+        // Native spawn under the real Runtime: a Factory behavior runs
+        // `spawn Counter { total = base }`, which must route through
+        // Runtime::spawn_from_module so the new Counter is a live runtime actor
+        // (registered, enqueued, AOT-wired) that then dispatches Add natively.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                state total: Int = 0
+                behavior Add(n: Int) { self.total = self.total + n }
+            }
+            actor Factory {
+                behavior make(base: Int) { spawn Counter { total = base } }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+
+        let mut rt = crate::runtime::Runtime::new();
+        rt.register_aot_module(aot);
+        // Factory.make is the module's second behavior (index 1); Counter.Add
+        // is index 0.
+        let factory_id = rt
+            .spawn_from_module(&code, 1, Vec::new())
+            .as_actor_id()
+            .expect("Factory spawn");
+        let before: std::collections::HashSet<u64> = rt.actors.keys().copied().collect();
+
+        // Dispatch Factory.make(7) natively -> spawns a Counter through the Runtime.
+        rt.send_message_by_id(factory_id, 0, &[crate::vm::Value::int(7)]);
+        rt.run_scheduler();
+
+        let counter_id = *rt
+            .actors
+            .keys()
+            .find(|id| !before.contains(id))
+            .expect("make must spawn a new actor");
+        {
+            // The runtime names non-workflow actors `actor_{id}` (spawn.rs),
+            // but the behavior must be AOT-wired and the init state applied.
+            let counter = rt.actors.get(&counter_id).expect("spawned Counter");
+            let total = counter
+                .get_state_field("total")
+                .and_then(|v| v.as_int());
+            assert_eq!(total, Some(7), "spawn init must set total to base");
+            assert!(
+                counter.behavior_table[0].handler_fn as usize
+                    == crate::aot::aot_behavior_adapter
+                        as fn(&mut crate::runtime::Actor, &[crate::vm::Value])
+                        as usize,
+                "spawned Counter's Add should be AOT-wired"
+            );
+            assert!(
+                counter.aot_targets[0].is_some(),
+                "spawned Counter's Add should have an AOT target"
+            );
+        }
+
+        // The spawned Counter dispatches Add natively too.
+        rt.send_message_by_id(counter_id, 0, &[crate::vm::Value::int(3)]);
+        rt.run_scheduler();
+        let total = rt
+            .actors
+            .get(&counter_id)
+            .and_then(|a| a.get_state_field("total"))
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            total,
+            Some(10),
+            "spawned Counter should run Add natively through the Runtime"
+        );
+    }
+
+    #[test]
     fn test_is_all_int_empty() {
         let mut builder = mir::FunctionBuilder::new("empty_int", Some(crate::types::Type::int()));
         let tmp = builder.add_temp(crate::types::Type::int());
