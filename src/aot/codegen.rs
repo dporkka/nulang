@@ -104,6 +104,48 @@ impl<'a> AotContext<'a> {
 // SSA construction helpers
 // ---------------------------------------------------------------------------
 
+/// Edges from blocks containing a `perform` with a statically-resolved,
+/// *resuming* handler to that handler's body block. These are not reflected
+/// in any terminator — the handler body is entered via effect dispatch — but
+/// the AOT backend compiles them as intra-function jumps (a resuming effect is
+/// just control flow within the same native function). Without these edges the
+/// handler body blocks would be unreachable in the successor graph and never
+/// compiled.
+fn resuming_handler_edges(func: &mir::Function) -> Vec<(mir::BlockId, mir::BlockId)> {
+    let mut edges = Vec::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign {
+                op:
+                    mir::RValue::Perform {
+                        resolved_handler: Some(href),
+                        ..
+                    },
+                ..
+            } = stmt
+            {
+                let resuming = func
+                    .handler_tables
+                    .get(href.table_index as usize)
+                    .and_then(|t| t.bindings.get(href.binding_index as usize))
+                    .map(|b| b.resume)
+                    .unwrap_or(false);
+                if resuming {
+                    if let Some(body) = func
+                        .handler_tables
+                        .get(href.table_index as usize)
+                        .and_then(|t| t.bindings.get(href.binding_index as usize))
+                        .map(|b| b.body)
+                    {
+                        edges.push((block.id, body));
+                    }
+                }
+            }
+        }
+    }
+    edges
+}
+
 /// Compute block predecessors from terminators.
 fn compute_predecessors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::BlockId>> {
     let mut preds: HashMap<mir::BlockId, Vec<mir::BlockId>> = HashMap::new();
@@ -119,6 +161,9 @@ fn compute_predecessors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::
             _ => {}
         }
     }
+    for (src, dst) in resuming_handler_edges(func) {
+        preds.entry(dst).or_default().push(src);
+    }
     preds
 }
 
@@ -132,6 +177,9 @@ fn compute_successors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::Bl
             _ => vec![],
         };
         succs.insert(block.id, targets);
+    }
+    for (src, dst) in resuming_handler_edges(func) {
+        succs.entry(src).or_default().push(dst);
     }
     succs
 }
@@ -161,6 +209,21 @@ fn reverse_postorder(func: &mir::Function) -> Vec<mir::BlockId> {
     dfs(func.entry, &succs, &mut visited, &mut order);
     order.reverse();
     order
+}
+
+/// Map each resuming handler body block to its declared effect parameters
+/// (MIR locals). A `perform` passes its args into these as block params, so
+/// the handler body can read them like a callee reads parameters.
+fn resuming_handler_body_params(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::LocalId>> {
+    let mut out: HashMap<mir::BlockId, Vec<mir::LocalId>> = HashMap::new();
+    for table in &func.handler_tables {
+        for binding in &table.bindings {
+            if binding.resume {
+                out.insert(binding.body, binding.params.clone());
+            }
+        }
+    }
+    out
 }
 
 /// For each block, collect the set of register indices that are:
@@ -219,6 +282,8 @@ fn compile_terminator_with_params(
     block_params: &HashMap<mir::BlockId, Vec<u32>>,
     local_vals: &HashMap<u32, Value>,
     _mode: CompileMode,
+    current_block: mir::BlockId,
+    handler_continuations: &HashMap<mir::BlockId, (cranelift::prelude::Block, u32)>,
 ) -> AotResult<()> {
     match term {
         mir::Terminator::Return(val) => {
@@ -266,15 +331,20 @@ fn compile_terminator_with_params(
             Ok(())
         }
         mir::Terminator::Resume(id) => {
-            // In the interpreter a handler body ends with `Resume`,
-            // which restores the captured continuation with a value.
-            // At the AOT level we compile it as a normal return — the
-            // resume value is the function's result.
+            // Resuming handler body: restore the continuation by jumping back
+            // to the block that follows the originating `perform`, passing the
+            // resume value into the perform's destination local.
+            let (cont, _dst_reg) = *handler_continuations.get(&current_block).ok_or_else(|| {
+                AotCompileError::Internal(
+                    "Terminator::Resume in a block with no captured continuation".into(),
+                )
+            })?;
             let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
             let v = *local_vals
                 .get(&reg)
                 .ok_or_else(|| AotCompileError::Internal("resume value uninitialized".into()))?;
-            builder.ins().return_(&[v]);
+            let args = vec![BlockArg::from(v)];
+            builder.ins().jump(cont, &args);
             Ok(())
         }
         mir::Terminator::Unterminated => Err(AotCompileError::Internal(
@@ -318,6 +388,14 @@ pub enum CompileMode {
 /// Check whether a function is eligible for unboxed compilation:
 /// all params are `KnownType::Int` and the return type is Int or void.
 pub fn is_all_int(func: &mir::Function) -> bool {
+    // Functions with resuming effects must stay boxed. The perform-result and
+    // handler-param locals carry Unknown type metadata, so operations on them
+    // fall back to the NaN-tagged runtime helpers (`nulang_iadd` etc.) — which
+    // misread raw (unboxed) operands as floats. Boxed operands are properly
+    // tagged, so the helpers compute correctly.
+    if !resuming_handler_edges(func).is_empty() {
+        return false;
+    }
     let local_base = mir::FunctionBuilder::LOCAL_BASE as usize;
     for param in &func.params {
         let reg = local_base + param.0 as usize;
@@ -718,6 +796,10 @@ pub fn compile_mir_function_body(
             local_vals.insert(reg, val);
         }
 
+        // Resuming handler body blocks receive their effect parameters as
+        // block params (a `perform` jumps to them with the arg values).
+        let handler_body_params = resuming_handler_body_params(mir_func);
+
         // Create CLIF blocks — allocate block params for merge blocks.
         let mut block_map: HashMap<mir::BlockId, cranelift::prelude::Block> = HashMap::new();
         // Track which locals have block params in each block.
@@ -727,6 +809,19 @@ pub fn compile_mir_function_body(
                 entry_block
             } else {
                 let blk = builder.create_block();
+                // Resuming handler body: force block params for its effect
+                // parameters (local_base + LocalId), in declared order.
+                if let Some(params) = handler_body_params.get(&block.id) {
+                    let mut regs = Vec::with_capacity(params.len());
+                    for p in params {
+                        let reg = local_base + p.0;
+                        builder.append_block_param(blk, types::I64);
+                        regs.push(reg);
+                    }
+                    if !regs.is_empty() {
+                        block_params.insert(block.id, regs);
+                    }
+                }
                 // Add block params for locals that need merging.
                 if let Some(liveins) = block_liveins.get(&block.id) {
                     let mut params = Vec::new();
@@ -734,7 +829,17 @@ pub fn compile_mir_function_body(
                         builder.append_block_param(blk, types::I64);
                         params.push(reg);
                     }
-                    block_params.insert(block.id, params);
+                    // Merge with handler-effect params (dedup, stable order:
+                    // effect params first, then live-ins).
+                    let mut all: Vec<u32> = block_params.get(&block.id).cloned().unwrap_or_default();
+                    for reg in params {
+                        if !all.contains(&reg) {
+                            all.push(reg);
+                        }
+                    }
+                    if !all.is_empty() {
+                        block_params.insert(block.id, all);
+                    }
                 }
                 blk
             };
@@ -761,6 +866,14 @@ pub fn compile_mir_function_body(
             }
             eprintln!("  block_params: {:?}", block_params);
         }
+
+        // Continuation map: resuming handler body block -> (continuation clif
+        // block, dst local reg). Populated when a resuming `perform` is
+        // compiled; read by the handler body's `Terminator::Resume`.
+        let mut handler_continuations: HashMap<
+            mir::BlockId,
+            (cranelift::prelude::Block, u32),
+        > = HashMap::new();
 
         // Compile blocks in topological order.
         for &bid in &block_order {
@@ -790,6 +903,10 @@ pub fn compile_mir_function_body(
                     mode,
                     constants,
                     field_map,
+                    &mir_func.handler_tables,
+                    &block_map,
+                    &block_params,
+                    &mut handler_continuations,
                 )?;
             }
             compile_terminator_with_params(
@@ -799,6 +916,8 @@ pub fn compile_mir_function_body(
                 &block_params,
                 &local_vals,
                 mode,
+                block.id,
+                &handler_continuations,
             )?;
         }
 
@@ -901,6 +1020,10 @@ fn compile_stmt(
     mode: CompileMode,
     constants: &[crate::bytecode::Constant],
     field_map: &HashMap<String, u8>,
+    handler_tables: &[mir::HandlerTableDef],
+    block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
+    block_params: &HashMap<mir::BlockId, Vec<u32>>,
+    handler_continuations: &mut HashMap<mir::BlockId, (cranelift::prelude::Block, u32)>,
 ) -> AotResult<()> {
     match stmt {
         mir::Stmt::Assign {
@@ -963,6 +1086,67 @@ fn compile_stmt(
             Ok(())
         }
         mir::Stmt::Assign { dst, op } => {
+            // Resuming PerformDirect: an effect with a statically-resolved,
+            // resuming handler compiles as intra-function continuation. The
+            // perform jumps to the handler body block (with the effect args as
+            // its block params); the handler body ends in `Terminator::Resume`,
+            // which jumps back to a continuation block carrying the resume
+            // value into `dst`. No native-stack capture is needed because the
+            // handler body lives in the same compiled function.
+            if let mir::RValue::Perform {
+                args,
+                resolved_handler: Some(href),
+                ..
+            } = op
+            {
+                if let Some(binding) = handler_tables
+                    .get(href.table_index as usize)
+                    .and_then(|t| t.bindings.get(href.binding_index as usize))
+                {
+                    if binding.resume {
+                        let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+                        let body_block = binding.body;
+                        if handler_continuations.contains_key(&body_block) {
+                            return Err(AotCompileError::Unsupported(
+                                "multiple performs of a single resuming handler are not yet supported by the native backend"
+                                    .into(),
+                            ));
+                        }
+                        // Continuation block receives the resume value into dst.
+                        let cont = builder.create_block();
+                        builder.append_block_param(cont, types::I64);
+                        // Jump to the handler body, passing each effect arg as
+                        // its declared parameter (block param) in order.
+                        let handler_block = *block_map.get(&body_block).ok_or_else(|| {
+                            AotCompileError::Internal(format!(
+                                "handler body block {} not mapped",
+                                body_block.0
+                            ))
+                        })?;
+                        let param_regs = block_params.get(&body_block).cloned().unwrap_or_default();
+                        let mut jump_args: Vec<BlockArg> = Vec::with_capacity(param_regs.len());
+                        for (arg, _param_reg) in args.iter().zip(param_regs.iter()) {
+                            let arg_reg = mir::FunctionBuilder::LOCAL_BASE + arg.0;
+                            jump_args.push(BlockArg::from(
+                                *local_vals.get(&arg_reg).ok_or_else(|| {
+                                    AotCompileError::Internal(format!(
+                                        "perform arg local {} uninitialized",
+                                        arg.0
+                                    ))
+                                })?,
+                            ));
+                        }
+                        builder.ins().jump(handler_block, &jump_args);
+                        // Continue the rest of this block in the continuation;
+                        // dst = the resume value.
+                        builder.switch_to_block(cont);
+                        let resume_val = builder.block_params(cont)[0];
+                        local_vals.insert(dst_reg, resume_val);
+                        handler_continuations.insert(body_block, (cont, dst_reg));
+                        return Ok(());
+                    }
+                }
+            }
             if let mir::RValue::Closure { func, captures } = op {
                 if captures.is_empty() {
                     let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
@@ -2733,6 +2917,92 @@ mod tests {
             crate::vm::Value::from_raw(raw).as_int(),
             Some(5),
             "abortive handle without a perform evaluates to the body value"
+        );
+    }
+
+    #[test]
+    fn test_aot_resuming_handler_continuation() {
+        // A resuming handler: `perform Rand.int()` jumps to the handler body,
+        // which resumes with 41, and control returns to the point after the
+        // perform with `a` = 41, so `a + 1` = 42. Compiled entirely as native
+        // intra-function control flow (no stack capture).
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            fn f() -> Int {
+                handle {
+                    let a = perform Rand.int()
+                    a + 1
+                } { | Rand.int() resume => 41 }
+            }
+            fn main() { f() }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(42),
+            "resuming handler must deliver 41 then continue with a+1"
+        );
+    }
+
+    #[test]
+    fn test_aot_resuming_handler_with_param() {
+        // A resuming handler with a parameter: `perform Echo.run(5)` passes 5
+        // into the handler body's `x` (a handler-body block param), which
+        // resumes with x + 1 = 6; control returns with `a` = 6.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            effect Echo { run: Int -> Int }
+            fn f() -> Int {
+                handle {
+                    let a = perform Echo.run(5)
+                    a * 2
+                } { | Echo.run(x) resume => x + 1 }
+            }
+            fn main() { f() }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(12),
+            "handler param x must receive 5, resume 6, then a*2 = 12"
         );
     }
 
