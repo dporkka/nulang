@@ -169,6 +169,48 @@ pub(crate) fn spawn_from_module(
             };
         }
     }
+    // Wire AOT-native dispatch: if an AOT module is registered for this actor
+    // type, register the adapter for each behavior it compiles so the
+    // scheduler dispatches them natively (bytecode falls back for the rest).
+    if let Some(meta) = meta.as_ref() {
+        if !meta.is_workflow {
+            let module_ptr = rt.aot_modules.get(&meta.name).copied();
+            if let Some(module_ptr) = module_ptr {
+                let aot_module = unsafe { &*module_ptr };
+                let runtime_ptr = rt as *mut Runtime;
+                if let Some(actor) = rt.actors.get_mut(&id) {
+                    for &gidx in &meta.behavior_indices {
+                        // CodeModule behavior names are fully-qualified
+                        // `"{Actor}.{behavior}"` (see mir_lower), which is
+                        // exactly what `fn_ptr_for_behavior` expects.
+                        let fq = module
+                            .behaviors
+                            .get(gidx)
+                            .map(|b| b.name.clone())
+                            .unwrap_or_default();
+                        let short = fq
+                            .strip_prefix(&format!("{}.", meta.name))
+                            .map(str::to_string)
+                            .unwrap_or_else(|| fq.clone());
+                        if let Some(fn_ptr) = aot_module.fn_ptr_for_behavior(&fq) {
+                            actor.register_behavior(short, crate::aot::aot_behavior_adapter);
+                            actor.aot_targets.push(Some(crate::aot::AotDispatchTarget {
+                                fn_ptr,
+                                module: module_ptr,
+                                runtime: runtime_ptr,
+                            }));
+                        } else {
+                            actor.register_behavior(
+                                String::new(),
+                                bytecode_step_placeholder,
+                            );
+                            actor.aot_targets.push(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
     if meta.map(|m| m.is_workflow).unwrap_or(false) {
         layout_workflow_behavior_table(rt, id);
     }

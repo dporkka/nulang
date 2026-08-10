@@ -189,6 +189,10 @@ pub struct Actor {
     pub persistent: bool,  // Whether this actor survives restarts
     pub is_workflow: bool, // True if generated from a workflow declaration
     pub behavior_table: Vec<BehaviorEntry>,
+    /// AOT-compiled behavior targets, parallel to `behavior_table`. `Some`
+    /// means the behavior at that index dispatches through AOT native code;
+    /// the scheduler arms the target before invoking `handler_fn`.
+    pub aot_targets: Vec<Option<crate::aot::AotDispatchTarget>>,
     /// Bytecode behavior offsets by behavior_id. Empty entries mean no bytecode
     /// handler for that behavior (native handler or missing).
     pub bytecode_offsets: Vec<usize>,
@@ -323,6 +327,7 @@ impl Actor {
             persistent: false,
             is_workflow: false,
             behavior_table: Vec::new(),
+            aot_targets: Vec::new(),
             bytecode_offsets: Vec::new(),
             compensation_offsets: Vec::new(),
             compensated_steps: Vec::new(),

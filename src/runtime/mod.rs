@@ -342,6 +342,13 @@ pub struct Runtime {
     // (`Some(actor_id)` = spawned, `None` = rejected).
     pub spawnable_behaviors: HashMap<String, fn(&mut Actor, &[Value])>,
     pub pending_spawn_responses: HashMap<u64, Option<u64>>,
+    /// AOT-compiled modules registered for native behavior dispatch, keyed by
+    /// actor type name → module pointer. Ownership lives in
+    /// `aot_module_storage`; the pointers are stable (each module is Boxed).
+    pub aot_modules: std::collections::HashMap<String, *const crate::aot::AotModule>,
+    /// Owns the registered AOT modules so the raw pointers in `aot_modules`
+    /// (and on actors) stay valid for the Runtime's lifetime.
+    pub aot_module_storage: Vec<Box<crate::aot::AotModule>>,
     /// Actor ID of the dead-letter queue (created lazily).
     /// Undeliverable messages are routed here.
     pub dlq_actor_id: Option<u64>,
@@ -467,6 +474,8 @@ impl Runtime {
             supervisor_teams: SupervisorTeamRegistry::new(),
             crypto: Box::new(crate::backends::DefaultCryptoProvider::new()),
             spawnable_behaviors: HashMap::new(),
+            aot_modules: std::collections::HashMap::new(),
+            aot_module_storage: Vec::new(),
             #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
             http: Box::new(crate::backends::ReqwestHttpProvider::new()),
             #[cfg(feature = "tls")]
@@ -2525,6 +2534,13 @@ impl Runtime {
                     None
                 }
             };
+            // AOT target to arm around the handler (None for bytecode/native
+            // handlers or behaviors without an AOT-compiled version).
+            let aot_target = self
+                .actors
+                .get(&actor_id)
+                .and_then(|a| a.aot_targets.get(behavior_idx))
+                .and_then(|t| *t);
             let mut processed = false;
             let is_placeholder = self
                 .actors
@@ -2554,7 +2570,15 @@ impl Runtime {
                             return;
                         }
                     };
+                    // Arm the AOT native target so `aot_behavior_adapter` (the
+                    // behavior's handler) dispatches through AOT code.
+                    if let Some(target) = aot_target {
+                        crate::aot::set_aot_dispatch(Some(target));
+                    }
                     handler(actor, &msg.payload);
+                    if aot_target.is_some() {
+                        crate::aot::clear_aot_dispatch();
+                    }
                     // Snapshot durable state after the message is processed.
                     self.checkpoint_actor(actor_id);
                     processed = true;
@@ -4767,6 +4791,26 @@ impl Runtime {
     /// the request's initial state and registers this handler as its sole
     pub fn register_spawnable_behavior(&mut self, name: &str, handler: fn(&mut Actor, &[Value])) {
         distribution::register_spawnable_behavior(self, name, handler)
+    }
+
+    /// Register an AOT-compiled module for native actor behavior dispatch.
+    ///
+    /// The Runtime takes ownership of the module and keys it by the actor
+    /// types it declares. Actors of those types spawned afterwards dispatch
+    /// their behaviors through AOT native code (bypassing the bytecode VM)
+    /// when the behavior is compiled in the module; behaviors absent from the
+    /// module keep their bytecode handlers.
+    pub fn register_aot_module(&mut self, module: crate::aot::AotModule) {
+        // Box the module so its address is stable, then register the raw
+        // pointer for every actor type it declares.
+        let boxed = Box::new(module);
+        let module_ptr: *const crate::aot::AotModule = &*boxed;
+        for name in unsafe { &*module_ptr }.actor_type_names() {
+            self.aot_modules
+                .entry(name)
+                .or_insert(module_ptr);
+        }
+        self.aot_module_storage.push(boxed);
     }
 
     /// Take the result of a previously issued remote spawn request.

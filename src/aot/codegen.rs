@@ -2046,10 +2046,9 @@ mod tests {
         actor.register_behavior("add", crate::aot::aot_behavior_adapter);
 
         // Deliver `add(5)` then `add(7)`.
-        let constants = aot.constants();
-        crate::aot::set_aot_behavior_target(native, constants);
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(native, &aot)));
         (actor.behavior_table[0].handler_fn)(&mut actor, &[crate::vm::Value::int(5)]);
-        crate::aot::set_aot_behavior_target(native, constants);
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(native, &aot)));
         (actor.behavior_table[0].handler_fn)(&mut actor, &[crate::vm::Value::int(7)]);
 
         let count = actor.get_state_field("count").and_then(|v| v.as_int());
@@ -2103,7 +2102,6 @@ mod tests {
         let add = aot
             .fn_ptr_for_behavior("B.add")
             .expect("behavior 'B.add' should be compiled");
-        let constants = aot.constants();
 
         let mut b = crate::runtime::Actor::new(2, "B", 64);
         b.set_state_field("count", crate::vm::Value::int(0));
@@ -2114,7 +2112,7 @@ mod tests {
         crate::aot::register_aot_actor(&mut a);
 
         // Dispatch A.fire(B_ref, 5): the native body sends `add(5)` to B.
-        crate::aot::set_aot_behavior_target(fire, constants);
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(fire, &aot)));
         (a.behavior_table[0].handler_fn)(
             &mut a,
             &[crate::vm::Value::actor_ref(2), crate::vm::Value::int(5)],
@@ -2123,7 +2121,7 @@ mod tests {
         // B's mailbox must hold the queued message; dispatch it natively.
         let msg = b.mailbox.pop().expect("B should have received the message");
         assert_eq!(msg.behavior_id, 0, "add is B's first behavior (module index 0)");
-        crate::aot::set_aot_behavior_target(add, constants);
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(add, &aot)));
         (b.behavior_table[msg.behavior_id as usize].handler_fn)(&mut b, &msg.payload);
 
         let count = b.get_state_field("count").and_then(|v| v.as_int());
@@ -2170,7 +2168,6 @@ mod tests {
         let run = aot
             .fn_ptr_for_behavior("Counter.Run")
             .expect("behavior 'Counter.Run' should be compiled");
-        let constants = aot.constants();
 
         let mut c = crate::runtime::Actor::new(1, "Counter", 64);
         c.set_state_field("total", crate::vm::Value::int(0));
@@ -2179,7 +2176,7 @@ mod tests {
         crate::aot::register_aot_actor(&mut c);
 
         // Queue an Add(5) message (behavior_id 0 = module index of Add).
-        c.mailbox.push_local(crate::runtime::Message {
+        let _ = c.mailbox.push_local(crate::runtime::Message {
             behavior_id: 0,
             payload: std::sync::Arc::new(vec![crate::vm::Value::int(5)]),
             sender: 0,
@@ -2188,7 +2185,7 @@ mod tests {
         });
 
         // Dispatch Run(): its native body selectively receives the message.
-        crate::aot::set_aot_behavior_target(run, constants);
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(run, &aot)));
         (c.behavior_table[1].handler_fn)(&mut c, &[]);
 
         let total = c.get_state_field("total").and_then(|v| v.as_int());
@@ -2237,14 +2234,13 @@ mod tests {
         let make = aot
             .fn_ptr_for_behavior("Factory.make")
             .expect("behavior 'Factory.make' should be compiled");
-        let constants = aot.constants();
 
         let mut factory = crate::runtime::Actor::new(10, "Factory", 64);
         factory.register_behavior("make", crate::aot::aot_behavior_adapter);
         crate::aot::register_aot_actor(&mut factory);
 
         let before = crate::aot::aot_actor_ids();
-        crate::aot::set_aot_behavior_target(make, constants);
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(make, &aot)));
         crate::aot::set_aot_spawn_ctx(&aot);
         (factory.behavior_table[0].handler_fn)(&mut factory, &[crate::vm::Value::int(7)]);
         crate::aot::clear_aot_spawn_ctx();
@@ -2267,6 +2263,84 @@ mod tests {
             .any(|e| e.name == "Add");
         assert!(has_add, "spawned actor must register its behaviors");
         crate::aot::unregister_aot_actor(spawned_id);
+    }
+
+    #[test]
+    fn test_aot_runtime_native_dispatch() {
+        // Phase 3: the real actor `Runtime` dispatches a spawned actor's
+        // behavior through AOT native code. A `Counter` actor spawned from a
+        // CodeModule whose AotModule is registered must run `Add` natively
+        // (handler = aot_behavior_adapter, target armed) and mutate state
+        // through `AotRuntimeCallbacks` routing to the Runtime.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor Counter {
+                state total: Int = 0
+                behavior Add(n: Int) { self.total = self.total + n }
+                behavior Get() { self.total }
+            }
+            fn main() { 0 }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module)
+            .expect("AOT compile should succeed");
+        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+
+        let mut rt = crate::runtime::Runtime::new();
+        rt.register_aot_module(aot);
+        let id = rt
+            .spawn_from_module(&code, 0, Vec::new())
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
+
+        // The Add behavior must dispatch through the AOT adapter with an armed
+        // target (proving native wiring, not bytecode).
+        {
+            let actor = rt.actors.get(&id).expect("spawned actor");
+            assert_eq!(actor.behavior_table.len(), 2, "both behaviors registered");
+            assert!(
+                actor.behavior_table[0].handler_fn as usize
+                    == crate::aot::aot_behavior_adapter as fn(&mut crate::runtime::Actor, &[crate::vm::Value]) as usize,
+                "Add should dispatch through the AOT adapter"
+            );
+            assert!(
+                actor.aot_targets[0].is_some(),
+                "Add should have an AOT dispatch target"
+            );
+        }
+
+        // Deliver Add(5) through the scheduler: it must run the AOT-native body
+        // and mutate the actor's state via the Runtime-routing callbacks.
+        rt.send_message_by_id(id, 0, &[crate::vm::Value::int(5)]);
+        rt.run_scheduler();
+
+        let total = rt
+            .actors
+            .get(&id)
+            .and_then(|a| a.get_state_field("total"))
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            total,
+            Some(5),
+            "AOT-native Add should mutate state through the Runtime"
+        );
     }
 
     #[test]
