@@ -84,10 +84,34 @@ preserves typing under swapAt k renaming.
 -/
 theorem context_exchange_at (Γ : Ctx) (k : Nat) (e : Expr) (ρ : Ty)
   (h : hasType Γ e ρ) : hasType (swapCtxAt k Γ) (swapAt k e) ρ := by
-  -- This is a complex lemma requiring:
-  -- 1. The var case: mapping index lookups across the swap
-  -- 2. The binder cases: adjusting k when going under binders
-  -- Proof by induction on the typing derivation.
-  sorry
+  induction h generalizing k with
+  | intLit Γ' n => simp [swapAt]; exact hasType.intLit (swapCtxAt k Γ') n
+  | boolLit Γ' b => simp [swapAt]; exact hasType.boolLit (swapCtxAt k Γ') b
+  | stringLit Γ' s => simp [swapAt]; exact hasType.stringLit (swapCtxAt k Γ') s
+  | unitLit Γ' => simp [swapAt]; exact hasType.unitLit (swapCtxAt k Γ')
+  | nilLit Γ' => simp [swapAt]; exact hasType.nilLit (swapCtxAt k Γ')
+  | @var Γ' n ρ' h_lookup => sorry
+  | binop Γ' op e₁ e₂ τ₁ τ₂ ρ' h₁ h₂ hop =>
+      simp [swapAt]
+      exact hasType.binop (swapCtxAt k Γ') op _ _ τ₁ τ₂ ρ'
+        (context_exchange_at Γ' k e₁ τ₁ h₁) (context_exchange_at Γ' k e₂ τ₂ h₂) hop
+  | unop Γ' op e τ₁ ρ' h hop =>
+      simp [swapAt]
+      exact hasType.unop (swapCtxAt k Γ') op _ τ₁ ρ' (context_exchange_at Γ' k e τ₁ h) hop
+  | ifE Γ' c t e ρ' hc ht he =>
+      simp [swapAt]
+      exact hasType.ifE (swapCtxAt k Γ') _ _ _ ρ'
+        (context_exchange_at Γ' k c .bool hc) (context_exchange_at Γ' k t ρ' ht) (context_exchange_at Γ' k e ρ' he)
+  | app Γ' f a τ₁ τ₂ hf ha =>
+      simp [swapAt]
+      exact hasType.app (swapCtxAt k Γ') _ _ τ₁ τ₂
+        (context_exchange_at Γ' k f (.fn τ₁ τ₂) hf) (context_exchange_at Γ' k a τ₁ ha)
+  | returnE Γ' e ρ' h =>
+      simp [swapAt]
+      exact hasType.returnE (swapCtxAt k Γ') _ ρ' (context_exchange_at Γ' k e ρ' h)
+  | block_cons Γ' e es ρ' hfirst hrest =>
+      simp [swapAt]
+      exact hasType.block_cons (swapCtxAt k Γ') _ _ ρ'
+        (context_exchange_at Γ' k e ρ' hfirst) (context_exchange_at Γ' k (.block es) ρ' hrest)
 
 end Nulang.DeepExchange
