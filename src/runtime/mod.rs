@@ -64,8 +64,8 @@ pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
 pub use heap::*;
 use http_server::HttpServerState;
 pub use mailbox::*;
-pub use network::*;
 pub use network::NetworkTransport;
+pub use network::*;
 pub use orca_cycle::*;
 pub use persistence::*;
 pub use process_groups::*;
@@ -1150,7 +1150,13 @@ impl Runtime {
                     sender,
                     trace_id,
                 } => {
-                    self.deliver_cross_shard_message(target_id, behavior_id, payload, sender, trace_id);
+                    self.deliver_cross_shard_message(
+                        target_id,
+                        behavior_id,
+                        payload,
+                        sender,
+                        trace_id,
+                    );
                 }
                 CrossShardMsg::EnqueueActor { actor_id, priority } => {
                     self.scheduler.enqueue_with_priority(actor_id, priority);
@@ -4448,9 +4454,7 @@ impl Runtime {
                 _ => None,
             }
         };
-        let int_arg = |idx: usize| -> Option<i64> {
-            regs.get(idx)?.as_int()
-        };
+        let int_arg = |idx: usize| -> Option<i64> { regs.get(idx)?.as_int() };
         let actor_id = self.current_actor?;
         let _actor = self.actors.get_mut(&actor_id)?;
         let Some(manager) = &mut self.crdt_manager else {
@@ -4463,7 +4467,10 @@ impl Runtime {
                 let other_crdt_id = int_arg(2)? as u64;
                 let source_id = manager.get_field_id(target_actor, &field_name)?;
                 let other_id = CrdtId(other_crdt_id);
-                let other_payload = manager.entries.get(&other_id).map(|e| e.payload_bytes().to_vec());
+                let other_payload = manager
+                    .entries
+                    .get(&other_id)
+                    .map(|e| e.payload_bytes().to_vec());
                 if let Some(other_payload) = other_payload {
                     if let Some(entry) = manager.entries.get_mut(&source_id) {
                         if merge_payload(entry, &other_payload) {

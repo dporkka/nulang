@@ -86,7 +86,12 @@ pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
         Value::unit()
     }
 
-    fn remote_spawn(&mut self, _target_node: u64, _behavior: &str, _init: &[(String, Value)]) -> Value {
+    fn remote_spawn(
+        &mut self,
+        _target_node: u64,
+        _behavior: &str,
+        _init: &[(String, Value)],
+    ) -> Value {
         Value::actor_ref(0)
     }
 }
@@ -1788,7 +1793,11 @@ impl VM {
             handler_stack: Vec::new(),
             step_count: 0,
             yield_pending: false,
-            jit_session: if enable_jit { create_default_jit() } else { None },
+            jit_session: if enable_jit {
+                create_default_jit()
+            } else {
+                None
+            },
             jit_constants: Vec::new(),
             node_id: 0,
             pending_migrations: Vec::new(),
@@ -1842,7 +1851,10 @@ impl VM {
     /// Route `Print`/`SPrint`/`IO.print` output into `buf` instead of stdout
     /// (used by the DAP server to forward program output as `output` events
     /// without corrupting the DAP stream). `None` restores normal printing.
-    pub fn set_output_capture(&mut self, buf: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>) {
+    pub fn set_output_capture(
+        &mut self,
+        buf: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    ) {
         self.capture_output = buf;
     }
 
@@ -3415,25 +3427,47 @@ impl VM {
     }
 
     #[inline(never)]
-    fn step_rspawn(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_rspawn(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let node_reg = instr.op1 as usize;
         let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
         let node_id = self.frames[frame_idx].regs[node_reg].as_int().unwrap_or(0) as u64;
         let spawn_pc = self.frames[frame_idx].pc.saturating_sub(1);
-        let names: Vec<String> = self.modules.get(module_idx)
-            .and_then(|m| m.remote_spawn_init_fields.iter().find(|(pc, _)| *pc == spawn_pc).map(|(_, n)| n.clone()))
+        let names: Vec<String> = self
+            .modules
+            .get(module_idx)
+            .and_then(|m| {
+                m.remote_spawn_init_fields
+                    .iter()
+                    .find(|(pc, _)| *pc == spawn_pc)
+                    .map(|(_, n)| n.clone())
+            })
             .unwrap_or_default();
-        let init: Vec<(String, Value)> = names.iter().enumerate().map(|(i, n)| (n.clone(), self.frames[frame_idx].regs[i])).collect();
+        let init: Vec<(String, Value)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), self.frames[frame_idx].regs[i]))
+            .collect();
         let result = if self.distributed_callbacks.is_some() && node_id != self.node_id {
-            let behavior_name = self.modules.get(module_idx)
-                .and_then(|m| m.behaviors.get(behavior_idx)).map(|b| b.name.clone()).unwrap_or_default();
+            let behavior_name = self
+                .modules
+                .get(module_idx)
+                .and_then(|m| m.behaviors.get(behavior_idx))
+                .map(|b| b.name.clone())
+                .unwrap_or_default();
             if let Some(cb) = &mut self.distributed_callbacks {
                 cb.remote_spawn(node_id, &behavior_name, &init)
-            } else { Value::actor_ref(0) }
+            } else {
+                Value::actor_ref(0)
+            }
         } else {
             match self.modules.get(module_idx) {
                 Some(module) => self.actor_callbacks.spawn_actor(module, behavior_idx, init),
-                None => Value::actor_ref(0)
+                None => Value::actor_ref(0),
             }
         };
         self.frames[frame_idx].regs[node_reg] = result;
@@ -3689,10 +3723,7 @@ impl VM {
         // pause leaves `pc` pointing at the current instruction (resume
         // re-executes it). On pause, return the DEBUG_PAUSE_MSG sentinel.
         if self.debug_hook.is_some() {
-            let line = self
-                .modules
-                .get(module_idx)
-                .and_then(|m| m.line_at(pc));
+            let line = self.modules.get(module_idx).and_then(|m| m.line_at(pc));
             let frame_depth = self.frame_depth(frame_idx);
             let action = self
                 .debug_hook

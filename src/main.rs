@@ -244,7 +244,10 @@ fn main() {
             }
             "--version" | "-V" => {
                 println!("nulang {}", VERSION);
-                println!("language {}", nulang::format::constants::LANGUAGE_VERSION_STR);
+                println!(
+                    "language {}",
+                    nulang::format::constants::LANGUAGE_VERSION_STR
+                );
                 return;
             }
             "--language-version" => {
@@ -456,14 +459,16 @@ fn main() {
 
     // Apply FFI policy
     if opts.ffi_sandbox {
-        use std::collections::HashSet;
         use nulang::ffi::native::FfiPolicy;
-        
+        use std::collections::HashSet;
+
         let allowed = opts.ffi_allow.clone().into_iter().collect::<HashSet<_>>();
-        let mut reg = nulang::ffi::native::FFI_REGISTRY.get_or_init(|| std::sync::Mutex::new(nulang::ffi::native::FfiRegistry::new())).lock().unwrap();
+        let mut reg = nulang::ffi::native::FFI_REGISTRY
+            .get_or_init(|| std::sync::Mutex::new(nulang::ffi::native::FfiRegistry::new()))
+            .lock()
+            .unwrap();
         reg.set_policy(FfiPolicy::Allowlist(allowed));
     }
-
 
     if opts.doc {
         let root = match std::env::current_dir() {
@@ -1032,9 +1037,8 @@ fn run_node_cmd(args: &[String]) -> NuResult<()> {
         i += 1;
     }
 
-    let bind_addr: std::net::SocketAddr = listen_addr
-        .parse()
-        .map_err(|e| NuError::RuntimeError {
+    let bind_addr: std::net::SocketAddr =
+        listen_addr.parse().map_err(|e| NuError::RuntimeError {
             msg: format!("invalid bind address: {e}"),
             span: Span::default(),
         })?;
@@ -1087,9 +1091,8 @@ fn run_node_cmd(args: &[String]) -> NuResult<()> {
     }
 
     if let Some(seed) = seed_addr {
-        let seed_socket: std::net::SocketAddr = seed
-            .parse()
-            .map_err(|e| NuError::RuntimeError {
+        let seed_socket: std::net::SocketAddr =
+            seed.parse().map_err(|e| NuError::RuntimeError {
                 msg: format!("invalid seed address: {e}"),
                 span: Span::default(),
             })?;
@@ -1098,8 +1101,7 @@ fn run_node_cmd(args: &[String]) -> NuResult<()> {
 
     eprintln!(
         "Nulang node listening on {} (node_id: {:?})",
-        bind_addr,
-        runtime.distributed.node_id
+        bind_addr, runtime.distributed.node_id
     );
     runtime.run_distributed_node();
     Ok(())
@@ -1490,18 +1492,20 @@ fn run_source(
                 }
             }
             let aot_module = nulang::aot::AotModule::compile_for_target(&mir, target)?;
-            
+
             // If --out is specified, write assembly to file
             if let Some(out_file) = out_file {
                 let assembly = aot_module.emit_assembly();
-                std::fs::write(out_file, assembly).map_err(|e| nulang::types::NuError::VMError {
-                    msg: format!("failed to write assembly to {}: {}", out_file, e),
-                    span: Span::default(),
+                std::fs::write(out_file, assembly).map_err(|e| {
+                    nulang::types::NuError::VMError {
+                        msg: format!("failed to write assembly to {}: {}", out_file, e),
+                        span: Span::default(),
+                    }
                 })?;
                 println!("Wrote assembly to {}", out_file);
                 return Ok(());
             }
-            
+
             let result_raw = aot_module.run()?;
             let result = nulang::vm::Value::from_raw(result_raw);
             let result_str = result.to_string_repr();
@@ -1650,7 +1654,12 @@ fn run_with_runtime(
     }
 }
 
-fn check_source(source: &str, file_path: Option<&str>, verbose: bool, _all_errors: bool) -> NuResult<()> {
+fn check_source(
+    source: &str,
+    file_path: Option<&str>,
+    verbose: bool,
+    _all_errors: bool,
+) -> NuResult<()> {
     run_frontend(source, file_path, verbose)?;
 
     if verbose {
@@ -1674,8 +1683,11 @@ fn collect_all_frontend_errors(source: &str, file_path: Option<&str>) -> Vec<NuE
         Ok(pair) => pair,
         Err(e) => return vec![e],
     };
-    if let Err(e) = nulang::resolver::resolve_imports(&mut ast, &base_dir, &mut std::collections::HashSet::new())
-    {
+    if let Err(e) = nulang::resolver::resolve_imports(
+        &mut ast,
+        &base_dir,
+        &mut std::collections::HashSet::new(),
+    ) {
         return vec![e];
     }
     let mut tc = TypeChecker::new();

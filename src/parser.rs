@@ -1694,13 +1694,8 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Decl::CrdtDecl {
-            name,
-            fields,
-            span,
-        })
+        Ok(Decl::CrdtDecl { name, fields, span })
     }
-
 
     fn parse_state_model(&mut self, default_model: StateModel) -> StateModel {
         match self.peek_kind() {
@@ -2278,14 +2273,12 @@ impl Parser {
             None
         };
 
-
         // Optional effect annotation
         let effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws) {
             Some(self.parse_effect_row()?)
         } else {
             None
         };
-
 
         // Optional capability annotation
         let cap = if self.consume_if(&TokenKind::Colon) {
@@ -2360,7 +2353,13 @@ impl Parser {
                 self.expect(TokenKind::LParen)?;
                 let args = self.parse_arg_list()?;
                 let span = self.current_span();
-                left = Expr::Send { actor: Box::new(left), behavior, args, remote: false, span };
+                left = Expr::Send {
+                    actor: Box::new(left),
+                    behavior,
+                    args,
+                    remote: false,
+                    span,
+                };
                 continue;
             }
 
@@ -2370,7 +2369,14 @@ impl Parser {
                 self.expect(TokenKind::LParen)?;
                 let args = self.parse_arg_list()?;
                 let span = self.current_span();
-                left = Expr::Ask { actor: Box::new(left), behavior, args, remote: false, timeout_ms: None, span };
+                left = Expr::Ask {
+                    actor: Box::new(left),
+                    behavior,
+                    args,
+                    remote: false,
+                    timeout_ms: None,
+                    span,
+                };
                 continue;
             }
 
@@ -2954,7 +2960,7 @@ impl Parser {
 
     // === Expression Primitives ===
 
-        fn parse_literal(&mut self) -> NuResult<Expr> {
+    fn parse_literal(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         match self.peek_kind().clone() {
             TokenKind::IntLit(v) => {
@@ -3511,7 +3517,6 @@ impl Parser {
         };
         let actor_type = Expr::Var(actor_name, span);
 
-
         // Optional positional constructor args: `spawn Foo(a, b)`
         let positional_args = if self.peek_kind() == &TokenKind::LParen {
             self.advance(); // consume '('
@@ -3663,7 +3668,10 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let value = self.parse_expr()?;
         self.expect(TokenKind::RParen)?;
-        Ok(Expr::Resume { value: Box::new(value), span })
+        Ok(Expr::Resume {
+            value: Box::new(value),
+            span,
+        })
     }
 
     fn parse_perform(&mut self) -> NuResult<Expr> {

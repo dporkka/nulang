@@ -225,7 +225,12 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             }
             out.push_str(&format!("{}}}\n", sp));
         }
-        Decl::Module { name, exports, decls, .. } => {
+        Decl::Module {
+            name,
+            exports,
+            decls,
+            ..
+        } => {
             out.push_str(&format!("{}module {} {{\n", sp, name));
             if !exports.is_empty() {
                 out.push_str(&format!("{}    export {}\n", sp, exports.join(", ")));
@@ -256,7 +261,13 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             }
             out.push_str(&format!("{}}}\n", sp));
         }
-        Decl::Workflow { name, input, items, compensate, .. } => {
+        Decl::Workflow {
+            name,
+            input,
+            items,
+            compensate,
+            ..
+        } => {
             out.push_str(&format!("{}workflow {}", sp, name));
             if let Some((in_name, in_ty)) = input {
                 out.push_str(&format!("({}: {})", in_name, fmt_type(in_ty)));
@@ -317,16 +328,28 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
                 out.push_str(&format!("{}    tools: [{}],\n", sp, tools.join(", ")));
             }
             if let Some(m) = memory {
-                out.push_str(&format!("{}    memory: {{ max_turns: {} }},\n", sp, m.max_turns));
+                out.push_str(&format!(
+                    "{}    memory: {{ max_turns: {} }},\n",
+                    sp, m.max_turns
+                ));
             }
             if let Some(sm) = semantic_memory {
-                out.push_str(&format!("{}    semantic_memory: {{ dimensions: {} }},\n", sp, sm.dimensions));
+                out.push_str(&format!(
+                    "{}    semantic_memory: {{ dimensions: {} }},\n",
+                    sp, sm.dimensions
+                ));
             }
             if let Some(pm) = procedural_memory {
-                out.push_str(&format!("{}    procedural_memory: {{ namespace: \"{}\" }},\n", sp, pm.namespace));
+                out.push_str(&format!(
+                    "{}    procedural_memory: {{ namespace: \"{}\" }},\n",
+                    sp, pm.namespace
+                ));
             }
             if let Some(p) = pricing {
-                out.push_str(&format!("{}    pricing: {{ input: {}, output: {} }},\n", sp, p.input, p.output));
+                out.push_str(&format!(
+                    "{}    pricing: {{ input: {}, output: {} }},\n",
+                    sp, p.input, p.output
+                ));
             }
             if !fallback.is_empty() {
                 out.push_str(&format!("{}    fallback: [", sp));
@@ -334,7 +357,11 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(&format!("{{ model: \"{}\", on: [{}]", f.model, f.on.join(", ")));
+                    out.push_str(&format!(
+                        "{{ model: \"{}\", on: [{}]",
+                        f.model,
+                        f.on.join(", ")
+                    ));
                     if let Some(mt) = f.max_tokens {
                         out.push_str(&format!(", max_tokens: {}", mt));
                     }
@@ -343,10 +370,20 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
                 out.push_str("],\n");
             }
             if let Some(r) = retry {
-                out.push_str(&format!("{}    retry: {{ max_attempts: {}, backoff: ", sp, r.max_attempts));
+                out.push_str(&format!(
+                    "{}    retry: {{ max_attempts: {}, backoff: ",
+                    sp, r.max_attempts
+                ));
                 match &r.backoff {
-                    crate::ast::AgentBackoff::Exponential { initial_ms, factor, max_ms } => {
-                        out.push_str(&format!("Exponential {{ initial_ms: {}, factor: {}, max_ms: {} }}", initial_ms, factor, max_ms));
+                    crate::ast::AgentBackoff::Exponential {
+                        initial_ms,
+                        factor,
+                        max_ms,
+                    } => {
+                        out.push_str(&format!(
+                            "Exponential {{ initial_ms: {}, factor: {}, max_ms: {} }}",
+                            initial_ms, factor, max_ms
+                        ));
                     }
                     crate::ast::AgentBackoff::Fixed { delay_ms } => {
                         out.push_str(&format!("Fixed {{ delay_ms: {} }}", delay_ms));
@@ -361,7 +398,12 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             for table in tables {
                 out.push_str(&format!("{}    {} {{\n", sp, table.name));
                 for col in &table.columns {
-                    out.push_str(&format!("{}        {}: {}", sp, col.name, fmt_type(&col.col_type)));
+                    out.push_str(&format!(
+                        "{}        {}: {}",
+                        sp,
+                        col.name,
+                        fmt_type(&col.col_type)
+                    ));
                     if !col.modifiers.is_empty() {
                         out.push_str(&format!(" {}", col.modifiers.join(" ")));
                     }
@@ -374,7 +416,13 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
         Decl::CrdtDecl { name, fields, .. } => {
             out.push_str(&format!("{}crdt {} {{\n", sp, name));
             for (fname, cty, fty, default) in fields {
-                out.push_str(&format!("{}    {} {}: {} = ", sp, cty.keyword(), fname, fmt_type(fty)));
+                out.push_str(&format!(
+                    "{}    {} {}: {} = ",
+                    sp,
+                    cty.keyword(),
+                    fname,
+                    fmt_type(fty)
+                ));
                 fmt_expr(out, default, indent + 4, had_unhandled);
                 out.push('\n');
             }
@@ -400,7 +448,13 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             }
             out.push_str(&format!("{}}}\n", sp));
         }
-        Decl::Class { name, type_params, super_classes, methods, .. } => {
+        Decl::Class {
+            name,
+            type_params,
+            super_classes,
+            methods,
+            ..
+        } => {
             out.push_str(&format!("{}class {}", sp, name));
             if !type_params.is_empty() {
                 out.push_str(&format!("[{}]", type_params.join(", ")));
@@ -435,7 +489,13 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             }
             out.push_str(&format!("{}}}\n", sp));
         }
-        Decl::Impl { class_name, type_params, for_type, methods, .. } => {
+        Decl::Impl {
+            class_name,
+            type_params,
+            for_type,
+            methods,
+            ..
+        } => {
             out.push_str(&format!("{}impl {}", sp, class_name));
             if !type_params.is_empty() {
                 out.push_str(&format!("[{}]", type_params.join(", ")));
@@ -462,7 +522,13 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             }
             out.push_str(&format!("{}}}\n", sp));
         }
-        Decl::LetBinding { name, type_ann, value, mutable, .. } => {
+        Decl::LetBinding {
+            name,
+            type_ann,
+            value,
+            mutable,
+            ..
+        } => {
             out.push_str(&format!("{}let ", sp));
             if *mutable {
                 out.push_str("mut ");
@@ -475,7 +541,9 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             fmt_expr(out, value, indent, had_unhandled);
             out.push('\n');
         }
-        Decl::Given { name, ty, value, .. } => {
+        Decl::Given {
+            name, ty, value, ..
+        } => {
             out.push_str(&format!("{}given {}", sp, name));
             if let Some(t) = ty {
                 out.push_str(&format!(": {}", fmt_type(t)));
@@ -1130,7 +1198,10 @@ impl Eq Int {
         let out = format_source(src).expect("class/impl formats");
         assert!(out.contains("class Eq["), "got: {out}");
         assert!(out.contains("impl Eq Int"), "got: {out}");
-        assert!(out.contains("fn eq(self, other) = self == other"), "got: {out}");
+        assert!(
+            out.contains("fn eq(self, other) = self == other"),
+            "got: {out}"
+        );
         assert_idempotent(src);
     }
 
@@ -1170,7 +1241,10 @@ impl Eq Int {
         let out = format_source(src).expect("state_machine formats");
         assert!(out.contains("state_machine Tcp {"), "got: {out}");
         assert!(out.contains("state Closed"), "got: {out}");
-        assert!(out.contains("event connect(address): Connecting"), "got: {out}");
+        assert!(
+            out.contains("event connect(address): Connecting"),
+            "got: {out}"
+        );
         assert!(out.contains("on_entry Connecting {"), "got: {out}");
         assert_idempotent(src);
     }

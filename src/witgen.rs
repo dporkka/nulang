@@ -177,10 +177,7 @@ pub fn render_wit(world: &WitWorld) -> String {
                     "        {}: func({}) -> {};\n",
                     op.name, params_str, ret
                 )),
-                None => out.push_str(&format!(
-                    "        {}: func({});\n",
-                    op.name, params_str
-                )),
+                None => out.push_str(&format!("        {}: func({});\n", op.name, params_str)),
             }
         }
         out.push_str("    }\n");
@@ -199,10 +196,7 @@ pub fn render_wit(world: &WitWorld) -> String {
                 "    export {}: func({}) -> {};\n",
                 op.name, params_str, ret
             )),
-            None => out.push_str(&format!(
-                "    export {}: func({});\n",
-                op.name, params_str
-            )),
+            None => out.push_str(&format!("    export {}: func({});\n", op.name, params_str)),
         }
     }
 

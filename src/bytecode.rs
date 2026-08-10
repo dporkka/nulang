@@ -800,7 +800,11 @@ impl CodeModule {
             entry_point: Option<usize>,
         }
         let input: BJson = serde_json::from_str(json).map_err(|e| format!("JSON: {e}"))?;
-        let mut m = CodeModule::new(if input.name.is_empty() { "bootstrap" } else { &input.name });
+        let mut m = CodeModule::new(if input.name.is_empty() {
+            "bootstrap"
+        } else {
+            &input.name
+        });
         for hex in &input.instructions {
             let w = u32::from_str_radix(hex, 16).map_err(|e| format!("hex '{hex}': {e}"))?;
             let i = Instruction::decode(w).ok_or_else(|| format!("bad opcode: {hex}"))?;
@@ -810,10 +814,22 @@ impl CodeModule {
             let ty = c.get("type").and_then(|v| v.as_str()).unwrap_or("Int");
             let val = c.get("value");
             let constant = match ty {
-                "Int" => Constant::Int(val.and_then(|v| v.as_i64()).ok_or("Int value not integer")?),
-                "Float" => Constant::Float(val.and_then(|v| v.as_f64()).ok_or("Float value not number")?),
-                "Bool" => Constant::Int(if val.and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 }),
-                "String" => Constant::String(val.and_then(|v| v.as_str()).unwrap_or("").to_string()),
+                "Int" => Constant::Int(
+                    val.and_then(|v| v.as_i64())
+                        .ok_or("Int value not integer")?,
+                ),
+                "Float" => Constant::Float(
+                    val.and_then(|v| v.as_f64())
+                        .ok_or("Float value not number")?,
+                ),
+                "Bool" => Constant::Int(if val.and_then(|v| v.as_bool()).unwrap_or(false) {
+                    1
+                } else {
+                    0
+                }),
+                "String" => {
+                    Constant::String(val.and_then(|v| v.as_str()).unwrap_or("").to_string())
+                }
                 t => return Err(format!("unknown constant type: {t}")),
             };
             m.constants.push(constant);
@@ -1194,7 +1210,8 @@ mod tests {
 
     #[test]
     fn test_from_bootstrap_json_lit42() {
-        let json = r#"{"instructions":["07000000","57000000"],"constants":[{"type":"Int","value":42}]}"#;
+        let json =
+            r#"{"instructions":["07000000","57000000"],"constants":[{"type":"Int","value":42}]}"#;
         let m = CodeModule::from_bootstrap_json(json).expect("parse");
         assert_eq!(m.instructions.len(), 2);
         assert_eq!(m.constants.len(), 1);
@@ -1210,17 +1227,19 @@ mod tests {
         // fn fact(n) { if n<=1 then 1 else n*fact(n-1) }; main() { fact(3) }
         // entry_point = offset of main (instruction 11)
         let instrs = [
-            0x04010000, 0x43000102, 0x52020003,  // fact: r1=1; cmp; jmpf
-            0x04000000, 0x57000000,                // base: return 1
-            0x12000300, 0x21000100, 0x03040000,    // r3=n; r0=n-1; r4=0
-            0x54040100, 0x22030000, 0x57000000,    // call; mul; ret
-            0x07000000, 0x03010000, 0x54010100, 0x57000000,  // main
+            0x04010000, 0x43000102, 0x52020003, // fact: r1=1; cmp; jmpf
+            0x04000000, 0x57000000, // base: return 1
+            0x12000300, 0x21000100, 0x03040000, // r3=n; r0=n-1; r4=0
+            0x54040100, 0x22030000, 0x57000000, // call; mul; ret
+            0x07000000, 0x03010000, 0x54010100, 0x57000000, // main
         ];
         let mut m = CodeModule::new("fact3");
         m.constants.push(Constant::Int(3));
-        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        for &w in &instrs {
+            m.instructions.push(Instruction::decode(w).unwrap());
+        }
         m.function_table = vec![0, 11];
-        m.entry_point = Some(11);  // DIRECT OFFSET of main, not function table index!
+        m.entry_point = Some(11); // DIRECT OFFSET of main, not function table index!
         let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
         let mut vm = crate::vm::VM::new();
         vm.load_module(a.module);
@@ -1231,14 +1250,15 @@ mod tests {
     fn test_recursive_decrement() {
         // fn dec(n) { if n==0 then 0 else dec(n-1) }; main() { dec(1) }
         let instrs = [
-            0x03010000, 0x40000102, 0x52020003, 0x03000000, 0x57000000,
-            0x04030000, 0x21000300, 0x03040000, 0x54040100, 0x57000000,
-            0x04000000, 0x03010000, 0x54010100, 0x57000000,
+            0x03010000, 0x40000102, 0x52020003, 0x03000000, 0x57000000, 0x04030000, 0x21000300,
+            0x03040000, 0x54040100, 0x57000000, 0x04000000, 0x03010000, 0x54010100, 0x57000000,
         ];
         let mut m = CodeModule::new("dec");
-        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        for &w in &instrs {
+            m.instructions.push(Instruction::decode(w).unwrap());
+        }
         m.function_table = vec![0, 10];
-        m.entry_point = Some(10);  // direct offset of main
+        m.entry_point = Some(10); // direct offset of main
         let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
         let mut vm = crate::vm::VM::new();
         vm.load_module(a.module);

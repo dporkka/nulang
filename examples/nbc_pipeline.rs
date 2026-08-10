@@ -21,8 +21,7 @@ fn main() {
     //   IAdd r0,r2,r0   (r0 = 6 + 1 = 7)
     //   RetVal r0
     let instrs = [
-        0x07000000, 0x07000101, 0x22000100,
-        0x07000202, 0x20000200, 0x57000000,
+        0x07000000, 0x07000101, 0x22000100, 0x07000202, 0x20000200, 0x57000000,
     ];
     let mut module = CodeModule::new("example");
     module.constants.push(Constant::Int(2));

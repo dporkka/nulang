@@ -9,8 +9,8 @@ pub mod ast;
 pub mod backends;
 pub mod bytecode;
 pub mod cranelift_utils;
-pub mod docgen;
 pub mod dap;
+pub mod docgen;
 pub mod dst;
 pub mod effect_checker;
 pub mod ffi;
@@ -26,13 +26,15 @@ pub mod lexer;
 pub mod lsp;
 pub mod mir;
 pub mod mir_codegen;
-pub mod mir_lower;
 pub mod mir_inline;
+pub mod mir_lower;
 #[cfg(feature = "wasm-backend")]
 pub mod mir_wasm;
+pub mod mir_wasm_simd;
+#[cfg(feature = "otel")]
+pub mod observability;
 pub mod package;
 pub mod parser;
-pub mod mir_wasm_simd;
 pub mod prelude_source;
 #[cfg(feature = "python")]
 pub mod python;
@@ -54,7 +56,5 @@ pub mod vm;
 pub mod wasm_component_runtime;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
-#[cfg(feature = "otel")]
-pub mod observability;
 pub mod wasm_types;
 pub mod witgen;

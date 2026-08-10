@@ -1058,8 +1058,11 @@ impl MirCodegen {
                     let node_reg = self.local_reg(*node);
                     if init.len() > MAX_STAGED_ARGS {
                         return Err(compile_err(
-                            format!("spawn@node with {} init fields exceeds MIR staging limit of {}",
-                                init.len(), MAX_STAGED_ARGS),
+                            format!(
+                                "spawn@node with {} init fields exceeds MIR staging limit of {}",
+                                init.len(),
+                                MAX_STAGED_ARGS
+                            ),
                             Span::default(),
                         ));
                     }
@@ -1072,7 +1075,8 @@ impl MirCodegen {
                         self.module.remote_spawn_init_fields.push((pc, names));
                     }
                     self.emit(Instruction::new3(
-                        OpCode::RSpawn, node_reg,
+                        OpCode::RSpawn,
+                        node_reg,
                         ((*behavior_idx >> 8) & 0xFF) as u8,
                         (*behavior_idx & 0xFF) as u8,
                     ));
@@ -1515,7 +1519,8 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | ReceiveCommit
         | Spawn { .. }
         | SelfRef
-        | StateGet { .. } | mir::RValue::Resume(..) => {}
+        | StateGet { .. }
+        | mir::RValue::Resume(..) => {}
         // The timeout value is staged into r0 with a plain Move — an
         // uncounted copy channel like call/effect argument staging.
         ReceiveWait { timeout, .. } => cp(&mut out, *timeout),
@@ -2465,7 +2470,10 @@ mod tests {
         crate::types::set_source_map(source);
         let module = compile_mir_source(source).unwrap();
         // The line table maps the innermost statement to source line 3.
-        assert!(!module.line_table.is_empty(), "expected a non-empty line table");
+        assert!(
+            !module.line_table.is_empty(),
+            "expected a non-empty line table"
+        );
         assert!(
             module.line_table.iter().any(|&(_, l)| l == 3),
             "line table should include line 3, got {:?}",
@@ -2478,7 +2486,10 @@ mod tests {
         assert_eq!(line, 3);
         assert_eq!(module.line_at(pc), Some(3));
         // Debug functions carry a code range and named locals.
-        assert!(!module.debug_functions.is_empty(), "expected debug functions");
+        assert!(
+            !module.debug_functions.is_empty(),
+            "expected debug functions"
+        );
         let main = module
             .debug_functions
             .iter()

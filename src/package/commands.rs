@@ -1,7 +1,6 @@
 //! `nula` CLI subcommands: `new`, `init`, `build`, `build-wasm`, `test`, `run`,
 //! `list`, `clean`, `add`, `remove`, `watch`, `publish`, `deploy`.
 
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -414,7 +413,7 @@ fn prepare_package() -> NuResult<PathBuf> {
 
     if let Some(req) = &manifest.package.language {
         use crate::format::constants::LANGUAGE_VERSION_STR;
-        
+
         let parse_maj_min = |s: &str| -> Option<(u32, u32)> {
             let s = s.split('-').next().unwrap_or(s);
             let mut parts = s.split('.');
@@ -422,21 +421,32 @@ fn prepare_package() -> NuResult<PathBuf> {
             let min = parts.next()?.parse().ok()?;
             Some((maj, min))
         };
-        
-        if let (Some((req_maj, req_min)), Some((tool_maj, tool_min))) = (parse_maj_min(req), parse_maj_min(LANGUAGE_VERSION_STR)) {
+
+        if let (Some((req_maj, req_min)), Some((tool_maj, tool_min))) =
+            (parse_maj_min(req), parse_maj_min(LANGUAGE_VERSION_STR))
+        {
             if req_maj != tool_maj || req_min != tool_min {
                 return Err(NuError::PackageError {
-                    msg: format!("package requires language {} but this toolchain provides {}", req, LANGUAGE_VERSION_STR),
+                    msg: format!(
+                        "package requires language {} but this toolchain provides {}",
+                        req, LANGUAGE_VERSION_STR
+                    ),
                     span: Span::default(),
                 });
             }
         } else {
             // fallback exact match if parsing fails
             let req_base = req.split('-').next().unwrap_or(req);
-            let tool_base = LANGUAGE_VERSION_STR.split('-').next().unwrap_or(LANGUAGE_VERSION_STR);
+            let tool_base = LANGUAGE_VERSION_STR
+                .split('-')
+                .next()
+                .unwrap_or(LANGUAGE_VERSION_STR);
             if req_base != tool_base {
                 return Err(NuError::PackageError {
-                    msg: format!("package requires language {} but this toolchain provides {}", req, LANGUAGE_VERSION_STR),
+                    msg: format!(
+                        "package requires language {} but this toolchain provides {}",
+                        req, LANGUAGE_VERSION_STR
+                    ),
                     span: Span::default(),
                 });
             }
@@ -1093,10 +1103,7 @@ fn cmd_deploy(wasm: bool, cloud_url: Option<String>, token: Option<String>) -> N
     let manifest_path = root.join(MANIFEST_FILE);
     if !manifest_path.exists() {
         return Err(NuError::PackageError {
-            msg: format!(
-                "No {} found. Run `nulang nula init` first.",
-                MANIFEST_FILE
-            ),
+            msg: format!("No {} found. Run `nulang nula init` first.", MANIFEST_FILE),
             span: Span::default(),
         });
     }
@@ -1134,25 +1141,14 @@ fn cmd_deploy(wasm: bool, cloud_url: Option<String>, token: Option<String>) -> N
     let nbc_path = dist_dir.join(format!("{}.nbc", name));
     let nbc_path_str = nbc_path.to_string_lossy().into_owned();
     eprintln!("Compiling {} to .nbc...", name);
-    nulang_exe(&[
-        "--emit-nbc",
-        "--out",
-        &nbc_path_str,
-        &entry_str,
-    ])?;
+    nulang_exe(&["--emit-nbc", "--out", &nbc_path_str, &entry_str])?;
 
     // Optionally build .wasm + .cwasm (WASM tier).
     if wasm {
         let wasm_path = dist_dir.join(format!("{}.wasm", name));
         let wasm_path_str = wasm_path.to_string_lossy().into_owned();
         eprintln!("Compiling {} to .wasm + .cwasm...", name);
-        nulang_exe(&[
-            "--backend",
-            "wasm-aot",
-            "--out",
-            &wasm_path_str,
-            &entry_str,
-        ])?;
+        nulang_exe(&["--backend", "wasm-aot", "--out", &wasm_path_str, &entry_str])?;
     }
 
     // Bundle into .tar.gz: .nula/dist/ contents + Nulang.toml + Nulang.lock.
@@ -1250,15 +1246,15 @@ fn cmd_deploy(wasm: bool, cloud_url: Option<String>, token: Option<String>) -> N
         msg: format!("failed to read response: {}", e),
         span: Span::default(),
     })?;
-    let deploy: DeployResponse = serde_json::from_str(&body).map_err(|e| NuError::PackageError {
-        msg: format!("invalid response from cloud: {}", e),
-        span: Span::default(),
-    })?;
+    let deploy: DeployResponse =
+        serde_json::from_str(&body).map_err(|e| NuError::PackageError {
+            msg: format!("invalid response from cloud: {}", e),
+            span: Span::default(),
+        })?;
 
     println!("Deployed! -> {} ({})", deploy.url, deploy.status);
     Ok(())
 }
-
 
 /// Recursively add a directory tree to a tar builder.
 fn add_dir_to_tar<W: std::io::Write>(
@@ -1783,7 +1779,8 @@ mod tests {
     #[test]
     fn test_cmd_deploy_missing_token() {
         let _cwd = cwd_guard();
-        let dir = std::env::temp_dir().join(format!("nulang_deploy_token_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nulang_deploy_token_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
@@ -1793,8 +1790,11 @@ mod tests {
         let result = cmd_deploy(false, None, None);
         assert!(result.is_err(), "deploy without token should fail");
         if let Err(NuError::PackageError { msg, .. }) = result {
-            assert!(msg.contains("NULANG_CLOUD_TOKEN") || msg.contains("--token"),
-                "error should mention token: {}", msg);
+            assert!(
+                msg.contains("NULANG_CLOUD_TOKEN") || msg.contains("--token"),
+                "error should mention token: {}",
+                msg
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1803,20 +1803,28 @@ mod tests {
     #[test]
     fn test_cmd_deploy_no_manifest() {
         let _cwd = cwd_guard();
-        let dir = std::env::temp_dir().join(format!("nulang_deploy_nomanifest_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "nulang_deploy_nomanifest_test_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        let result = cmd_deploy(false, Some("http://127.0.0.1:9".to_string()), Some("t".to_string()));
+        let result = cmd_deploy(
+            false,
+            Some("http://127.0.0.1:9".to_string()),
+            Some("t".to_string()),
+        );
         assert!(result.is_err(), "deploy without manifest should fail");
         if let Err(NuError::PackageError { msg, .. }) = result {
-            assert!(msg.contains("Nulang.toml"),
-                "error should mention Nulang.toml: {}", msg);
+            assert!(
+                msg.contains("Nulang.toml"),
+                "error should mention Nulang.toml: {}",
+                msg
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
-
-}
-
+    }
 }

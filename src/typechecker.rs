@@ -1151,9 +1151,11 @@ impl TypeChecker {
         decl: &Decl,
     ) -> NuResult<(Substitution, Type)> {
         match decl {
-            Decl::CrdtDecl { name: _name, span: _span, .. } => {
-                Ok((Vec::new(), Type::unit()))
-            }
+            Decl::CrdtDecl {
+                name: _name,
+                span: _span,
+                ..
+            } => Ok((Vec::new(), Type::unit())),
             Decl::Function {
                 name,
                 type_param_constraints,
@@ -1289,7 +1291,6 @@ impl TypeChecker {
                     };
                     let upcap = up.cap.unwrap_or(Capability::Ref);
                     new_ctx.bind(up.name.clone(), uty, upcap, false);
-
                 }
                 // Inject typeclass constraints from type parameter annotations
                 // so method calls on constrained type vars resolve (B.3).
@@ -1516,7 +1517,14 @@ impl TypeChecker {
     /// Returns (substitution, inferred_type).
     pub fn infer_expr(&mut self, ctx: &TypeContext, expr: &Expr) -> NuResult<(Substitution, Type)> {
         match expr {
-            Expr::FString(parts, _) => { let mut subst = Substitution::new(); for part in parts { let (s, _) = self.infer_expr(ctx, part)?; subst = compose_subst(&subst, &s); } return Ok((subst, Type::string())); }
+            Expr::FString(parts, _) => {
+                let mut subst = Substitution::new();
+                for part in parts {
+                    let (s, _) = self.infer_expr(ctx, part)?;
+                    subst = compose_subst(&subst, &s);
+                }
+                return Ok((subst, Type::string()));
+            }
             // Literals: exact primitive type
             Expr::Literal(lit, span) => self.infer_literal(lit, *span),
 
@@ -3147,7 +3155,12 @@ impl TypeChecker {
                     Some(t) => t.clone(),
                     None => Type::Var(TypeVar::fresh()),
                 };
-                behavior_ctx.bind(p.name.clone(), pty.clone(), p.cap.unwrap_or(Capability::Ref), false);
+                behavior_ctx.bind(
+                    p.name.clone(),
+                    pty.clone(),
+                    p.cap.unwrap_or(Capability::Ref),
+                    false,
+                );
                 param_types.push(pty);
             }
             if !events.is_empty() {

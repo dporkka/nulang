@@ -1798,7 +1798,11 @@ impl NulangLanguageServer {
     fn extract_expr_types(expr: &crate::ast::Expr, source: &str, map: &mut HashMap<usize, String>) {
         use crate::ast::Expr;
         match expr {
-            Expr::FString(parts, _) => { for part in parts { Self::extract_expr_types(part, source, map); } }
+            Expr::FString(parts, _) => {
+                for part in parts {
+                    Self::extract_expr_types(part, source, map);
+                }
+            }
             Expr::Let {
                 name,
                 ty,
@@ -2334,7 +2338,9 @@ impl<'a> InlayHintEngine<'a> {
                             };
                             if !is_empty {
                                 let effect_str = row.to_string();
-                                let pos = source_line.rfind(|c: char| c == ')' || c == '!').map_or(0, |p| p as u32 + 1);
+                                let pos = source_line
+                                    .rfind(|c: char| c == ')' || c == '!')
+                                    .map_or(0, |p| p as u32 + 1);
                                 annotations.push(TypeAnnotation {
                                     line,
                                     character: pos,
@@ -3231,8 +3237,21 @@ mod lsp_tests {
             None,
         );
         let labels = labels(&items);
-        for cap in ["iso", "ref", "val", "box", "tag", "trn", "linear", "lineariso"] {
-            assert!(labels.contains(&cap), "missing capability completion: {}", cap);
+        for cap in [
+            "iso",
+            "ref",
+            "val",
+            "box",
+            "tag",
+            "trn",
+            "linear",
+            "lineariso",
+        ] {
+            assert!(
+                labels.contains(&cap),
+                "missing capability completion: {}",
+                cap
+            );
         }
     }
 

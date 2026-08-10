@@ -136,8 +136,7 @@ fn discover_candidates(funcs: &[Function], behaviors: &[Function]) -> Vec<Candid
     }
 
     for i in 0..behaviors.len() {
-        for (clos_local, callee_idx, captures, call_sites) in find_eligible_closures(i, behaviors)
-        {
+        for (clos_local, callee_idx, captures, call_sites) in find_eligible_closures(i, behaviors) {
             // Closures always reference the function list, not the behavior list.
             let callee = match funcs.get(callee_idx) {
                 Some(f) => f,
@@ -215,9 +214,8 @@ fn apply_candidates(
         });
 
         // Sort call sites by (block, stmt_idx) descending.
-        c.call_sites.sort_by(|a, b| {
-            b.block.0.cmp(&a.block.0).then(b.stmt_idx.cmp(&a.stmt_idx))
-        });
+        c.call_sites
+            .sort_by(|a, b| b.block.0.cmp(&a.block.0).then(b.stmt_idx.cmp(&a.stmt_idx)));
 
         // Inline at most one call site per block this round.
         let mut seen_blocks: FxHashMap<BlockId, ()> = FxHashMap::default();
@@ -373,10 +371,9 @@ fn stmt_uses_local(stmt: &Stmt, local: LocalId) -> bool {
         Stmt::Assign { dst, op } => *dst == local || rvalue_uses_local(op, local),
         Stmt::StoreFieldNamed { obj, src, .. } => *obj == local || *src == local,
         Stmt::ArrayStore { arr, idx, src } => *arr == local || *idx == local || *src == local,
-        Stmt::EnterHandle { .. }
-        | Stmt::PopHandler
-        | Stmt::StateSet { .. }
-        | Stmt::Emit { .. } => false,
+        Stmt::EnterHandle { .. } | Stmt::PopHandler | Stmt::StateSet { .. } | Stmt::Emit { .. } => {
+            false
+        }
     }
 }
 
@@ -384,10 +381,7 @@ fn stmt_uses_local(stmt: &Stmt, local: LocalId) -> bool {
 fn rvalue_uses_local(rv: &RValue, local: LocalId) -> bool {
     match rv {
         RValue::Load(id) => *id == local,
-        RValue::Closure {
-            func: _,
-            captures,
-        } => captures.iter().any(|c| *c == local),
+        RValue::Closure { func: _, captures } => captures.iter().any(|c| *c == local),
         RValue::Call { func, args } => {
             (match func {
                 FuncRef::Local(id) => *id == local,
@@ -419,12 +413,8 @@ fn rvalue_uses_local(rv: &RValue, local: LocalId) -> bool {
             init.iter().any(|(_, rv)| rvalue_uses_local(rv, local))
                 || target_node.map_or(false, |n| n == local)
         }
-        RValue::Send { actor, args, .. } => {
-            *actor == local || args.iter().any(|a| *a == local)
-        }
-        RValue::Ask { actor, args, .. } => {
-            *actor == local || args.iter().any(|a| *a == local)
-        }
+        RValue::Send { actor, args, .. } => *actor == local || args.iter().any(|a| *a == local),
+        RValue::Ask { actor, args, .. } => *actor == local || args.iter().any(|a| *a == local),
         RValue::Resume(id) | RValue::CapabilityCheck { val: id } => *id == local,
         RValue::FFICall { args, .. } => args.iter().any(|a| *a == local),
         RValue::Migrate { actor, node } => *actor == local || *node == local,
@@ -466,7 +456,6 @@ fn inline_one_call(
     callee_captures: &[LocalId],
     closure_captures: &[LocalId],
 ) {
-
     // Build the local-ID remapping: callee local → caller local.
     let mut remap: FxHashMap<LocalId, LocalId> = FxHashMap::default();
 
@@ -523,8 +512,7 @@ fn inline_one_call(
     let suffix_stmts: Vec<Stmt> = block.stmts.split_off(call_stmt_idx + 1);
     // Remove the call statement itself.
     block.stmts.pop();
-    let suffix_terminator =
-        std::mem::replace(&mut block.terminator, Terminator::Unterminated);
+    let suffix_terminator = std::mem::replace(&mut block.terminator, Terminator::Unterminated);
 
     // Build the inlined block from the callee's single block.
     let mut inlined_stmts: Vec<Stmt> = callee_blocks[0]
@@ -568,7 +556,6 @@ fn inline_one_call(
         .filter(|((bid, _), _)| *bid == old_block_id)
         .cloned()
         .collect();
-
 
     // Wire prefix → inlined → suffix.
     block.terminator = Terminator::Jump(inlined_bid);
@@ -675,7 +662,9 @@ fn remap_rvalue(rv: &RValue, remap: &FxHashMap<LocalId, LocalId>) -> RValue {
             RValue::Binary(*op, remap_local(*a, remap), remap_local(*b, remap))
         }
         RValue::StringEq(a, b) => RValue::StringEq(remap_local(*a, remap), remap_local(*b, remap)),
-        RValue::StrConcat(a, b) => RValue::StrConcat(remap_local(*a, remap), remap_local(*b, remap)),
+        RValue::StrConcat(a, b) => {
+            RValue::StrConcat(remap_local(*a, remap), remap_local(*b, remap))
+        }
         RValue::Perform {
             effect,
             op,
@@ -696,9 +685,7 @@ fn remap_rvalue(rv: &RValue, remap: &FxHashMap<LocalId, LocalId>) -> RValue {
             args: remap_locals(args, remap),
             resolved_handler: *resolved_handler,
         },
-        RValue::SignalWait { name } => RValue::SignalWait {
-            name: name.clone(),
-        },
+        RValue::SignalWait { name } => RValue::SignalWait { name: name.clone() },
         RValue::Receive => RValue::Receive,
         RValue::ReceiveMatch {
             behavior_ids,
@@ -836,10 +823,7 @@ mod tests {
         let mut callee = crate::mir::FunctionBuilder::new("__lambda_0", None);
         let p0 = callee.add_param("x", crate::types::Type::unit());
         let t0 = callee.add_temp(crate::types::Type::unit());
-        callee.assign(
-            t0,
-            RValue::Binary(crate::ast::BinOp::Add, p0, p0),
-        );
+        callee.assign(t0, RValue::Binary(crate::ast::BinOp::Add, p0, p0));
         callee.terminate(Terminator::Return(Some(t0)));
         let callee_idx = add_function(&mut m, "__lambda_0", callee.build());
 
@@ -887,9 +871,15 @@ mod tests {
         // The caller should no longer have a Closure RValue.
         let caller = &m.functions[1];
         let has_closure = caller.blocks.iter().any(|b| {
-            b.stmts
-                .iter()
-                .any(|s| matches!(s, Stmt::Assign { op: RValue::Closure { .. }, .. }))
+            b.stmts.iter().any(|s| {
+                matches!(
+                    s,
+                    Stmt::Assign {
+                        op: RValue::Closure { .. },
+                        ..
+                    }
+                )
+            })
         });
         assert!(!has_closure, "closure allocation should be removed");
 
@@ -899,11 +889,10 @@ mod tests {
                 matches!(
                     s,
                     Stmt::Assign {
-                        op:
-                            RValue::Call {
-                                func: FuncRef::Local(_),
-                                ..
-                            },
+                        op: RValue::Call {
+                            func: FuncRef::Local(_),
+                            ..
+                        },
                         ..
                     }
                 )

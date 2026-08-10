@@ -129,7 +129,11 @@ fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
 
 fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
     match decl {
-        Decl::CrdtDecl { name, fields: _, span } => {
+        Decl::CrdtDecl {
+            name,
+            fields: _,
+            span,
+        } => {
             // In a full implementation, this would create a CRDT actor
             hir::Decl::Constant {
                 name: name.clone(),
@@ -336,7 +340,9 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             span: *span,
         },
 
-        Decl::LetBinding { name, value, span, .. } => {
+        Decl::LetBinding {
+            name, value, span, ..
+        } => {
             let mut body = hir::Body::new();
             let op = lower_expr(value, &mut body);
             body.set_terminator(hir::Terminator::FnReturn(Some(op)));
@@ -1138,7 +1144,26 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         return hir::Operand::Unit;
     }
     match expr {
-        Expr::FString(parts, span) => { if parts.is_empty() { hir::Operand::Literal(ast::Literal::String(String::new()), Type::string()) } else { let mut result = lower_expr(&parts[0], body); for part in parts.iter().skip(1) { let r = lower_expr(part, body); let ty = Type::string(); let temp = fresh_temp_name(); body.push(hir::Stmt::Let { name: temp.clone(), ty: ty.clone(), value: hir::RValue::Binary(ast::BinOp::Add, result, r, ty.clone()), span: *span, }); result = hir::Operand::Var(temp, ty); } result } }
+        Expr::FString(parts, span) => {
+            if parts.is_empty() {
+                hir::Operand::Literal(ast::Literal::String(String::new()), Type::string())
+            } else {
+                let mut result = lower_expr(&parts[0], body);
+                for part in parts.iter().skip(1) {
+                    let r = lower_expr(part, body);
+                    let ty = Type::string();
+                    let temp = fresh_temp_name();
+                    body.push(hir::Stmt::Let {
+                        name: temp.clone(),
+                        ty: ty.clone(),
+                        value: hir::RValue::Binary(ast::BinOp::Add, result, r, ty.clone()),
+                        span: *span,
+                    });
+                    result = hir::Operand::Var(temp, ty);
+                }
+                result
+            }
+        }
         Expr::Literal(lit, _span) => {
             let ty = literal_type(lit);
             hir::Operand::Literal(lit.clone(), ty)
@@ -2847,7 +2872,10 @@ fn free_vars(
                 free_vars(arm_expr, &arm_bound, acc);
             }
         }
-        Expr::Block { exprs, .. } | Expr::Par { exprs, .. } | Expr::Tuple(exprs, _) | Expr::Array(exprs, _) => {
+        Expr::Block { exprs, .. }
+        | Expr::Par { exprs, .. }
+        | Expr::Tuple(exprs, _)
+        | Expr::Array(exprs, _) => {
             for e in exprs {
                 free_vars(e, bound, acc);
             }

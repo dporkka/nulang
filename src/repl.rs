@@ -7,8 +7,8 @@
 //! - Graceful error handling
 
 use crate::ast::{AstModule, Decl, Expr};
-use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::effect_checker::flatten_decls;
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
@@ -464,27 +464,35 @@ impl Repl {
                         }
                     }
                     "actors" => {
-                        println!("Actor inspection not available in REPL mode (no running runtime).");
+                        println!(
+                            "Actor inspection not available in REPL mode (no running runtime)."
+                        );
                     }
                     "actor" => {
                         if rest.is_empty() {
                             eprintln!("Usage: %actor <id>");
                         } else {
-                            println!("Actor inspection not available in REPL mode (no running runtime).");
+                            println!(
+                                "Actor inspection not available in REPL mode (no running runtime)."
+                            );
                         }
                     }
                     "save" => {
                         if rest.is_empty() {
                             eprintln!("Usage: %save <file>");
                         } else {
-                            if let Err(e) = self.save_session(rest) { self.print_error(&e); }
+                            if let Err(e) = self.save_session(rest) {
+                                self.print_error(&e);
+                            }
                         }
                     }
                     "load-session" => {
                         if rest.is_empty() {
                             eprintln!("Usage: %load-session <file>");
                         } else {
-                            if let Err(e) = self.load_session(rest) { self.print_error(&e); }
+                            if let Err(e) = self.load_session(rest) {
+                                self.print_error(&e);
+                            }
                         }
                     }
                     "stats" => {
@@ -611,32 +619,32 @@ impl Repl {
             let expr_ty = extract_return_type(&module_type);
             let ty_str = type_to_string(expr_ty);
             println!("{} : {}", val_str, ty_str);
-        // Inline effect row and capability hints for the evaluated expression
-        if let Some(ref _expr) = main_expr {
-            let effect_str = if let Type::Function { effect, .. } = &module_type {
-                let eff_str = if effect.effects().is_empty() {
-                    String::new()
+            // Inline effect row and capability hints for the evaluated expression
+            if let Some(ref _expr) = main_expr {
+                let effect_str = if let Type::Function { effect, .. } = &module_type {
+                    let eff_str = if effect.effects().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ! {}", effect)
+                    };
+                    eff_str
                 } else {
-                    format!(" ! {}", effect)
-                };
-                eff_str
-            } else {
-                String::new()
-            };
-            let cap_str = if let Type::Function { cap, .. } = &module_type {
-                let cap_str = if *cap == Capability::Ref {
                     String::new()
-                } else {
-                    format!(" :{}", cap)
                 };
-                cap_str
-            } else {
-                String::new()
-            };
-            if !effect_str.is_empty() || !cap_str.is_empty() {
-                println!("  (type: {}{})", effect_str, cap_str);
+                let cap_str = if let Type::Function { cap, .. } = &module_type {
+                    let cap_str = if *cap == Capability::Ref {
+                        String::new()
+                    } else {
+                        format!(" :{}", cap)
+                    };
+                    cap_str
+                } else {
+                    String::new()
+                };
+                if !effect_str.is_empty() || !cap_str.is_empty() {
+                    println!("  (type: {}{})", effect_str, cap_str);
+                }
             }
-        }
         } else if !new_decls.is_empty() {
             // Print declaration info. Each new declaration is re-checked in
             // the full session context (accumulated + earlier new decls, in
@@ -998,16 +1006,18 @@ impl Repl {
 
     /// Save REPL session to a file (declarations only).
     fn save_session(&self, path: &str) -> NuResult<()> {
-        std::fs::write(path, &self.session_source)
-            .map_err(|e| NuError::runtime_error(format!("save session failed: {}", e), Span::default()))?;
+        std::fs::write(path, &self.session_source).map_err(|e| {
+            NuError::runtime_error(format!("save session failed: {}", e), Span::default())
+        })?;
         println!("Session saved to {}", path);
         Ok(())
     }
 
     /// Load REPL session from a file.
     fn load_session(&mut self, path: &str) -> NuResult<()> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| NuError::runtime_error(format!("load session failed: {}", e), Span::default()))?;
+        let source = std::fs::read_to_string(path).map_err(|e| {
+            NuError::runtime_error(format!("load session failed: {}", e), Span::default())
+        })?;
         self.evaluate(&source)?;
         println!("Session loaded from {}", path);
         Ok(())

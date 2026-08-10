@@ -229,8 +229,17 @@ impl HttpProvider for ReqwestHttpProvider {
 // — network transport was already behind a trait. This re-export makes the
 // boundary discoverable from one place.
 pub trait Transport: Send {
-    fn connect(&mut self, node_id: crate::runtime::NodeId, addr: std::net::SocketAddr) -> std::io::Result<()>;
-    fn send(&mut self, to_node: crate::runtime::NodeId, to_addr: std::net::SocketAddr, packet: crate::runtime::Packet);
+    fn connect(
+        &mut self,
+        node_id: crate::runtime::NodeId,
+        addr: std::net::SocketAddr,
+    ) -> std::io::Result<()>;
+    fn send(
+        &mut self,
+        to_node: crate::runtime::NodeId,
+        to_addr: std::net::SocketAddr,
+        packet: crate::runtime::Packet,
+    );
     fn receive(&self) -> Vec<crate::runtime::IncomingPacket>;
     fn node_id(&self) -> crate::runtime::NodeId;
     fn listen_addr(&self) -> std::net::SocketAddr;
@@ -241,10 +250,19 @@ pub trait Transport: Send {
 }
 
 impl<T: crate::runtime::NetworkTransport> Transport for T {
-    fn connect(&mut self, node_id: crate::runtime::NodeId, addr: std::net::SocketAddr) -> std::io::Result<()> {
+    fn connect(
+        &mut self,
+        node_id: crate::runtime::NodeId,
+        addr: std::net::SocketAddr,
+    ) -> std::io::Result<()> {
         crate::runtime::NetworkTransport::connect(self, node_id, addr)
     }
-    fn send(&mut self, to_node: crate::runtime::NodeId, to_addr: std::net::SocketAddr, packet: crate::runtime::Packet) {
+    fn send(
+        &mut self,
+        to_node: crate::runtime::NodeId,
+        to_addr: std::net::SocketAddr,
+        packet: crate::runtime::Packet,
+    ) {
         crate::runtime::NetworkTransport::send(self, to_node, to_addr, packet)
     }
     fn receive(&self) -> Vec<crate::runtime::IncomingPacket> {
@@ -286,10 +304,18 @@ pub trait TlsProvider: Send + Sync {
     fn client_config(&self) -> std::io::Result<Box<dyn ClientTlsConfig>>;
 
     /// Wrap a raw TCP stream as a TLS server stream.
-    fn wrap_server_stream(&self, stream: std::net::TcpStream, config: Box<dyn ServerTlsConfig>) -> std::io::Result<Box<dyn TlsStream>>;
+    fn wrap_server_stream(
+        &self,
+        stream: std::net::TcpStream,
+        config: Box<dyn ServerTlsConfig>,
+    ) -> std::io::Result<Box<dyn TlsStream>>;
 
     /// Wrap a raw TCP stream as a TLS client stream.
-    fn wrap_client_stream(&self, stream: std::net::TcpStream, config: Box<dyn ClientTlsConfig>) -> std::io::Result<Box<dyn TlsStream>>;
+    fn wrap_client_stream(
+        &self,
+        stream: std::net::TcpStream,
+        config: Box<dyn ClientTlsConfig>,
+    ) -> std::io::Result<Box<dyn TlsStream>>;
 }
 
 /// Server-side TLS configuration.

@@ -395,10 +395,7 @@ impl Actor {
     }
 
     /// Wake this actor from hibernation: deserialize and restore VM state.
-    pub fn wake_from_hibernation(
-        &mut self,
-        vm: &mut crate::vm::VM,
-    ) -> Result<(), String> {
+    pub fn wake_from_hibernation(&mut self, vm: &mut crate::vm::VM) -> Result<(), String> {
         let hibernation = self.hibernation_state.take().ok_or("Not hibernated")?;
         let (cont, handlers) = crate::runtime::heap_serialize::deserialize_continuation(
             &hibernation.continuation_bytes,
@@ -464,7 +461,7 @@ impl Actor {
         let name_str = name.into();
         self.dirty_fields.insert(name_str.clone());
         self.state_data.insert(name_str.clone(), value);
-        
+
         // Auto-sync CRDT fields on mutation
         if let Some(StateModel::Crdt(_crdt_type)) = self.state_models.get(&name_str) {
             self.dirty_fields.insert(name_str.clone());

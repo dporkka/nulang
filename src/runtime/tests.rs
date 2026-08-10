@@ -3346,14 +3346,20 @@ fn test_node_failed_invalidates_cache_and_delivers_down() {
         node_id: dead_node,
         actor_id: 100,
     };
-    rt.remote_monitors.register(remote_target, RemoteLink {
-        node_id: local_node,
-        actor_id: monitor_watcher,
-    });
-    rt.remote_links.register(remote_target, RemoteLink {
-        node_id: local_node,
-        actor_id: link_watcher,
-    });
+    rt.remote_monitors.register(
+        remote_target,
+        RemoteLink {
+            node_id: local_node,
+            actor_id: monitor_watcher,
+        },
+    );
+    rt.remote_links.register(
+        remote_target,
+        RemoteLink {
+            node_id: local_node,
+            actor_id: link_watcher,
+        },
+    );
 
     crate::runtime::distribution::handle_node_failed(&mut rt, dead_node);
 

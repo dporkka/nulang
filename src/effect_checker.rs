@@ -120,7 +120,11 @@ pub fn flatten_decls(decls: &[Decl]) -> Vec<&Decl> {
 fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
     match expr {
         Expr::Literal(_, _) => {}
-        Expr::FString(parts, _) => { for part in parts { free_vars(part, bound, acc); } }
+        Expr::FString(parts, _) => {
+            for part in parts {
+                free_vars(part, bound, acc);
+            }
+        }
         Expr::Var(name, _) => {
             if !bound.contains(name) && !acc.contains(name) {
                 acc.push(name.clone());
@@ -493,7 +497,13 @@ impl EffectChecker {
         match expr {
             // Literals and variables are pure.
             Expr::Literal(_, _) => Ok(EffectRow::empty()),
-            Expr::FString(parts, _) => { let mut merged = EffectRow::empty(); for part in parts { merged = merged.combine(self.infer_effects(ctx, part)?); } Ok(merged) }
+            Expr::FString(parts, _) => {
+                let mut merged = EffectRow::empty();
+                for part in parts {
+                    merged = merged.combine(self.infer_effects(ctx, part)?);
+                }
+                Ok(merged)
+            }
             Expr::Var(_, _) => Ok(EffectRow::empty()),
 
             // Lambda: effects are given by its annotation, or inferred from the
@@ -1317,7 +1327,16 @@ impl CapabilityAnalyzer {
         match expr {
             // Literals are immutable values.
             Expr::Literal(_, _) => Ok(Capability::Val),
-            Expr::FString(parts, _) => { let mut cap = Capability::Val; for part in parts { let c = self.infer_cap_tracked(ctx, part, consumed)?; if c == Capability::Iso || c == Capability::Trn { cap = c; } } Ok(cap) }
+            Expr::FString(parts, _) => {
+                let mut cap = Capability::Val;
+                for part in parts {
+                    let c = self.infer_cap_tracked(ctx, part, consumed)?;
+                    if c == Capability::Iso || c == Capability::Trn {
+                        cap = c;
+                    }
+                }
+                Ok(cap)
+            }
 
             Expr::Var(name, span) => {
                 let cap = ctx.lookup(name);

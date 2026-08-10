@@ -346,20 +346,21 @@ impl AotModule {
 /// Create an ISA builder for the specified target.
 fn create_isa_builder(target: &str) -> NuResult<isa::Builder> {
     use target_lexicon::Triple;
-    
+
     match target {
-        "native" => {
-            cranelift_native::builder().map_err(|msg| crate::types::NuError::VMError {
-                msg: format!("host machine not supported: {}", msg),
-                span: Span::default(),
-            })
-        }
+        "native" => cranelift_native::builder().map_err(|msg| crate::types::NuError::VMError {
+            msg: format!("host machine not supported: {}", msg),
+            span: Span::default(),
+        }),
         "ptx" | "nvptx64" => {
             // PTX (NVIDIA GPU) target
-            let triple: Triple = "nvptx64-nvidia-cuda".parse().map_err(|e| crate::types::NuError::VMError {
-                msg: format!("invalid PTX triple: {}", e),
-                span: Span::default(),
-            })?;
+            let triple: Triple =
+                "nvptx64-nvidia-cuda"
+                    .parse()
+                    .map_err(|e| crate::types::NuError::VMError {
+                        msg: format!("invalid PTX triple: {}", e),
+                        span: Span::default(),
+                    })?;
             isa::lookup(triple).map_err(|e| crate::types::NuError::VMError {
                 msg: format!("PTX target not supported: {}", e),
                 span: Span::default(),
@@ -367,9 +368,11 @@ fn create_isa_builder(target: &str) -> NuResult<isa::Builder> {
         }
         "riscv64" | "riscv" => {
             // RISC-V 64-bit target
-            let triple: Triple = "riscv64gc-unknown-none-elf".parse().map_err(|e| crate::types::NuError::VMError {
-                msg: format!("invalid RISC-V triple: {}", e),
-                span: Span::default(),
+            let triple: Triple = "riscv64gc-unknown-none-elf".parse().map_err(|e| {
+                crate::types::NuError::VMError {
+                    msg: format!("invalid RISC-V triple: {}", e),
+                    span: Span::default(),
+                }
             })?;
             isa::lookup(triple).map_err(|e| crate::types::NuError::VMError {
                 msg: format!("RISC-V target not supported: {}", e),
@@ -377,7 +380,10 @@ fn create_isa_builder(target: &str) -> NuResult<isa::Builder> {
             })
         }
         _ => Err(crate::types::NuError::VMError {
-            msg: format!("unknown target '{}' (expected native | ptx | riscv64)", target),
+            msg: format!(
+                "unknown target '{}' (expected native | ptx | riscv64)",
+                target
+            ),
             span: Span::default(),
         }),
     }
@@ -468,4 +474,3 @@ fn collect_rvalue_field_and_consts(
         _ => {}
     }
 }
-

@@ -71,9 +71,10 @@ impl WasmRuntime {
         let config = config.unwrap_or_else(default_wasm_config);
         let engine = Engine::new(&config).map_err(map_wasmtime_err)?;
 
-        
         let res = Module::new(&engine, wasm_bytes);
-        if let Err(_) = &res { std::fs::write("/tmp/failed_module.wasm", wasm_bytes).unwrap(); }
+        if let Err(_) = &res {
+            std::fs::write("/tmp/failed_module.wasm", wasm_bytes).unwrap();
+        }
         let module = res.map_err(map_wasmtime_err)?;
 
         let mut store = Store::new(&engine, HostState::default());
@@ -221,23 +222,25 @@ pub fn aot_compile(wasm_path: &str, cwasm_path: &str) -> NuResult<()> {
         msg: format!("failed to read wasm: {}", e),
         span: Span::default(),
     })?;
-    
+
     let config = default_wasm_config();
     let engine = Engine::new(&config).map_err(|e| NuError::VMError {
         msg: format!("failed to create engine: {}", e),
         span: Span::default(),
     })?;
-    
-    let cwasm_bytes = engine.precompile_module(&bytes).map_err(|e| NuError::VMError {
-        msg: format!("failed to precompile module: {}", e),
-        span: Span::default(),
-    })?;
-    
+
+    let cwasm_bytes = engine
+        .precompile_module(&bytes)
+        .map_err(|e| NuError::VMError {
+            msg: format!("failed to precompile module: {}", e),
+            span: Span::default(),
+        })?;
+
     std::fs::write(cwasm_path, cwasm_bytes).map_err(|e| NuError::VMError {
         msg: format!("failed to write cwasm: {}", e),
         span: Span::default(),
     })?;
-    
+
     Ok(())
 }
 

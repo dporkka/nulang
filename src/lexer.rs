@@ -137,7 +137,7 @@ pub enum TokenKind {
     MinusAssign, // = += -=
     Arrow,
     FatArrow,
-    ThinArrow, // -> => <-
+    ThinArrow,         // -> => <-
     ThinArrowQuestion, // <-? (async ask)
     Dot,
     DotDot,

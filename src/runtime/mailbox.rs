@@ -252,12 +252,18 @@ impl Mailbox {
     /// Total message count across all queues (approximate — concurrent
     /// queue lengths are snapshots).  Includes the same-thread local queue.
     pub fn len(&self) -> usize {
-        self.system_queue.len() + self.local_queue_ref().len() + self.skip_buffer.len() + self.normal_queue.len()
+        self.system_queue.len()
+            + self.local_queue_ref().len()
+            + self.skip_buffer.len()
+            + self.normal_queue.len()
     }
 
     /// True when all queues and the skip-buffer are empty.
     pub fn is_empty(&self) -> bool {
-        self.system_queue.is_empty() && self.local_queue_ref().is_empty() && self.skip_buffer.is_empty() && self.normal_queue.is_empty()
+        self.system_queue.is_empty()
+            && self.local_queue_ref().is_empty()
+            && self.skip_buffer.is_empty()
+            && self.normal_queue.is_empty()
     }
 
     /// Drain all queues (in priority/FIFO order) into a cloned snapshot,

@@ -43,22 +43,16 @@ pub fn init_tracer(url: &str, service_name: &str) -> Result<(), String> {
 
     let provider = opentelemetry_otlp::new_pipeline()
         .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(url),
-        )
-        .with_trace_config(
-            opentelemetry_sdk::trace::Config::default().with_resource(
-                opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new("service.name", service_name.to_string()),
-                    opentelemetry::KeyValue::new(
-                        "service.version",
-                        crate::format::constants::LANGUAGE_VERSION_STR.to_string(),
-                    ),
-                ]),
-            ),
-        )
+        .with_exporter(opentelemetry_otlp::new_exporter().http().with_endpoint(url))
+        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
+            opentelemetry_sdk::Resource::new(vec![
+                opentelemetry::KeyValue::new("service.name", service_name.to_string()),
+                opentelemetry::KeyValue::new(
+                    "service.version",
+                    crate::format::constants::LANGUAGE_VERSION_STR.to_string(),
+                ),
+            ]),
+        ))
         .install_simple()
         .map_err(|e| format!("failed to build OTLP trace pipeline: {e}"))?;
 
@@ -84,11 +78,7 @@ pub fn init_meter(url: &str, service_name: &str) -> Result<(), String> {
 
     let provider = opentelemetry_otlp::new_pipeline()
         .metrics(opentelemetry_sdk::runtime::TokioCurrentThread)
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(url),
-        )
+        .with_exporter(opentelemetry_otlp::new_exporter().http().with_endpoint(url))
         .with_resource(opentelemetry_sdk::Resource::new(vec![
             opentelemetry::KeyValue::new("service.name", service_name.to_string()),
             opentelemetry::KeyValue::new(
@@ -163,12 +153,8 @@ impl MetricsExporter {
             scheduler_global: meter.u64_counter("nulang.scheduler.tasks.global").init(),
             scheduler_stolen: meter.u64_counter("nulang.scheduler.tasks.stolen").init(),
             scheduler_steal_attempts: meter.u64_counter("nulang.scheduler.steal.attempts").init(),
-            scheduler_steal_successes: meter
-                .u64_counter("nulang.scheduler.steal.successes")
-                .init(),
-            scheduler_empty_polls: meter
-                .u64_counter("nulang.scheduler.empty_polls")
-                .init(),
+            scheduler_steal_successes: meter.u64_counter("nulang.scheduler.steal.successes").init(),
+            scheduler_empty_polls: meter.u64_counter("nulang.scheduler.empty_polls").init(),
             gc_objects_allocated: meter.u64_counter("nulang.gc.objects.allocated").init(),
             gc_objects_freed: meter.u64_counter("nulang.gc.objects.freed").init(),
             gc_bytes_allocated: meter.u64_counter("nulang.gc.bytes.allocated").init(),
@@ -193,35 +179,105 @@ impl MetricsExporter {
         self.dlq_depth.record(snap.dlq_depth, &[]);
 
         for m in &snap.actors_mailboxes {
-            self.mailbox_depth
-                .record(m.depth as u64, &[opentelemetry::KeyValue::new("actor_id", m.actor_id as i64)]);
+            self.mailbox_depth.record(
+                m.depth as u64,
+                &[opentelemetry::KeyValue::new("actor_id", m.actor_id as i64)],
+            );
         }
 
         let s = &snap.scheduler;
         let p_s = prev_ref.map(|p| &p.scheduler);
-        add_delta(&self.scheduler_total, s.total_tasks_processed, p_s.map(|p| p.total_tasks_processed));
-        add_delta(&self.scheduler_local, s.tasks_from_local_queue, p_s.map(|p| p.tasks_from_local_queue));
-        add_delta(&self.scheduler_global, s.tasks_from_global_queue, p_s.map(|p| p.tasks_from_global_queue));
-        add_delta(&self.scheduler_stolen, s.tasks_from_steal, p_s.map(|p| p.tasks_from_steal));
-        add_delta(&self.scheduler_steal_attempts, s.steal_attempts, p_s.map(|p| p.steal_attempts));
-        add_delta(&self.scheduler_steal_successes, s.steal_successes, p_s.map(|p| p.steal_successes));
-        add_delta(&self.scheduler_empty_polls, s.empty_polls, p_s.map(|p| p.empty_polls));
+        add_delta(
+            &self.scheduler_total,
+            s.total_tasks_processed,
+            p_s.map(|p| p.total_tasks_processed),
+        );
+        add_delta(
+            &self.scheduler_local,
+            s.tasks_from_local_queue,
+            p_s.map(|p| p.tasks_from_local_queue),
+        );
+        add_delta(
+            &self.scheduler_global,
+            s.tasks_from_global_queue,
+            p_s.map(|p| p.tasks_from_global_queue),
+        );
+        add_delta(
+            &self.scheduler_stolen,
+            s.tasks_from_steal,
+            p_s.map(|p| p.tasks_from_steal),
+        );
+        add_delta(
+            &self.scheduler_steal_attempts,
+            s.steal_attempts,
+            p_s.map(|p| p.steal_attempts),
+        );
+        add_delta(
+            &self.scheduler_steal_successes,
+            s.steal_successes,
+            p_s.map(|p| p.steal_successes),
+        );
+        add_delta(
+            &self.scheduler_empty_polls,
+            s.empty_polls,
+            p_s.map(|p| p.empty_polls),
+        );
 
         let g = &snap.gc;
         let p_g = prev_ref.map(|p| &p.gc);
-        add_delta(&self.gc_objects_allocated, g.objects_allocated, p_g.map(|p| p.objects_allocated));
-        add_delta(&self.gc_objects_freed, g.objects_freed, p_g.map(|p| p.objects_freed));
-        add_delta(&self.gc_bytes_allocated, g.bytes_allocated, p_g.map(|p| p.bytes_allocated));
-        add_delta(&self.gc_bytes_freed, g.bytes_freed, p_g.map(|p| p.bytes_freed));
-        add_delta(&self.gc_cycles_detected, g.cycles_detected, p_g.map(|p| p.cycles_detected));
+        add_delta(
+            &self.gc_objects_allocated,
+            g.objects_allocated,
+            p_g.map(|p| p.objects_allocated),
+        );
+        add_delta(
+            &self.gc_objects_freed,
+            g.objects_freed,
+            p_g.map(|p| p.objects_freed),
+        );
+        add_delta(
+            &self.gc_bytes_allocated,
+            g.bytes_allocated,
+            p_g.map(|p| p.bytes_allocated),
+        );
+        add_delta(
+            &self.gc_bytes_freed,
+            g.bytes_freed,
+            p_g.map(|p| p.bytes_freed),
+        );
+        add_delta(
+            &self.gc_cycles_detected,
+            g.cycles_detected,
+            p_g.map(|p| p.cycles_detected),
+        );
 
         let r = &snap.resolver;
         let p_r = prev_ref.map(|p| &p.resolver);
-        add_delta(&self.resolver_local, r.local_resolves, p_r.map(|p| p.local_resolves));
-        add_delta(&self.resolver_remote, r.remote_resolves, p_r.map(|p| p.remote_resolves));
-        add_delta(&self.resolver_failed, r.failed_resolves, p_r.map(|p| p.failed_resolves));
-        add_delta(&self.resolver_cache_hits, r.cache_hits, p_r.map(|p| p.cache_hits));
-        add_delta(&self.resolver_cache_misses, r.cache_misses, p_r.map(|p| p.cache_misses));
+        add_delta(
+            &self.resolver_local,
+            r.local_resolves,
+            p_r.map(|p| p.local_resolves),
+        );
+        add_delta(
+            &self.resolver_remote,
+            r.remote_resolves,
+            p_r.map(|p| p.remote_resolves),
+        );
+        add_delta(
+            &self.resolver_failed,
+            r.failed_resolves,
+            p_r.map(|p| p.failed_resolves),
+        );
+        add_delta(
+            &self.resolver_cache_hits,
+            r.cache_hits,
+            p_r.map(|p| p.cache_hits),
+        );
+        add_delta(
+            &self.resolver_cache_misses,
+            r.cache_misses,
+            p_r.map(|p| p.cache_misses),
+        );
 
         drop(prev);
         *self.prev.lock() = Some(snap.clone());

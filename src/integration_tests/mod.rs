@@ -5261,8 +5261,8 @@ match { a: 2, b: 9 } with {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
             .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
-        let v =
-            run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt).unwrap();
+        let v = run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt)
+            .unwrap();
         assert!(!v.is_nil());
     }
 
@@ -10082,11 +10082,16 @@ match { a: 2, b: 9 } with {
 
         // Roundtrip through .nbc.
         let source_hash = *blake3::hash(b"bootstrap_test_source").as_bytes();
-        let nbc_bytes = module.to_nbc(Some(source_hash)).expect("to_nbc must succeed");
+        let nbc_bytes = module
+            .to_nbc(Some(source_hash))
+            .expect("to_nbc must succeed");
         let artifact = CodeModule::from_nbc(&nbc_bytes).expect("from_nbc must succeed");
 
         assert_eq!(artifact.format_version, 1);
-        assert_eq!(artifact.language_version, crate::format::constants::LANGUAGE_VERSION);
+        assert_eq!(
+            artifact.language_version,
+            crate::format::constants::LANGUAGE_VERSION
+        );
         assert_eq!(artifact.source_hash, Some(source_hash));
         assert_eq!(artifact.module.constants.len(), 1);
         assert_eq!(artifact.module.instructions.len(), 2);
@@ -10095,7 +10100,11 @@ match { a: 2, b: 9 } with {
         let mut vm = crate::vm::VM::new();
         vm.load_module(artifact.module);
         let value = vm.run().expect("decoded module must execute");
-        assert_eq!(value.as_int(), Some(42), "bootstrap test must evaluate to 42");
+        assert_eq!(
+            value.as_int(),
+            Some(42),
+            "bootstrap test must evaluate to 42"
+        );
     }
 
     /// End-to-end: compile and run the bootstrap emitter, verifying it
@@ -10120,8 +10129,10 @@ match { a: 2, b: 9 } with {
         // Build module from known instruction sequence
         let mut m = CodeModule::new("bt");
         m.constants.push(Constant::Int(42));
-        m.instructions.push(Instruction::decode(0x07000000).unwrap());
-        m.instructions.push(Instruction::decode(0x57000000).unwrap());
+        m.instructions
+            .push(Instruction::decode(0x07000000).unwrap());
+        m.instructions
+            .push(Instruction::decode(0x57000000).unwrap());
         m.entry_point = Some(0);
 
         let nbc_bytes = m.to_nbc(None).expect("to_nbc");
@@ -10135,18 +10146,18 @@ match { a: 2, b: 9 } with {
         assert_eq!(value.as_int(), Some(42));
     }
 
-
     #[test]
     fn test_bootstrap_prog3_double() {
         use crate::bytecode::{CodeModule, Constant, Instruction};
         let instrs = [
-            0x07000001, 0x22000100, 0x57000000,
-            0x07000100, 0x03010000, 0x54010100, 0x57000000,
+            0x07000001, 0x22000100, 0x57000000, 0x07000100, 0x03010000, 0x54010100, 0x57000000,
         ];
         let mut m = CodeModule::new("double21");
         m.constants.push(Constant::Int(2));
         m.constants.push(Constant::Int(21));
-        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        for &w in &instrs {
+            m.instructions.push(Instruction::decode(w).unwrap());
+        }
         m.function_table = vec![0, 3];
         m.entry_point = Some(3);
         let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
@@ -10159,15 +10170,15 @@ match { a: 2, b: 9 } with {
     fn test_bootstrap_prog4_fact() {
         use crate::bytecode::{CodeModule, Constant, Instruction};
         let instrs = [
-            0x04010000, 0x43000102, 0x52020003,
-            0x04000000, 0x57000000,
-            0x12000300, 0x21000100, 0x03040000,
-            0x54040100, 0x22030000, 0x57000000,
-            0x07000000, 0x03010000, 0x54010100, 0x57000000,
+            0x04010000, 0x43000102, 0x52020003, 0x04000000, 0x57000000, 0x12000300, 0x21000100,
+            0x03040000, 0x54040100, 0x22030000, 0x57000000, 0x07000000, 0x03010000, 0x54010100,
+            0x57000000,
         ];
         let mut m = CodeModule::new("fact6");
         m.constants.push(Constant::Int(6));
-        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        for &w in &instrs {
+            m.instructions.push(Instruction::decode(w).unwrap());
+        }
         m.function_table = vec![0, 11];
         m.entry_point = Some(11);
         let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
@@ -10198,15 +10209,16 @@ match { a: 2, b: 9 } with {
         assert_eq!(artifact.source_hash, Some(source_hash));
 
         // Verify the library has functions
-        assert!(!artifact.module.function_table.is_empty(),
-            "library must have functions");
+        assert!(
+            !artifact.module.function_table.is_empty(),
+            "library must have functions"
+        );
 
         // Run the library's main function: add(10,20)*3 = 90
         let mut vm = crate::vm::VM::new();
         vm.load_module(artifact.module);
         let value = vm.run().expect("execute library");
-        assert_eq!(value.as_int(), Some(90),
-            "add(10,20) * 3 = 90");
+        assert_eq!(value.as_int(), Some(90), "add(10,20) * 3 = 90");
 
         // Verify the .nbc bytes can be written and re-read
         let temp_dir = std::env::temp_dir();
@@ -10223,4 +10235,3 @@ match { a: 2, b: 9 } with {
         assert_eq!(value2.as_int(), Some(90));
     }
 }
-

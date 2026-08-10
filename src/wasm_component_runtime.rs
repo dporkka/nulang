@@ -14,9 +14,9 @@ mod bindings {
 }
 
 #[cfg(feature = "wasm-backend")]
-use bindings::Actor;
-#[cfg(feature = "wasm-backend")]
 use bindings::host::Host as HostTrait;
+#[cfg(feature = "wasm-backend")]
+use bindings::Actor;
 
 #[cfg(feature = "wasm-backend")]
 pub fn component_config() -> Config {
@@ -118,15 +118,16 @@ impl ComponentRuntime {
 
     fn build_linker(&self, engine: &Engine) -> NuResult<wasmtime::component::Linker<HostState>> {
         let mut linker = wasmtime::component::Linker::<HostState>::new(engine);
-        
+
         // Add the host instance manually with the correct name
         if self.caps.allow_log || self.caps.allow_clock || self.caps.allow_random {
-            let mut inst = linker
-                .instance("nulang:runtime/host")
-                .map_err(|e| NuError::VMError {
-                    msg: format!("wasmtime linker: {}", e),
-                    span: Span::default(),
-                })?;
+            let mut inst =
+                linker
+                    .instance("nulang:runtime/host")
+                    .map_err(|e| NuError::VMError {
+                        msg: format!("wasmtime linker: {}", e),
+                        span: Span::default(),
+                    })?;
             if self.caps.allow_log {
                 inst.func_wrap(
                     "log",
@@ -261,8 +262,6 @@ impl ComponentRuntime {
 #[cfg(feature = "wasm-backend")]
 mod tests {
     use super::*;
-    
-
 
     /// Minimal WAT component that imports `log` and exports `init`.
     const LOG_IMPORT_WAT: &str = r#"
@@ -273,15 +272,18 @@ mod tests {
         )
     "#;
 
-
     #[test]
     fn test_component_capability_gate_denies_log() {
         let wasm = wat::parse_str(LOG_IMPORT_WAT).expect("parse WAT");
-        let rt = ComponentRuntime::new_with_caps(&wasm, Capabilities {
-            allow_log: false,
-            allow_clock: false,
-            allow_random: false,
-        }).expect("new_with_caps");
+        let rt = ComponentRuntime::new_with_caps(
+            &wasm,
+            Capabilities {
+                allow_log: false,
+                allow_clock: false,
+                allow_random: false,
+            },
+        )
+        .expect("new_with_caps");
 
         // Direct instantiation with the linker should fail because the host
         // interface is not added when allow_log is false.
@@ -308,11 +310,15 @@ mod tests {
     #[test]
     fn test_component_capability_gate_allows_log() {
         let wasm = wat::parse_str(LOG_IMPORT_WAT).expect("parse WAT");
-        let rt = ComponentRuntime::new_with_caps(&wasm, Capabilities {
-            allow_log: true,
-            allow_clock: false,
-            allow_random: false,
-        }).expect("new_with_caps");
+        let rt = ComponentRuntime::new_with_caps(
+            &wasm,
+            Capabilities {
+                allow_log: true,
+                allow_clock: false,
+                allow_random: false,
+            },
+        )
+        .expect("new_with_caps");
 
         // Direct instantiation with the linker should succeed because the host
         // interface is added when allow_log is true.

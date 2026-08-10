@@ -261,9 +261,7 @@ fn compile_source(source: &str, file_path: Option<&str>, name: &str) -> NuResult
     let cap_body = |analyzer: &mut CapabilityAnalyzer,
                     ctx: &CapContext,
                     body: &crate::ast::Expr|
-     -> NuResult<()> {
-        analyzer.infer_cap(ctx, body).map(|_| ())
-    };
+     -> NuResult<()> { analyzer.infer_cap(ctx, body).map(|_| ()) };
     let seed_from_params = |ctx: &mut CapContext, params: &[crate::ast::Param]| {
         for p in params {
             if let Some(c) = p.cap {
@@ -390,7 +388,9 @@ fn build_snapshot(vm: &VM, program: &str) -> Json {
         idx = vm.frames().get(i).and_then(|f| f.caller_idx);
     }
     for (id, fi) in chain.iter().enumerate() {
-        let Some(f) = vm.frames().get(*fi) else { continue };
+        let Some(f) = vm.frames().get(*fi) else {
+            continue;
+        };
         let module = vm.modules().get(f.module_idx);
         let Some(df) = module.and_then(|m| debug_fn_for(m, f.pc)) else {
             continue; // anonymous VM-plumbing frame
@@ -511,7 +511,8 @@ fn debuggee_main(
                         Ok(DebugCommand::GetState(reply)) => {
                             let snap = build_snapshot(&vm, &program);
                             let _ = reply.send(snap);
-                        }                        Ok(DebugCommand::Terminate) => return,
+                        }
+                        Ok(DebugCommand::Terminate) => return,
                         Ok(DebugCommand::Start) => {}
                         Err(_) => return,
                     }
@@ -727,9 +728,13 @@ fn handle_request<W: Write>(
                         match m.resolve_line(line) {
                             Some((pc, actual_line)) => {
                                 c.breakpoints.push(ResolvedBreakpoint { pc });
-                                result.push(json!({ "id": id, "verified": true, "line": actual_line }));
+                                result.push(
+                                    json!({ "id": id, "verified": true, "line": actual_line }),
+                                );
                             }
-                            None => result.push(json!({ "id": id, "verified": false, "line": line })),
+                            None => {
+                                result.push(json!({ "id": id, "verified": false, "line": line }))
+                            }
                         }
                     }
                     result
@@ -789,46 +794,53 @@ fn handle_request<W: Write>(
             control.lock().pause_requested = true;
             respond(writer, seq, request_seq, command, Ok(json!({})));
         }
-        "stackTrace" => {
-            match request_snapshot(cmd_tx) {
-                Ok(snap) => {
-                    let frames: Vec<Json> = snap
-                        .get("frames")
-                        .and_then(|f| f.as_array())
-                        .cloned()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|f| {
-                            json!({
-                                "id": f["id"],
-                                "name": f["name"],
-                                "line": f["line"],
-                                "column": 1,
-                                "source": { "path": f["source"] }
-                            })
+        "stackTrace" => match request_snapshot(cmd_tx) {
+            Ok(snap) => {
+                let frames: Vec<Json> = snap
+                    .get("frames")
+                    .and_then(|f| f.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|f| {
+                        json!({
+                            "id": f["id"],
+                            "name": f["name"],
+                            "line": f["line"],
+                            "column": 1,
+                            "source": { "path": f["source"] }
                         })
-                        .collect();
-                    respond(
-                        writer,
-                        seq,
-                        request_seq,
-                        command,
-                        Ok(json!({ "stackFrames": frames, "totalFrames": frames.len() })),
-                    );
-                }
-                Err(e) => respond(writer, seq, request_seq, command, Err(e)),
+                    })
+                    .collect();
+                respond(
+                    writer,
+                    seq,
+                    request_seq,
+                    command,
+                    Ok(json!({ "stackFrames": frames, "totalFrames": frames.len() })),
+                );
             }
-        }
+            Err(e) => respond(writer, seq, request_seq, command, Err(e)),
+        },
         "scopes" => {
             let frame_id = args.get("frameId").and_then(|v| v.as_i64()).unwrap_or(0);
             let scopes = json!([
                 { "name": "Locals", "variablesReference": frame_id * 2 + 1, "expensive": false },
                 { "name": "Registers", "variablesReference": frame_id * 2 + 2, "expensive": false }
             ]);
-            respond(writer, seq, request_seq, command, Ok(json!({ "scopes": scopes })));
+            respond(
+                writer,
+                seq,
+                request_seq,
+                command,
+                Ok(json!({ "scopes": scopes })),
+            );
         }
         "variables" => {
-            let vref = args.get("variablesReference").and_then(|v| v.as_i64()).unwrap_or(0);
+            let vref = args
+                .get("variablesReference")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             // Odd variablesReference = Locals scope, even = Registers scope
             // (see the `scopes` handler's encoding frameId*2+{1,2}).
             let is_registers = vref % 2 == 0;
@@ -858,7 +870,13 @@ fn handle_request<W: Write>(
                                 .collect()
                         })
                         .unwrap_or_default();
-                    respond(writer, seq, request_seq, command, Ok(json!({ "variables": vars })));
+                    respond(
+                        writer,
+                        seq,
+                        request_seq,
+                        command,
+                        Ok(json!({ "variables": vars })),
+                    );
                 }
                 Err(e) => respond(writer, seq, request_seq, command, Err(e)),
             }
@@ -878,16 +896,42 @@ fn handle_request<W: Write>(
                         .and_then(|arr| arr.get(frame_id))
                         .and_then(|f| f.get("locals"))
                         .and_then(|l| l.as_array())
-                        .and_then(|arr| arr.iter().find(|kv| kv[0].as_str() == Some(expr.as_str())));
+                        .and_then(|arr| {
+                            arr.iter().find(|kv| kv[0].as_str() == Some(expr.as_str()))
+                        });
                     match found {
-                        Some(kv) => respond(writer, seq, request_seq, command, Ok(json!({ "result": kv[1] }))),
+                        Some(kv) => respond(
+                            writer,
+                            seq,
+                            request_seq,
+                            command,
+                            Ok(json!({ "result": kv[1] })),
+                        ),
                         None => {
                             if let Ok(v) = expr.parse::<i64>() {
-                                respond(writer, seq, request_seq, command, Ok(json!({ "result": format!("{}", v) })));
+                                respond(
+                                    writer,
+                                    seq,
+                                    request_seq,
+                                    command,
+                                    Ok(json!({ "result": format!("{}", v) })),
+                                );
                             } else if let Ok(v) = expr.parse::<f64>() {
-                                respond(writer, seq, request_seq, command, Ok(json!({ "result": format!("{}", v) })));
+                                respond(
+                                    writer,
+                                    seq,
+                                    request_seq,
+                                    command,
+                                    Ok(json!({ "result": format!("{}", v) })),
+                                );
                             } else if expr == "true" || expr == "false" {
-                                respond(writer, seq, request_seq, command, Ok(json!({ "result": expr })));
+                                respond(
+                                    writer,
+                                    seq,
+                                    request_seq,
+                                    command,
+                                    Ok(json!({ "result": expr })),
+                                );
                             } else {
                                 respond(
                                     writer,
@@ -910,9 +954,13 @@ fn handle_request<W: Write>(
             }
             respond(writer, seq, request_seq, command, Ok(json!({})));
         }
-        "setExceptionBreakpoints" => {
-            respond(writer, seq, request_seq, command, Ok(json!({ "breakpoints": [] })))
-        }
+        "setExceptionBreakpoints" => respond(
+            writer,
+            seq,
+            request_seq,
+            command,
+            Ok(json!({ "breakpoints": [] })),
+        ),
         _ => respond(
             writer,
             seq,
@@ -943,10 +991,7 @@ fn compile_file(path: &str) -> Result<CodeModule, String> {
 pub fn run_dap_server() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    run_dap_server_io(
-        std::io::BufReader::new(stdin),
-        BufWriter::new(stdout),
-    );
+    run_dap_server_io(std::io::BufReader::new(stdin), BufWriter::new(stdout));
 }
 
 /// Drive the DAP server over arbitrary `Read`/`Write` streams (used by tests
@@ -1068,11 +1113,8 @@ pub(crate) mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "nulang-dap-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nulang-dap-test-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join("prog.nula");
         std::fs::write(&path, source).unwrap();
@@ -1136,13 +1178,21 @@ pub(crate) mod tests {
         let script = vec![
             req(1, "initialize", json!({})),
             req(2, "launch", json!({ "program": "<prog>" })),
-            req(3, "setBreakpoints", json!({ "source": { "path": "<prog>" }, "breakpoints": [ { "line": 3 } ] })),
+            req(
+                3,
+                "setBreakpoints",
+                json!({ "source": { "path": "<prog>" }, "breakpoints": [ { "line": 3 } ] }),
+            ),
             req(4, "configurationDone", json!({})),
         ];
         let msgs = run_session(source, &script);
 
         let stopped = msgs.iter().find(|m| m["event"] == "stopped");
-        assert!(stopped.is_some(), "expected a stopped event, got {:#?}", msgs);
+        assert!(
+            stopped.is_some(),
+            "expected a stopped event, got {:#?}",
+            msgs
+        );
         assert_eq!(stopped.unwrap()["body"]["reason"], "breakpoint");
     }
 
@@ -1152,14 +1202,26 @@ pub(crate) mod tests {
         let script = vec![
             req(1, "initialize", json!({})),
             req(2, "launch", json!({ "program": "<prog>" })),
-            req(3, "setBreakpoints", json!({ "source": { "path": "<prog>" }, "breakpoints": [] })),
+            req(
+                3,
+                "setBreakpoints",
+                json!({ "source": { "path": "<prog>" }, "breakpoints": [] }),
+            ),
             req(4, "configurationDone", json!({})),
         ];
         let msgs = run_session(source, &script);
 
         // No breakpoints set -> the program runs to completion.
-        assert!(msgs.iter().any(|m| m["event"] == "exited"), "expected exited, got {:#?}", msgs);
-        assert!(msgs.iter().any(|m| m["event"] == "terminated"), "expected terminated, got {:#?}", msgs);
+        assert!(
+            msgs.iter().any(|m| m["event"] == "exited"),
+            "expected exited, got {:#?}",
+            msgs
+        );
+        assert!(
+            msgs.iter().any(|m| m["event"] == "terminated"),
+            "expected terminated, got {:#?}",
+            msgs
+        );
     }
 
     #[test]
@@ -1169,52 +1231,94 @@ pub(crate) mod tests {
         let script = vec![
             req(1, "initialize", json!({})),
             req(2, "launch", json!({ "program": "<prog>" })),
-            req(3, "setBreakpoints", json!({ "source": { "path": "<prog>" }, "breakpoints": [ { "line": 2 } ] })),
+            req(
+                3,
+                "setBreakpoints",
+                json!({ "source": { "path": "<prog>" }, "breakpoints": [ { "line": 2 } ] }),
+            ),
             req(4, "configurationDone", json!({})),
             req(5, "stackTrace", json!({ "threadId": 1 })),
             req(6, "scopes", json!({ "frameId": 0 })),
-            req(7, "variables", json!({ "variablesReference": 1 })),   // Locals scope of frame 0
-            req(8, "variables", json!({ "variablesReference": 2 })),   // Registers scope of frame 0
+            req(7, "variables", json!({ "variablesReference": 1 })), // Locals scope of frame 0
+            req(8, "variables", json!({ "variablesReference": 2 })), // Registers scope of frame 0
             req(9, "evaluate", json!({ "expression": "a", "frameId": 0 })),
         ];
         let msgs = run_session(source, &script);
 
         let stopped = msgs.iter().find(|m| m["event"] == "stopped");
-        assert!(stopped.is_some(), "expected a stopped event, got {:#?}", msgs);
+        assert!(
+            stopped.is_some(),
+            "expected a stopped event, got {:#?}",
+            msgs
+        );
         assert_eq!(stopped.unwrap()["body"]["reason"], "breakpoint");
 
         // stackTrace: frame carries a real source path (the program file).
-        let st = msgs.iter().find(|m| m["command"] == "stackTrace" && m["type"] == "response");
+        let st = msgs
+            .iter()
+            .find(|m| m["command"] == "stackTrace" && m["type"] == "response");
         let st = st.expect("expected a stackTrace response");
-        assert!(st["success"].as_bool().unwrap_or(false), "stackTrace failed: {:#?}", st);
+        assert!(
+            st["success"].as_bool().unwrap_or(false),
+            "stackTrace failed: {:#?}",
+            st
+        );
         let frame = &st["body"]["stackFrames"][0];
-        assert!(frame["source"]["path"].is_string(), "source.path must be a path, got {:#?}", frame["source"]);
+        assert!(
+            frame["source"]["path"].is_string(),
+            "source.path must be a path, got {:#?}",
+            frame["source"]
+        );
         assert!(!frame["name"].as_str().unwrap_or("").is_empty());
 
         // scopes: Locals + Registers.
-        let scopes = msgs.iter().find(|m| m["command"] == "scopes" && m["type"] == "response");
+        let scopes = msgs
+            .iter()
+            .find(|m| m["command"] == "scopes" && m["type"] == "response");
         let scopes = scopes.expect("expected a scopes response");
-        let names: Vec<_> = scopes["body"]["scopes"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap_or("")).collect();
-        assert!(names.contains(&"Locals") && names.contains(&"Registers"), "got scopes {:#?}", names);
+        let names: Vec<_> = scopes["body"]["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            names.contains(&"Locals") && names.contains(&"Registers"),
+            "got scopes {:#?}",
+            names
+        );
 
         // variables (Locals): the paused frame exposes local `a` = 1.
-        let vars = msgs.iter().find(|m| m["command"] == "variables" && m["type"] == "response" && m["request_seq"] == 7);
+        let vars = msgs.iter().find(|m| {
+            m["command"] == "variables" && m["type"] == "response" && m["request_seq"] == 7
+        });
         let vars = vars.expect("expected a Locals variables response");
-        let a = vars["body"]["variables"].as_array().unwrap().iter().find(|v| v["name"] == "a");
+        let a = vars["body"]["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "a");
         assert!(a.is_some(), "local 'a' not found in {:#?}", vars);
         assert_eq!(a.unwrap()["value"], "1");
 
         // variables (Registers): non-nil registers are reported (r16 = LOCAL_BASE for `a`).
-        let regs = msgs.iter().find(|m| m["command"] == "variables" && m["type"] == "response" && m["request_seq"] == 8);
+        let regs = msgs.iter().find(|m| {
+            m["command"] == "variables" && m["type"] == "response" && m["request_seq"] == 8
+        });
         let regs = regs.expect("expected a Registers variables response");
         assert!(
-            regs["body"]["variables"].as_array().map(|v| !v.is_empty()).unwrap_or(false),
+            regs["body"]["variables"]
+                .as_array()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false),
             "expected non-empty registers, got {:#?}",
             regs
         );
 
         // evaluate "a" resolves to 1.
-        let ev = msgs.iter().find(|m| m["command"] == "evaluate" && m["type"] == "response");
+        let ev = msgs
+            .iter()
+            .find(|m| m["command"] == "evaluate" && m["type"] == "response");
         let ev = ev.expect("expected an evaluate response");
         assert_eq!(ev["body"]["result"], "1");
     }

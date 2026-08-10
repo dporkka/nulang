@@ -120,9 +120,11 @@ mod tests {
     use super::*;
     #[test]
     fn test_language_version_str() {
-        assert!(LANGUAGE_VERSION_STR.starts_with(&LANGUAGE_VERSION.to_string()), "String version should match numeric");
+        assert!(
+            LANGUAGE_VERSION_STR.starts_with(&LANGUAGE_VERSION.to_string()),
+            "String version should match numeric"
+        );
     }
-
 
     #[test]
     fn test_magic_bytes_are_ascii() {

@@ -275,16 +275,17 @@ impl WasmBackend {
         for (li, &bid) in block_order.iter().enumerate() {
             labels.insert(bid, li as u32);
         }
-        
+
         let vec_loops = crate::mir_wasm_simd::find_vectorizable_loops(func);
-        let vec_body_to_loop: HashMap<BlockId, &crate::mir_wasm_simd::VecLoop> = vec_loops.iter().map(|l| (l.body, l)).collect();
+        let vec_body_to_loop: HashMap<BlockId, &crate::mir_wasm_simd::VecLoop> =
+            vec_loops.iter().map(|l| (l.body, l)).collect();
 
         let state_local = 251u32;
         body.instruction(&Instruction::I64Const(0));
         body.instruction(&Instruction::LocalSet(state_local));
 
         body.instruction(&Instruction::Loop(BlockType::Empty));
-        
+
         for _ in &block_order {
             body.instruction(&Instruction::Block(BlockType::Empty));
         }
@@ -292,12 +293,15 @@ impl WasmBackend {
         body.instruction(&Instruction::LocalGet(state_local));
         body.instruction(&Instruction::I32WrapI64);
         let targets: Vec<u32> = (0..block_order.len() as u32).collect();
-        body.instruction(&Instruction::BrTable(std::borrow::Cow::Owned(targets.clone()), targets.last().copied().unwrap_or(0)));
+        body.instruction(&Instruction::BrTable(
+            std::borrow::Cow::Owned(targets.clone()),
+            targets.last().copied().unwrap_or(0),
+        ));
 
         for (li, &bid) in block_order.iter().enumerate() {
             let li = li as u32;
             body.instruction(&Instruction::End); // end block
-            
+
             let block = &func.blocks[bid.0 as usize];
             if let Some(vloop) = vec_body_to_loop.get(&bid) {
                 self.compile_simd_body(&mut body, vloop, func);
@@ -306,7 +310,7 @@ impl WasmBackend {
                     self.compile_stmt(&mut body, stmt, func);
                 }
             }
-            
+
             match &block.terminator {
                 Terminator::Return(Some(l)) => {
                     body.instruction(&Instruction::LocalGet(self.mir_local(l, func)));
@@ -323,35 +327,43 @@ impl WasmBackend {
                     } else {
                         body.instruction(&Instruction::I64Const(tl as i64));
                         body.instruction(&Instruction::LocalSet(state_local));
-                        body.instruction(&Instruction::Br((block_order.len() - 1 - li as usize) as u32));
+                        body.instruction(&Instruction::Br(
+                            (block_order.len() - 1 - li as usize) as u32,
+                        ));
                     }
                 }
                 Terminator::Branch { cond, then_, else_ } => {
                     body.instruction(&Instruction::LocalGet(self.mir_local(cond, func)));
-                    body.instruction(&Instruction::I64Const(crate::value_layout::tag_bool(false) as i64));
+                    body.instruction(&Instruction::I64Const(
+                        crate::value_layout::tag_bool(false) as i64
+                    ));
                     body.instruction(&Instruction::I64Ne);
                     body.instruction(&Instruction::If(BlockType::Empty));
-                    
+
                     let tl = labels.get(then_).copied().unwrap_or(0);
                     if tl > li {
                         body.instruction(&Instruction::Br(tl - li));
                     } else {
                         body.instruction(&Instruction::I64Const(tl as i64));
                         body.instruction(&Instruction::LocalSet(state_local));
-                        body.instruction(&Instruction::Br((block_order.len() - li as usize) as u32));
+                        body.instruction(&Instruction::Br(
+                            (block_order.len() - li as usize) as u32,
+                        ));
                     }
-                    
+
                     body.instruction(&Instruction::Else);
-                    
+
                     let el = labels.get(else_).copied().unwrap_or(0);
                     if el > li {
                         body.instruction(&Instruction::Br(el - li));
                     } else {
                         body.instruction(&Instruction::I64Const(el as i64));
                         body.instruction(&Instruction::LocalSet(state_local));
-                        body.instruction(&Instruction::Br((block_order.len() - li as usize) as u32));
+                        body.instruction(&Instruction::Br(
+                            (block_order.len() - li as usize) as u32,
+                        ));
                     }
-                    
+
                     body.instruction(&Instruction::End); // end If
                 }
                 Terminator::Resume(_) | Terminator::Unterminated => {
@@ -360,15 +372,20 @@ impl WasmBackend {
                 }
             }
         }
-        
+
         body.instruction(&Instruction::End); // end Loop
         body.instruction(&Instruction::I64Const(crate::value_layout::TAG_NIL as i64)); // default return
         body.instruction(&Instruction::End); // function end
-        
+
         self.codes.function(&body);
     }
 
-    fn compile_simd_body(&self, body: &mut Function, vloop: &crate::mir_wasm_simd::VecLoop, func: &mir::Function) {
+    fn compile_simd_body(
+        &self,
+        body: &mut Function,
+        vloop: &crate::mir_wasm_simd::VecLoop,
+        func: &mir::Function,
+    ) {
         let pm = value_layout::PAYLOAD_MASK as i64;
         let i_loc = self.mir_local(&vloop.induction, func);
         let a_loc = self.mir_local(&vloop.array_a, func);
@@ -387,7 +404,11 @@ impl WasmBackend {
         body.instruction(&Instruction::I64Const(pm));
         body.instruction(&Instruction::I64And);
         body.instruction(&Instruction::I32WrapI64);
-        body.instruction(&Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
         body.instruction(&Instruction::LocalSet(scratch_len)); // untagged i64 len
 
         // base_a = a & pm
@@ -457,8 +478,8 @@ impl WasmBackend {
         // PM as two i64 lanes: PAYLOAD_MASK = 0x0000_FFFF_FFFF_FFFF
         // little-endian bytes: [0xFF; 6][0x00; 2][0xFF; 6][0x00; 2]
         static PM128: [u8; 16] = [
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x00, 0x00,
         ];
         self.emit_v128_const(body, &PM128);
         self.emit_v128_and(body); // a_v128 & PM128 → untagged a
@@ -476,8 +497,8 @@ impl WasmBackend {
         // TAG_INT = 0x7FFB_0000_0000_0000
         // LE bytes: [0x00; 6][0xFB, 0x7F][0x00; 6][0xFB, 0x7F]
         static TAG128: [u8; 16] = [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFB, 0x7F,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFB, 0x7F,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFB, 0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xFB, 0x7F,
         ];
         self.emit_v128_const(body, &TAG128);
         self.emit_v128_or(body);
@@ -533,20 +554,32 @@ impl WasmBackend {
         compute_offset_scalar(body);
         body.instruction(&Instruction::I64Add);
         body.instruction(&Instruction::I32WrapI64);
-        body.instruction(&Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
 
         // b_addr
         body.instruction(&Instruction::LocalGet(scratch_base_b));
         compute_offset_scalar(body);
         body.instruction(&Instruction::I64Add);
         body.instruction(&Instruction::I32WrapI64);
-        body.instruction(&Instruction::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
 
         // scalar binop
         self.emit_binop(body, vloop.op);
 
         // store scalar
-        body.instruction(&Instruction::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
 
         // i += 1 (tagged)
         body.instruction(&Instruction::LocalGet(i_loc));
@@ -580,9 +613,7 @@ impl WasmBackend {
             Stmt::ArrayStore { arr, idx, src } => {
                 self.compile_array_store(body, arr, idx, src, func);
             }
-            Stmt::StoreFieldNamed { .. }
-            | Stmt::Emit { .. }
-            | Stmt::StateSet { .. } => {
+            Stmt::StoreFieldNamed { .. } | Stmt::Emit { .. } | Stmt::StateSet { .. } => {
                 // records/effects/actor state are unsupported in the WASM backend
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
                 body.instruction(&Instruction::Drop);
@@ -859,7 +890,6 @@ impl WasmBackend {
     // compiler to emit untagged array element IR. This module provides
     // the lowering infrastructure that such compiler changes can target.
 
-    
     /// Emit raw WASM SIMD opcode bytes. `opcode` is the LEB128-encoded
     /// SIMD opcode (without the 0xFD prefix), followed by optional
     fn emit_simd(&self, body: &mut Function, opcode: u32, immediates: &[u8]) {
@@ -875,7 +905,7 @@ impl WasmBackend {
     }
     /// Emit a SIMD memory load: `v128.load align=4 offset=<offset>`.
     /// Returns the v128 value on the stack.
-    
+
     fn emit_simd_load(&self, body: &mut Function, offset: u32) {
         // v128.load opcode = 0x00; align=4 (natural for v128), offset as LEB128.
         let mut buf = [0u8; 5];
@@ -891,7 +921,7 @@ impl WasmBackend {
 
     /// Emit a SIMD memory store: `v128.store align=4 offset=<offset>`.
     /// Consumes the v128 value from the stack.
-    
+
     fn emit_simd_store(&self, body: &mut Function, offset: u32) {
         let mut buf = [0u8; 5];
         let olen = leb128_u32(offset, &mut buf);
@@ -904,7 +934,7 @@ impl WasmBackend {
     }
 
     /// Emit a SIMD binary operation on i64x2 lanes.
-    
+
     fn emit_simd_i64x2_binop(&self, body: &mut Function, op: crate::ast::BinOp) {
         use crate::ast::BinOp;
         let simd_op: u32 = match op {
@@ -917,7 +947,7 @@ impl WasmBackend {
     }
 
     /// Emit a SIMD binary operation on f64x2 lanes.
-    
+
     fn emit_simd_f64x2_binop(&self, body: &mut Function, op: crate::ast::BinOp) {
         use crate::ast::BinOp;
         let simd_op: u32 = match op {
@@ -929,7 +959,6 @@ impl WasmBackend {
         };
         self.emit_simd(body, simd_op, &[]);
     }
-
 
     /// Emit v128.const with 16 raw bytes.
     fn emit_v128_const(&self, body: &mut Function, bytes: &[u8; 16]) {
@@ -950,12 +979,7 @@ impl WasmBackend {
 
     // ── Array helpers ──────────────────────────────────────────────
 
-    fn compile_array_lit(
-        &self,
-        body: &mut Function,
-        elems: &[LocalId],
-        func: &mir::Function,
-    ) {
+    fn compile_array_lit(&self, body: &mut Function, elems: &[LocalId], func: &mir::Function) {
         let scratch = 255u32;
         let size = ((elems.len() + 1) * 8) as i32;
         let len = elems.len() as i64;
@@ -1032,12 +1056,7 @@ impl WasmBackend {
         }));
     }
 
-    fn compile_array_len(
-        &self,
-        body: &mut Function,
-        arr: &LocalId,
-        func: &mir::Function,
-    ) {
+    fn compile_array_len(&self, body: &mut Function, arr: &LocalId, func: &mir::Function) {
         let pm = value_layout::PAYLOAD_MASK as i64;
         // base = arr & PAYLOAD_MASK
         body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
@@ -1104,7 +1123,6 @@ impl WasmBackend {
     /// replaces the scalar pair with `v128.load` + vector op + `v128.store`.
     ///
     /// Returns `true` if any SIMD lowering was applied.
-    
 
     /// Attempt SIMD lowering for a binary operation whose operands are
     /// array-element loads. When both `a` and `b` are adjacent array element
@@ -1320,4 +1338,5 @@ impl crate::backends::WasmBackend for WasmBackend {
     fn run(&mut self, wasm: &[u8]) -> crate::types::NuResult<crate::vm::Value> {
         let mut runtime = crate::wasm_runtime::WasmRuntime::new(wasm, None)?;
         runtime.run()
-    }}
+    }
+}

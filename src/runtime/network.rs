@@ -3325,12 +3325,14 @@ impl NetworkTransport for DeterministicNetworkTransport {
 
 #[cfg(feature = "tls")]
 mod tls_provider {
-    use crate::backends::{DefaultTlsProvider, ServerTlsConfig, ClientTlsConfig, TlsStream, TlsProvider};
-    use rustls::{ServerConfig, ClientConfig};
+    use crate::backends::{
+        ClientTlsConfig, DefaultTlsProvider, ServerTlsConfig, TlsProvider, TlsStream,
+    };
+    use parking_lot::Mutex;
+    use rustls::{ClientConfig, ServerConfig};
     use std::io::{self, Read, Write};
     use std::net::TcpStream;
     use std::sync::Arc;
-    use parking_lot::Mutex;
 
     /// rustls-backed server TLS configuration.
     pub struct RustlsServerConfig {
@@ -3380,11 +3382,17 @@ mod tls_provider {
             match self {
                 RustlsStream::Server(s) => {
                     let locked = s.lock();
-                    locked.conn.peer_certificates().map(|c| c.iter().map(|cert| cert.to_vec()).collect())
+                    locked
+                        .conn
+                        .peer_certificates()
+                        .map(|c| c.iter().map(|cert| cert.to_vec()).collect())
                 }
                 RustlsStream::Client(s) => {
                     let locked = s.lock();
-                    locked.conn.peer_certificates().map(|c| c.iter().map(|cert| cert.to_vec()).collect())
+                    locked
+                        .conn
+                        .peer_certificates()
+                        .map(|c| c.iter().map(|cert| cert.to_vec()).collect())
                 }
             }
         }
@@ -3412,9 +3420,9 @@ mod tls_provider {
             config: Box<dyn ServerTlsConfig>,
         ) -> io::Result<Box<dyn TlsStream>> {
             let any_config = config as Box<dyn std::any::Any>;
-            let rustls_config = any_config
-                .downcast::<RustlsServerConfig>()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Expected RustlsServerConfig"))?;
+            let rustls_config = any_config.downcast::<RustlsServerConfig>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Expected RustlsServerConfig")
+            })?;
             let conn = rustls::ServerConnection::new(Arc::clone(&rustls_config.config))
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             Ok(Box::new(RustlsStream::Server(Arc::new(Mutex::new(
@@ -3428,11 +3436,14 @@ mod tls_provider {
             config: Box<dyn ClientTlsConfig>,
         ) -> io::Result<Box<dyn TlsStream>> {
             let any_config = config as Box<dyn std::any::Any>;
-            let rustls_config = any_config
-                .downcast::<RustlsClientConfig>()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Expected RustlsClientConfig"))?;
-            let conn = rustls::ClientConnection::new(Arc::clone(&rustls_config.config), rustls::pki_types::ServerName::try_from("localhost").unwrap())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let rustls_config = any_config.downcast::<RustlsClientConfig>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Expected RustlsClientConfig")
+            })?;
+            let conn = rustls::ClientConnection::new(
+                Arc::clone(&rustls_config.config),
+                rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             Ok(Box::new(RustlsStream::Client(Arc::new(Mutex::new(
                 rustls::StreamOwned::new(conn, stream),
             )))))

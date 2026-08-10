@@ -755,11 +755,17 @@ impl CrdtManager {
 
     /// Get the CRDT ID for a specific actor field, if registered.
     pub fn get_field_id(&self, actor_id: u64, field_name: &str) -> Option<CrdtId> {
-        self.field_map.get(&(actor_id, field_name.to_string())).copied()
+        self.field_map
+            .get(&(actor_id, field_name.to_string()))
+            .copied()
     }
 
     /// Get a mutable reference to a CRDT entry by actor ID and field name.
-    pub fn get_field_mut<T: CrdtEntryInner>(&mut self, actor_id: u64, field_name: &str) -> Option<&mut T> {
+    pub fn get_field_mut<T: CrdtEntryInner>(
+        &mut self,
+        actor_id: u64,
+        field_name: &str,
+    ) -> Option<&mut T> {
         self.get_field_id(actor_id, field_name)
             .and_then(|id| self.entries.get_mut(&id))
             .and_then(|e| T::try_from_entry(e))

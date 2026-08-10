@@ -97,7 +97,6 @@ impl NativeFunction {
     }
 }
 
-
 #[derive(Debug, Default, Clone)]
 pub enum FfiPolicy {
     #[default]
@@ -128,7 +127,6 @@ impl FfiRegistry {
             FfiPolicy::Allowlist(allowed) => allowed.contains(path),
         }
     }
-
 
     /// Load a dynamic library and keep it open for symbol resolution.
     ///
@@ -224,9 +222,12 @@ mod tests {
         // By default, AllowAll permits any load. We'll use a nonexistent lib to prove
         // it tries to load it (which fails) rather than rejecting by policy.
         let nonexistent = "libnonexistent_does_not_exist.so";
-        
+
         let err = unsafe { reg.load_library(nonexistent) }.unwrap_err();
-        assert!(!err.contains("not in allowlist"), "Should not be blocked by policy");
+        assert!(
+            !err.contains("not in allowlist"),
+            "Should not be blocked by policy"
+        );
 
         // Now set a strict allowlist
         let mut allowed = HashSet::new();
@@ -235,11 +236,17 @@ mod tests {
 
         // Unallowed library fails by policy
         let err_denied = unsafe { reg.load_library(nonexistent) }.unwrap_err();
-        assert_eq!(err_denied, format!("FFI: library '{}' not in allowlist", nonexistent));
+        assert_eq!(
+            err_denied,
+            format!("FFI: library '{}' not in allowlist", nonexistent)
+        );
 
         // Allowed library fails at load time (since it doesn't exist), not by policy
         let err_allowed = unsafe { reg.load_library("liballowed.so") }.unwrap_err();
-        assert!(!err_allowed.contains("not in allowlist"), "Should not be blocked by policy");
+        assert!(
+            !err_allowed.contains("not in allowlist"),
+            "Should not be blocked by policy"
+        );
     }
 
     use crate::ffi::marshal::{CType, Signature};
