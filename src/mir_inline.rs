@@ -480,6 +480,7 @@ fn inline_one_call(
                 id: new_id,
                 name: local.name.clone(),
                 ty: local.ty.clone(),
+                cap: local.cap,
             });
         }
     }

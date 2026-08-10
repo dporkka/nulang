@@ -10,7 +10,7 @@
 
 use crate::ast::{BinOp, UnOp};
 use crate::bytecode::{ActorMeta, Constant};
-use crate::types::Type;
+use crate::types::{Capability, Type};
 
 // ---------------------------------------------------------------------------
 // IDs and basic structures
@@ -27,6 +27,7 @@ pub struct Local {
     pub id: LocalId,
     pub name: Option<String>,
     pub ty: Type,
+    pub cap: Capability,
 }
 
 // ---------------------------------------------------------------------------
@@ -403,20 +404,29 @@ impl FunctionBuilder {
     }
 
     pub fn add_local(&mut self, name: impl Into<String>, ty: Type) -> LocalId {
+        self.add_local_with_cap(name, ty, Capability::Tag)
+    }
+
+    pub fn add_local_with_cap(&mut self, name: impl Into<String>, ty: Type, cap: Capability) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
         self.locals.push(Local {
             id,
             name: Some(name.into()),
             ty,
+            cap,
         });
         id
     }
 
     pub fn add_temp(&mut self, ty: Type) -> LocalId {
+        self.add_temp_with_cap(ty, Capability::Tag)
+    }
+
+    pub fn add_temp_with_cap(&mut self, ty: Type, cap: Capability) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
-        self.locals.push(Local { id, name: None, ty });
+        self.locals.push(Local { id, name: None, ty, cap });
         id
     }
 
@@ -662,6 +672,7 @@ mod tests {
             id: LocalId(0),
             name: Some("x".into()),
             ty: Type::int(),
+            cap: Capability::Tag,
         };
         assert_eq!(local.id, LocalId(0));
         assert_eq!(local.name, Some("x".into()));

@@ -3,6 +3,7 @@
 //! This module eliminates ~60 lines of duplicated constants and helper functions
 //! between `src/jit/typed_compiler.rs` and `src/aot/codegen.rs`.
 
+use crate::types::Capability;
 use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
@@ -84,4 +85,17 @@ pub fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
     let true_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1);
     let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 0);
     builder.ins().select(cond, true_val, false_val)
+}
+
+/// Build MemFlags for a heap operation given the source register's capability.
+/// val/box → readonly (loads can be CSE'd). iso/LinearIso → no special flags
+/// (Cranelift 0.132 needs AliasRegion for true noalias).
+#[inline]
+pub fn memflags_for_capability(cap: Capability) -> MemFlags {
+    let mut flags = MemFlags::new();
+    match cap {
+        Capability::Val | Capability::Box => { flags.set_readonly(); }
+        _ => {}
+    }
+    flags
 }

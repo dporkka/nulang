@@ -399,7 +399,7 @@ pub(crate) fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: us
 /// Register all runtime helper functions with the JIT module.
 /// Returns a map from helper name → FuncRef.
 /// Single source of truth: `RuntimeHelper::ALL` from `helpers.rs`.
-fn register_runtime_helpers<M: Module>(
+pub(crate) fn register_runtime_helpers<M: Module>(
     module: &mut M,
     builder: &mut FunctionBuilder,
 ) -> HashMap<&'static str, FuncRef> {
