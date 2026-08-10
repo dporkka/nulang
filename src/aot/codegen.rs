@@ -2640,45 +2640,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tmp_debug_strcat_mir() {
-        // Full pipeline → MIR, dump statements, AOT-run the divergent source.
-        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-        use crate::typechecker::TypeChecker;
-        let source = "let s = \"hello\"; s + 2 + 3";
-        let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex().unwrap();
-        let mut parser = Parser::new(tokens);
-        let ast = parser.parse_module().unwrap();
-        let mut tc = TypeChecker::new();
-        tc.check_module(&ast).unwrap();
-        let mut ec = EffectChecker::new();
-        ec.check_module(&ast.decls).unwrap();
-        let mut ca = CapabilityAnalyzer::new();
-        let ctx = CapContext::new();
-        for d in crate::effect_checker::flatten_decls(&ast.decls) {
-            if let crate::ast::Decl::Function { body, .. } = d {
-                ca.infer_cap(&ctx, body).unwrap();
-            }
-        }
-        let hir = crate::hir_lower::lower_module(&ast);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
-        eprintln!("=== MIR for {:?} ===", source);
-        let aot = crate::aot::AotModule::compile(&mir_module);
-        match aot {
-            Ok(m) => {
-                let r = m.run();
-                let raw = r.unwrap_or(0);
-                let v = crate::vm::Value::from_raw(raw);
-                eprintln!("AOT raw={} value={:?}", raw, v.to_string_repr());
-            }
-            Err(e) => eprintln!("AOT compile error: {:?}", e),
-        }
-    }
-
-    #[test]
-    fn test_aot_compile_empty_function() {
+    fn test_ffi_call() {
         let mut builder = mir::FunctionBuilder::new("empty", None);
         builder.terminate(mir::Terminator::Return(None));
         let func = builder.build();
