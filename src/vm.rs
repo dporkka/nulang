@@ -1155,6 +1155,66 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             _ => None,
         }
     }
+
+    /// Module-aware built-in effect dispatch for the standalone (actor-free)
+    /// VM. The default trait impl delegates straight to
+    /// `perform_builtin_effect` and drops the module, which is fine for
+    /// string-id argument resolution but makes `Http.serve` impossible:
+    /// the server needs the handler's module and function-table index to
+    /// dispatch requests. This override handles `Http.serve` with the
+    /// module available and routes everything else through the existing
+    /// no-module path.
+    fn perform_builtin_effect_in_module(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        module: &CodeModule,
+        regs: &[Value],
+    ) -> Option<Value> {
+        if effect_name == "Http" && op_name == Some("serve") {
+            let port = regs.first().and_then(|v| v.as_int()).unwrap_or(0) as u16;
+            let func_idx = match regs.get(1) {
+                Some(v) if v.is_closure() => {
+                    let payload = v.as_raw() & crate::value_layout::PAYLOAD_MASK;
+                    if payload & CLOSURE_ENV_FLAG != 0 {
+                        // Closures carrying an environment cannot be used as
+                        // an Http.serve handler (the handler must be a plain
+                        // top-level function with a stable function-table
+                        // index). Return nil rather than dispatch garbage.
+                        return Some(Value::nil());
+                    }
+                    payload as usize
+                }
+                Some(v) => {
+                    // Function index passed as a raw Int (from a func_map
+                    // lookup or a direct function reference).
+                    v.as_int().unwrap_or(0) as usize
+                }
+                None => return Some(Value::nil()),
+            };
+            return match crate::runtime::HttpServerState::bind(
+                port,
+                module.clone(),
+                func_idx,
+            ) {
+                Ok(server) => {
+                    let actual_port = server.port;
+                    // Deliberately leak: a standalone HTTP server keeps
+                    // serving for the process lifetime. Dropping the
+                    // server (on VM teardown) would immediately shut down
+                    // the listener thread, so `perform Http.serve` in an
+                    // actor-free program would bind and then die before
+                    // serving a single request. The runtime-backed path
+                    // stores the server on `Runtime` (which outlives
+                    // `vm.run()`), so it does not need this.
+                    std::mem::forget(server);
+                    Some(Value::int(actual_port as i64))
+                }
+                Err(_) => Some(Value::nil()),
+            };
+        }
+        self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
+    }
 }
 
 // ---------------------------------------------------------------------------

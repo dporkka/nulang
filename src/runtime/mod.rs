@@ -62,7 +62,7 @@ pub use crdt_reg::{LWWRegister, MVRegister, RGAElement, RGA};
 pub use distributed::*;
 pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
 pub use heap::*;
-use http_server::HttpServerState;
+pub use http_server::HttpServerState;
 pub use mailbox::*;
 pub use network::NetworkTransport;
 pub use network::*;

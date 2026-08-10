@@ -69,6 +69,17 @@ pub struct HttpServerState {
     listener_thread: Option<std::thread::JoinHandle<()>>,
 }
 
+impl std::fmt::Debug for HttpServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // JoinHandle is not Debug; print the fields that are.
+        f.debug_struct("HttpServerState")
+            .field("port", &self.port)
+            .field("handler_func_idx", &self.handler_func_idx)
+            .field("shutdown_flag", &self.shutdown_flag.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
 impl Drop for HttpServerState {
     fn drop(&mut self) {
         self.shutdown_flag.store(true, Ordering::Relaxed);

@@ -8882,6 +8882,53 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Regression: `perform Http.serve` must work in a bare VM (standalone
+    /// callbacks, no Runtime attached) — previously the standalone
+    /// `perform_builtin_effect` handled Http.get/post but returned
+    /// "Unhandled effect" for serve, so an actor-free program that started
+    /// a server failed. The standalone callbacks now host the server
+    /// directly (StandaloneVmCallbacks::perform_builtin_effect_in_module),
+    /// mirroring the runtime-backed path.
+    #[test]
+    fn test_http_serve_standalone() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let source = r#"
+            fn echo(body: String) -> String {
+                body
+            }
+            perform Http.serve(0, echo)
+        "#;
+        let value = run_source_new(source)
+            .expect("standalone Http.serve must not error with 'Unhandled effect'");
+        let port = value
+            .as_int()
+            .expect("Http.serve should return the bound port");
+        assert!(port > 0, "expected a real port, got {}", port);
+
+        // Make an HTTP request and assert the handler echoes the body.
+        let mut stream = TcpStream::connect(("127.0.0.1", port as u16))
+            .expect("failed to connect to standalone HTTP server");
+        let request =
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\n\r\nhello, world!"
+                .to_string();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        assert!(
+            response.contains("200 OK"),
+            "expected 200, got: {}",
+            response
+        );
+        assert!(
+            response.contains("hello, world!"),
+            "expected echoed body, got: {}",
+            response
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Error handling: catch, fail, T ! E syntax
     // -----------------------------------------------------------------------
