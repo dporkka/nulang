@@ -29,8 +29,10 @@ const IMPORT_IO_READ: u32 = 4;
 const IMPORT_STR_CONCAT: u32 = 5;
 /// Function index of `env.str_eq` — string content equality (i64, i64) -> i64.
 const IMPORT_STR_EQ: u32 = 6;
+/// Function index of `env.pow` — integer exponentiation (i64, i64) -> i64.
+const IMPORT_POW: u32 = 7;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 7;
+const FUNC_IMPORT_COUNT: u32 = 8;
 
 const TY_VOID_TO_I64: u32 = 0;
 
@@ -57,6 +59,10 @@ pub struct WasmBackend {
     next_func_idx: u32,
     func_types: HashMap<Vec<ValType>, u32>,
     next_type_idx: u32,
+    /// Module-wide record field name → slot index map. Built by pre-scanning
+    /// the MIR; used so `Record` literals and `LoadFieldNamed` agree on slot
+    /// positions.
+    field_map: HashMap<String, u8>,
 }
 
 impl WasmBackend {
@@ -110,6 +116,7 @@ impl WasmBackend {
             next_func_idx: FUNC_IMPORT_COUNT,
             func_types: HashMap::new(),
             next_type_idx: TY_FIXED_COUNT,
+            field_map: HashMap::new(),
         }
     }
 
@@ -134,6 +141,19 @@ impl WasmBackend {
     // ── Compile ───────────────────────────────────────────────────
 
     pub fn compile(&mut self, mir: &mir::Module, _module_name: &str) -> NuResult<Vec<u8>> {
+        // Pre-scan: build the module-wide record field name → slot index map
+        // (mirrors the AOT backend) so Record literals and LoadFieldNamed agree.
+        let mut field_map: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+        let mut next_field_id: u8 = 0;
+        for func in mir.functions.iter().chain(mir.behaviors.iter()) {
+            for block in &func.blocks {
+                for stmt in &block.stmts {
+                    collect_wasm_fields(stmt, &mut field_map, &mut next_field_id);
+                }
+            }
+        }
+        self.field_map = field_map;
+
         // Pre-scan: the WASM backend does not currently support closures (first-class functions).
         // Return a compilation error so callers (like the differential fuzzer) know it's unsupported.
         for func in mir.functions.iter().chain(mir.behaviors.iter()) {
@@ -241,6 +261,7 @@ impl WasmBackend {
         imports.import("env", "io_read", EntityType::Function(TY_VOID_TO_I64));
         imports.import("env", "str_concat", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "str_eq", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "pow", EntityType::Function(TY_I64I64_TO_I64));
         self.imports = imports;
     }
 
@@ -656,7 +677,13 @@ impl WasmBackend {
             RValue::Binary(op, a, b) => {
                 body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
                 body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
-                self.emit_binop(body, *op);
+                if matches!(op, crate::ast::BinOp::Pow) {
+                    // Integer exponentiation `a ** b` needs a host helper
+                    // (checked_pow; negative exponent / overflow → nil).
+                    body.instruction(&Instruction::Call(IMPORT_POW));
+                } else {
+                    self.emit_binop(body, *op);
+                }
             }
             RValue::Unary(op, a) => {
                 self.compile_unary(body, *op, a, func);
@@ -697,6 +724,197 @@ impl WasmBackend {
             RValue::ArrayLen(arr) => {
                 self.compile_array_len(body, arr, func);
             }
+            RValue::Tuple(elems) => {
+                // Tuple: a heap object `[count][elem0]..[elemN-1]` (i64 words),
+                // tagged TAG_PTR — mirroring the array literal layout.
+                let scratch = 255u32;
+                let size = ((elems.len() + 1) * 8) as i32;
+                body.instruction(&Instruction::I32Const(size));
+                body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+                body.instruction(&Instruction::I64ExtendI32U);
+                body.instruction(&Instruction::LocalSet(scratch));
+                // count at offset 0
+                body.instruction(&Instruction::LocalGet(scratch));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I64Const(elems.len() as i64));
+                body.instruction(&Instruction::I64Store(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                for (i, elem) in elems.iter().enumerate() {
+                    let off = ((i + 1) * 8) as i64;
+                    body.instruction(&Instruction::LocalGet(scratch));
+                    body.instruction(&Instruction::I64Const(off));
+                    body.instruction(&Instruction::I64Add);
+                    body.instruction(&Instruction::I32WrapI64);
+                    body.instruction(&Instruction::LocalGet(self.mir_local(elem, func)));
+                    body.instruction(&Instruction::I64Store(MemArg {
+                        offset: 0,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+                }
+                body.instruction(&Instruction::LocalGet(scratch));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_PTR as i64));
+                body.instruction(&Instruction::I64Or);
+            }
+            RValue::Record(fields) => {
+                // Record: `[count][slot0]..[slotN-1]` where slots are the
+                // module-wide field_map positions (sparse fields are nil-padded).
+                let max_slot = fields
+                    .iter()
+                    .filter_map(|(name, _)| self.field_map.get(name).copied())
+                    .max()
+                    .unwrap_or(0);
+                let count = max_slot as i64 + 1;
+                let scratch = 255u32;
+                let size = ((count as usize + 1) * 8) as i32;
+                body.instruction(&Instruction::I32Const(size));
+                body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+                body.instruction(&Instruction::I64ExtendI32U);
+                body.instruction(&Instruction::LocalSet(scratch));
+                body.instruction(&Instruction::LocalGet(scratch));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I64Const(count));
+                body.instruction(&Instruction::I64Store(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                for (name, val) in fields {
+                    let slot = self.field_map.get(name).copied().unwrap_or(0) as i64;
+                    let off = ((slot + 1) * 8) as i64;
+                    body.instruction(&Instruction::LocalGet(scratch));
+                    body.instruction(&Instruction::I64Const(off));
+                    body.instruction(&Instruction::I64Add);
+                    body.instruction(&Instruction::I32WrapI64);
+                    body.instruction(&Instruction::LocalGet(self.mir_local(val, func)));
+                    body.instruction(&Instruction::I64Store(MemArg {
+                        offset: 0,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+                }
+                body.instruction(&Instruction::LocalGet(scratch));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_PTR as i64));
+                body.instruction(&Instruction::I64Or);
+            }
+            RValue::LoadFieldNamed { obj, field } => {
+                let slot = self.field_map.get(field).copied().unwrap_or(0);
+                self.emit_obj_load(body, obj, slot, func);
+            }
+            RValue::LoadFieldPos { obj, index } => {
+                self.emit_obj_load(body, obj, *index as u8, func);
+            }
+            RValue::RecordUpdate { base, overrides } => {
+                // Copy `base` (a record) into a fresh object, then apply the
+                // field overrides. Scratch locals: 255 = new ptr, 254 = base
+                // ptr, 253 = count, 252 = i.
+                let pm = value_layout::PAYLOAD_MASK as i64;
+                // base_ptr = base & PAYLOAD_MASK
+                body.instruction(&Instruction::LocalGet(self.mir_local(base, func)));
+                body.instruction(&Instruction::I64Const(pm));
+                body.instruction(&Instruction::I64And);
+                body.instruction(&Instruction::LocalSet(254));
+                // count = load(base_ptr + 0)
+                body.instruction(&Instruction::LocalGet(254));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::LocalSet(253));
+                // new = alloc((count+1)*8); count lives at offset 0.
+                body.instruction(&Instruction::LocalGet(253));
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::I64Const(8));
+                body.instruction(&Instruction::I64Mul);
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+                body.instruction(&Instruction::I64ExtendI32U);
+                body.instruction(&Instruction::LocalSet(255));
+                // store count at new + 0
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::LocalGet(253));
+                body.instruction(&Instruction::I64Store(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                // i = 0
+                body.instruction(&Instruction::I64Const(0));
+                body.instruction(&Instruction::LocalSet(252));
+                // loop: copy slot i from base to new.
+                body.instruction(&Instruction::Block(BlockType::Empty));
+                body.instruction(&Instruction::Loop(BlockType::Empty));
+                body.instruction(&Instruction::LocalGet(252));
+                body.instruction(&Instruction::LocalGet(253));
+                body.instruction(&Instruction::I64GeU);
+                // depth 1 = the enclosing Block (exit the Loop when i >= count);
+                // `br 0` would target the Loop itself and spin forever.
+                body.instruction(&Instruction::BrIf(1));
+                // dst addr = new + (i+1)*8
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::LocalGet(252));
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::I64Const(8));
+                body.instruction(&Instruction::I64Mul);
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::I32WrapI64);
+                // src addr = base_ptr + (i+1)*8
+                body.instruction(&Instruction::LocalGet(254));
+                body.instruction(&Instruction::LocalGet(252));
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::I64Const(8));
+                body.instruction(&Instruction::I64Mul);
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::I32WrapI64);
+                // load src → push value
+                body.instruction(&Instruction::I64Load(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                // store value at dst
+                body.instruction(&Instruction::I64Store(MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                // i++
+                body.instruction(&Instruction::LocalGet(252));
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::LocalSet(252));
+                body.instruction(&Instruction::Br(0));
+                body.instruction(&Instruction::End);
+                body.instruction(&Instruction::End);
+                // apply overrides
+                for (name, val) in overrides {
+                    let slot = self.field_map.get(name).copied().unwrap_or(0) as i64;
+                    let off = ((slot + 1) * 8) as i64;
+                    body.instruction(&Instruction::LocalGet(255));
+                    body.instruction(&Instruction::I64Const(off));
+                    body.instruction(&Instruction::I64Add);
+                    body.instruction(&Instruction::I32WrapI64);
+                    body.instruction(&Instruction::LocalGet(self.mir_local(val, func)));
+                    body.instruction(&Instruction::I64Store(MemArg {
+                        offset: 0,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+                }
+                // result = new | TAG_PTR
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_PTR as i64));
+                body.instruction(&Instruction::I64Or);
+            }
             RValue::CapabilityCheck { .. } => {
                 // Reference capabilities are compile-time-only and erased at
                 // runtime, so the check always succeeds — mirroring the
@@ -710,6 +928,31 @@ impl WasmBackend {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
             }
         }
+    }
+
+    /// Emit a field load: `obj[slot]` where `obj` is a TAG_PTR heap object
+    /// with layout `[count][slot0]..`. Leaves the loaded i64 on the stack.
+    fn emit_obj_load(
+        &self,
+        body: &mut Function,
+        obj: &LocalId,
+        slot: u8,
+        func: &mir::Function,
+    ) {
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        // base = obj & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(obj, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // base + (slot+1)*8
+        body.instruction(&Instruction::I64Const(((slot as i64) + 1) * 8));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
     }
 
     fn compile_unary(
@@ -1193,6 +1436,35 @@ impl WasmBackend {
             }
         }
         pc + func.captures.len() as u32 + local.0
+    }
+}
+
+/// Collect record field names from a statement into the module-wide
+/// field-name → slot-index map (mirrors the AOT backend's collection).
+fn collect_wasm_fields(
+    stmt: &Stmt,
+    field_map: &mut std::collections::HashMap<String, u8>,
+    next_field_id: &mut u8,
+) {
+    let mut insert = |name: &str| {
+        field_map.entry(name.to_string()).or_insert_with(|| {
+            let id = *next_field_id;
+            *next_field_id = next_field_id.saturating_add(1);
+            id
+        });
+    };
+    match stmt {
+        Stmt::Assign { op, .. } => match op {
+            RValue::Record(fields) | RValue::RecordUpdate { overrides: fields, .. } => {
+                for (name, _) in fields {
+                    insert(name);
+                }
+            }
+            RValue::LoadFieldNamed { field, .. } => insert(field),
+            _ => {}
+        },
+        Stmt::StoreFieldNamed { field, .. } => insert(field),
+        _ => {}
     }
 }
 

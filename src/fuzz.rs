@@ -124,6 +124,8 @@ fn seed_corpus() -> Vec<&'static str> {
         "42 |> fn(x) { x + 1 }",
         // --- Field access ---
         "let r = {a = 1, b = 2}; r.a",
+        "let t = (1, 2, 3); t.0 + t.2",
+        "let r = {a = 1, b = 2}; let r2 = {r .. a = 10}; r2.a + r2.b",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

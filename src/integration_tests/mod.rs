@@ -8648,6 +8648,64 @@ match { a: 2, b: 9 } with {
                 "CapabilityCheck must yield true in WASM"
             );
         }
+
+        #[test]
+        fn test_wasm_run_record() {
+            // Record literals + named field access (LoadFieldNamed) must work;
+            // previously Record/LoadFieldNamed silently compiled to nil.
+            let val = run_source_to_value(
+                r#"fn f() -> Int { let r = {x: 1, y: 2} in r.x + r.y } f()"#,
+            )
+            .expect("run");
+            assert_eq!(val.as_int(), Some(3), "r.x + r.y must be 3");
+        }
+
+        #[test]
+        fn test_wasm_run_tuple() {
+            // Tuple literals + positional field access (LoadFieldPos).
+            let val = run_source_to_value(
+                r#"fn f() -> Int { let t = (1, 2, 3) in t.0 + t.2 } f()"#,
+            )
+            .expect("run");
+            assert_eq!(val.as_int(), Some(4), "t.0 + t.2 must be 4");
+        }
+
+        #[test]
+        fn test_wasm_run_pow() {
+            // Integer exponentiation `a ** b` (previously returned nil in WASM).
+            let val = run_source_to_value(r#"fn f() -> Int { 10 - 3 ** 2 } f()"#).expect("run");
+            assert_eq!(val.as_int(), Some(1), "10 - 3**2 must be 1");
+            let val = run_source_to_value(r#"fn f() -> Int { 2 ** 10 } f()"#).expect("run");
+            assert_eq!(val.as_int(), Some(1024), "2**10 must be 1024");
+        }
+
+        #[test]
+        fn test_wasm_run_record_update() {
+            // `{base .. field = val}` copies the record and overrides a field;
+            // the original is unchanged.
+            let val = run_source_to_value(
+                r#"fn f() -> Int { let r = {x: 1, y: 2} in let r2 = {r .. x = 5} in r2.x + r2.y + r.x } f()"#,
+            )
+            .expect("run");
+            assert_eq!(val.as_int(), Some(8), "r2.x=5 + r2.y=2 + r.x=1 must be 8");
+        }
+
+        #[test]
+        fn test_wasm_run_record_string_field() {
+            // A record holding a string field; the string constant is interned
+            // into the WASM data segment.
+            let wasm = compile_source_to_wasm(
+                r#"fn f() -> String { let r = {name: "nulang"} in r.name } f()"#,
+            )
+            .expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(
+                rt.string_value(&val).as_deref(),
+                Some("nulang"),
+                "record string field must read back"
+            );
+        }
     }
 
     /// Entity declarations (with events and apply blocks) must pass through

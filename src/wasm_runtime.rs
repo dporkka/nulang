@@ -103,6 +103,9 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "str_eq", host_str_eq)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "pow", host_pow)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -301,6 +304,22 @@ fn host_str_eq(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64,
         }
     };
     Ok(value_layout::tag_bool(eq) as i64)
+}
+
+/// `env.pow(a: i64, b: i64) -> i64`
+///
+/// Integer exponentiation `a ** b` for tagged integer values. Mirrors the
+/// interpreter/AOT `nulang_pow`: negative exponent or overflow → nil; 0^0 = 1.
+fn host_pow(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    let base = crate::vm::Value::from_raw(a as u64).as_int().unwrap_or(0);
+    let exp = crate::vm::Value::from_raw(b as u64).as_int().unwrap_or(0);
+    if exp < 0 {
+        return Ok(value_layout::TAG_NIL as i64);
+    }
+    match base.checked_pow(exp as u32) {
+        Some(r) => Ok(value_layout::tag_int(r) as i64),
+        None => Ok(value_layout::TAG_NIL as i64),
+    }
 }
 
 /// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)`
