@@ -1,4 +1,5 @@
 /target
+/.target-disk
 check_lib
 cargo_check.log
 # Claude Code: personal state is gitignored, but shipped skills/commands are not.
