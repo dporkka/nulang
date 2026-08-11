@@ -8768,6 +8768,37 @@ match { a: 2, b: 9 } with {
                 backend.compile(&module, "main").is_err(),
                 "send must be rejected, not silently compiled"
             );
+
+            // A user-defined effect (not IO.print/read or Array.length) must
+            // also be rejected, not silently compiled to nil.
+            let mut builder =
+                crate::mir::FunctionBuilder::new("main", Some(crate::types::Type::int()));
+            let out = builder.add_temp(crate::types::Type::int());
+            builder.assign(
+                out,
+                crate::mir::RValue::Perform {
+                    effect: "Custom".into(),
+                    op: "effect".into(),
+                    args: vec![],
+                    resolved_handler: None,
+                },
+            );
+            builder.terminate(crate::mir::Terminator::Return(Some(out)));
+            let func = builder.build();
+            let module = crate::mir::Module {
+                name: "effect".into(),
+                functions: vec![func],
+                behaviors: vec![],
+                actor_metadata: vec![],
+                compensation_of: vec![],
+                parallel_branches_of: vec![],
+                foreign_functions: vec![],
+            };
+            let mut backend = WasmBackend::new();
+            assert!(
+                backend.compile(&module, "main").is_err(),
+                "unknown effect must be rejected, not silently compiled"
+            );
         }
 
         #[test]

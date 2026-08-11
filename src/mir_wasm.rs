@@ -215,6 +215,18 @@ impl WasmBackend {
                             | RValue::PerformAsync { .. }
                             | RValue::SignalWait { .. }
                             | RValue::Closure { .. } => true,
+                            // Only the IO.print/println/read and Array.length
+                            // builtins are handled; any user-defined effect
+                            // previously compiled to nil.
+                            RValue::Perform { effect, op, .. } => {
+                                !matches!(
+                                    (effect.as_str(), op.as_str()),
+                                    ("IO", "print")
+                                        | ("IO", "println")
+                                        | ("IO", "read")
+                                        | ("Array", "length")
+                                )
+                            }
                             _ => false,
                         };
                         if unsupported {
