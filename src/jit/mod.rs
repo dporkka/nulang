@@ -67,7 +67,7 @@ pub const TIER2_THRESHOLD: u64 = 10_000;
 /// fragments were compiled). Genuine loops (internal back-edge) are always
 /// compiled regardless of length; only straight-line fragments below this
 /// threshold are rejected.
-pub const STRAIGHT_LINE_MIN: usize = 16;
+pub const STRAIGHT_LINE_MIN: usize = 8;
 
 // ---------------------------------------------------------------------------
 // JIT Session
