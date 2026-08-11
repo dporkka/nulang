@@ -244,19 +244,27 @@ fn resuming_perform_count(func: &mir::Function) -> HashMap<mir::BlockId, usize> 
     out
 }
 
-/// For each resuming handler body, the destination registers of its resuming
-/// `perform`s in program order, minus the last. When a handler is performed
-/// more than once in one block, a later continuation may read an earlier
-/// perform's result; that result must be threaded through the shared handler
-/// body and dispatch chain back into the continuation. The last perform's
-/// destination is never a "prior" for any continuation, so it is dropped.
-fn handler_threaded_dsts(func: &mir::Function) -> HashMap<mir::BlockId, Vec<u32>> {
-    let local_base = mir::FunctionBuilder::LOCAL_BASE as u32;
-    let mut per_body: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
+/// For each resuming handler body, the number of "threaded prior perform
+/// result" slots it needs. A resuming `perform`'s continuation (the code after
+/// the perform in its block) may read the results of earlier `perform`s of the
+/// same handler body that live in the same block. Those prior results must be
+/// threaded through the shared handler body + dispatch chain back into the
+/// continuation.
+///
+/// The threaded slot width is the MAXIMUM, over all blocks, of the number of
+/// prior resuming performs *in that single block* (sites minus one). Cross-block
+/// perform sites may be on exclusive control-flow paths (e.g. an if/else where
+/// each branch performs once) and then read no cross-block priors; giving every
+/// site the same uniform width and padding its real (same-block) priors with
+/// dummies keeps the handler body's block-param count consistent across sites.
+/// Sites whose continuation genuinely reads a *cross-block* prior are rejected
+/// up front by the cross-block-read guard (see `cross_block_perform_read`).
+fn handler_threaded_width(func: &mir::Function) -> HashMap<mir::BlockId, usize> {
+    // (body block, containing block) -> count of resuming performs.
+    let mut per_block: HashMap<(mir::BlockId, mir::BlockId), usize> = HashMap::new();
     for block in &func.blocks {
         for stmt in &block.stmts {
             if let mir::Stmt::Assign {
-                dst,
                 op:
                     mir::RValue::Perform {
                         resolved_handler: Some(href),
@@ -271,16 +279,283 @@ fn handler_threaded_dsts(func: &mir::Function) -> HashMap<mir::BlockId, Vec<u32>
                     .and_then(|t| t.bindings.get(href.binding_index as usize))
                 {
                     if binding.resume {
-                        per_body.entry(binding.body).or_default().push(local_base + dst.0);
+                        *per_block.entry((binding.body, block.id)).or_insert(0) += 1;
                     }
                 }
             }
         }
     }
-    for v in per_body.values_mut() {
-        v.pop();
+    let mut width: HashMap<mir::BlockId, usize> = HashMap::new();
+    for ((body, _block), count) in per_block {
+        let w = count.saturating_sub(1);
+        width
+            .entry(body)
+            .and_modify(|x| *x = (*x).max(w))
+            .or_insert(w);
     }
-    per_body
+    width
+}
+
+/// Collect the MIR locals a statement's RValue reads (as registers).
+fn stmt_rvalue_uses(op: &mir::RValue) -> Vec<mir::LocalId> {
+    let mut out = Vec::new();
+    match op {
+        mir::RValue::Load(l) => out.push(*l),
+        mir::RValue::LoadFieldNamed { obj, .. } => out.push(*obj),
+        mir::RValue::LoadFieldPos { obj, .. } => out.push(*obj),
+        mir::RValue::ArrayLoad { arr, idx } => {
+            out.push(*arr);
+            out.push(*idx);
+        }
+        mir::RValue::ArrayLen(a) => out.push(*a),
+        mir::RValue::ArrayLit(items) => out.extend_from_slice(items),
+        mir::RValue::Unary(_, l) => out.push(*l),
+        mir::RValue::Binary(_, a, b) => {
+            out.push(*a);
+            out.push(*b);
+        }
+        mir::RValue::StringEq(a, b) | mir::RValue::StrConcat(a, b) => {
+            out.push(*a);
+            out.push(*b);
+        }
+        mir::RValue::Call { args, .. }
+        | mir::RValue::FFICall { args, .. }
+        | mir::RValue::PerformAsync { args, .. } => out.extend_from_slice(args),
+        mir::RValue::Perform { args, .. } => out.extend_from_slice(args),
+        mir::RValue::Closure { captures, .. } => out.extend_from_slice(captures),
+        mir::RValue::Tuple(items) => out.extend_from_slice(items),
+        mir::RValue::Record(fields) => {
+            for (_, v) in fields {
+                out.push(*v);
+            }
+        }
+        mir::RValue::RecordUpdate { base, overrides } => {
+            out.push(*base);
+            for (_, v) in overrides {
+                out.push(*v);
+            }
+        }
+        mir::RValue::SignalWait { .. }
+        | mir::RValue::Receive
+        | mir::RValue::ReceiveMatch { .. }
+        | mir::RValue::ReceiveCommit
+        | mir::RValue::SelfRef
+        | mir::RValue::StateGet { .. } => {}
+        mir::RValue::ReceiveWait { timeout, .. } => out.push(*timeout),
+        mir::RValue::Migrate { actor, node } => {
+            out.push(*actor);
+            out.push(*node);
+        }
+        mir::RValue::CapabilityCheck { val } => out.push(*val),
+        mir::RValue::Spawn {
+            init, target_node, ..
+        } => {
+            if let Some(n) = target_node {
+                out.push(*n);
+            }
+            for (_, rv) in init {
+                out.extend(stmt_rvalue_uses(rv));
+            }
+        }
+        mir::RValue::Send {
+            actor, args, ..
+        }
+        | mir::RValue::Ask {
+            actor, args, ..
+        } => {
+            out.push(*actor);
+            out.extend_from_slice(args);
+        }
+        mir::RValue::Resume(l) => out.push(*l),
+        mir::RValue::Const(_) => {}
+    }
+    out
+}
+
+/// Per-block live-in sets (registers) over the normal + handler CFG, used by
+/// the cross-block resuming-perform guard. A register is live-in to a block if
+/// it may be read on some path from that block's entry before being redefined.
+fn compute_live_ins(func: &mir::Function, local_base: u32) -> HashMap<mir::BlockId, HashSet<u32>> {
+    let succs = compute_successors(func);
+    // `gen[block]` = locals used before their first definition in the block
+    // (a value used only AFTER being defined in the same block is not live-in).
+    // `kill[block]` = locals defined in the block. Backward fixpoint:
+    //   live_in(block) = gen ∪ (live_out − kill),  live_out = ∪ live_in(succ).
+    let mut gen: HashMap<mir::BlockId, HashSet<u32>> = HashMap::new();
+    let mut kill: HashMap<mir::BlockId, HashSet<u32>> = HashMap::new();
+    for block in &func.blocks {
+        let mut g = HashSet::new();
+        let mut k = HashSet::new();
+        // Assign statements: uses first (gen, unless already defined this
+        // block), then the def (kill).
+        let stmt_uses = |g: &mut HashSet<u32>, k: &HashSet<u32>, op: &mir::RValue| {
+            for l in stmt_rvalue_uses(op) {
+                let reg = local_base + l.0;
+                if !k.contains(&reg) {
+                    g.insert(reg);
+                }
+            }
+        };
+        for stmt in &block.stmts {
+            match stmt {
+                mir::Stmt::Assign { dst, op } => {
+                    stmt_uses(&mut g, &k, op);
+                    k.insert(local_base + dst.0);
+                }
+                mir::Stmt::StoreFieldNamed { obj, src, .. } => {
+                    for l in [*obj, *src] {
+                        let reg = local_base + l.0;
+                        if !k.contains(&reg) {
+                            g.insert(reg);
+                        }
+                    }
+                }
+                mir::Stmt::ArrayStore { arr, idx, src } => {
+                    for l in [*arr, *idx, *src] {
+                        let reg = local_base + l.0;
+                        if !k.contains(&reg) {
+                            g.insert(reg);
+                        }
+                    }
+                }
+                mir::Stmt::StateSet { src, .. } => {
+                    let reg = local_base + src.0;
+                    if !k.contains(&reg) {
+                        g.insert(reg);
+                    }
+                }
+                mir::Stmt::Emit { args, .. } => {
+                    for a in args {
+                        let reg = local_base + a.0;
+                        if !k.contains(&reg) {
+                            g.insert(reg);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Terminator uses (after all defs).
+        match &block.terminator {
+            mir::Terminator::Return(Some(l)) => {
+                g.insert(local_base + l.0);
+            }
+            mir::Terminator::Branch { cond, .. } => {
+                g.insert(local_base + cond.0);
+            }
+            mir::Terminator::Resume(id) => {
+                g.insert(local_base + id.0);
+            }
+            _ => {}
+        }
+        gen.insert(block.id, g);
+        kill.insert(block.id, k);
+    }
+
+    let mut live_in: HashMap<mir::BlockId, HashSet<u32>> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for block in &func.blocks {
+            let mut out: HashSet<u32> = HashSet::new();
+            if let Some(ss) = succs.get(&block.id) {
+                for s in ss {
+                    if let Some(si) = live_in.get(s) {
+                        out.extend(si.iter().copied());
+                    }
+                }
+            }
+            let g = gen.get(&block.id).cloned().unwrap_or_default();
+            let k = kill.get(&block.id).cloned().unwrap_or_default();
+            let mut inn = g;
+            for v in out {
+                if !k.contains(&v) {
+                    inn.insert(v);
+                }
+            }
+            if live_in.get(&block.id).map(|s| s != &inn).unwrap_or(true) {
+                live_in.insert(block.id, inn);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    live_in
+}
+
+/// Does a resuming handler body have perform sites that read a *cross-block*
+/// value that derives from an earlier site? The uniform-width threading only
+/// carries same-block prior results (and the resume value) into a continuation,
+/// so a continuation that reads a value defined in a DIFFERENT block containing
+/// an earlier site of the same body is inexpressible — it needs prior results
+/// threaded through `compute_liveins` (Phase 2). Detected conservatively: a
+/// site's block is live-in with a value defined in another site block of the
+/// same body. (Anything this misses still fails loudly in the CLIF verifier
+/// rather than mis-computing, because the value isn't threaded to the
+/// continuation.)
+fn cross_block_perform_read(
+    func: &mir::Function,
+    multi_cont_bodies: &HashSet<mir::BlockId>,
+) -> HashSet<mir::BlockId> {
+    let local_base = mir::FunctionBuilder::LOCAL_BASE as u32;
+    // Locals defined (assigned) in each block.
+    let mut block_defs: HashMap<mir::BlockId, HashSet<u32>> = HashMap::new();
+    // Set of blocks that contain a resuming perform site of each body.
+    let mut body_blocks: HashMap<mir::BlockId, HashSet<mir::BlockId>> = HashMap::new();
+    for block in &func.blocks {
+        let mut defs = HashSet::new();
+        for stmt in &block.stmts {
+            match stmt {
+                mir::Stmt::Assign { dst, op } => {
+                    defs.insert(local_base + dst.0);
+                    if let mir::RValue::Perform {
+                        resolved_handler: Some(href),
+                        ..
+                    } = op
+                    {
+                        if let Some(binding) = func
+                            .handler_tables
+                            .get(href.table_index as usize)
+                            .and_then(|t| t.bindings.get(href.binding_index as usize))
+                        {
+                            if binding.resume && multi_cont_bodies.contains(&binding.body) {
+                                body_blocks.entry(binding.body).or_default().insert(block.id);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        block_defs.insert(block.id, defs);
+    }
+    let live_ins = compute_live_ins(func, local_base);
+    let mut bad: HashSet<mir::BlockId> = HashSet::new();
+    for (body, blocks) in &body_blocks {
+        // A cross-block read only exists if the body has sites in >1 block.
+        if blocks.len() < 2 {
+            continue;
+        }
+        for b in blocks {
+            // Union of defs of all OTHER site blocks of this body.
+            let mut other_defs: HashSet<u32> = HashSet::new();
+            for &other in blocks {
+                if other != *b {
+                    if let Some(d) = block_defs.get(&other) {
+                        other_defs.extend(d.iter().copied());
+                    }
+                }
+            }
+            if let Some(li) = live_ins.get(b) {
+                if !li.is_disjoint(&other_defs) {
+                    bad.insert(*body);
+                    break;
+                }
+            }
+        }
+    }
+    bad
 }
 
 /// Map each effect-handler body block (resuming OR abortive) to its declared
@@ -302,10 +577,19 @@ fn effect_handler_body_params(func: &mir::Function) -> HashMap<mir::BlockId, Vec
 /// - The block has >1 predecessor.
 ///
 /// These locals need CLIF block parameters for proper SSA merging.
+///
+/// Effect-handler body blocks are EXCLUDED: they are reached by `perform`
+/// jumps (not normal control-flow merges), read only their declared effect
+/// params (already block params) plus outer locals that flow through the
+/// shared `local_vals` (dominance-scoped), and must not inherit a perform
+/// block's post-perform locals — most importantly the perform result
+/// destination, which flows BACK through the continuation, not into the
+/// handler body.
 fn compute_liveins(
     func: &mir::Function,
     preds: &HashMap<mir::BlockId, Vec<mir::BlockId>>,
     local_base: u32,
+    handler_body_params: &HashMap<mir::BlockId, Vec<mir::LocalId>>,
 ) -> HashMap<mir::BlockId, Vec<u32>> {
     // First, for each block, find which locals are last-assigned in that block.
     let mut block_defs: HashMap<mir::BlockId, HashSet<u32>> = HashMap::new();
@@ -322,6 +606,9 @@ fn compute_liveins(
     // For each block with >1 predecessor, compute locals defined in ALL predecessors.
     let mut liveins: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
     for block in &func.blocks {
+        if handler_body_params.contains_key(&block.id) {
+            continue;
+        }
         let pids = match preds.get(&block.id) {
             Some(p) if p.len() > 1 => p,
             _ => continue,
@@ -422,8 +709,11 @@ fn compile_terminator_with_params(
             // Multiple perform sites share this handler body. Dispatch on the
             // continuation-index block param (position = block_params.len())
             // to the matching continuation. Each continuation receives the
-            // resume value plus the threaded prior perform results it needs
-            // (the first i threaded params for the i-th continuation).
+            // resume value plus the FULL uniform-width threaded slot set. The
+            // values present are those supplied by whichever perform site
+            // entered this invocation; each continuation binds only the
+            // same-block prior slots it actually has, so the excess (cross-block
+            // or padded) slots are ignored by all continuations.
             let idx_pos = block_params.get(&current_block).map(|p| p.len()).unwrap_or(0);
             let cur = builder.current_block().ok_or_else(|| {
                 AotCompileError::Internal("Resume outside a block".into())
@@ -437,7 +727,7 @@ fn compile_terminator_with_params(
                 let idx_const = builder.ins().iconst(types::I64, i as i64);
                 let eq = builder.ins().icmp(IntCC::Equal, idx_val, idx_const);
                 let mut args: Vec<BlockArg> = vec![BlockArg::from(resume_val)];
-                args.extend(threaded[..i].iter().copied().map(BlockArg::from));
+                args.extend(threaded.iter().copied().map(BlockArg::from));
                 if i == conts.len() - 1 {
                     // Last case: unconditional.
                     builder.ins().jump(*cont, &args);
@@ -658,9 +948,14 @@ pub fn compile_mir_function_body(
     // Analyze block predecessors.
     let preds = compute_predecessors(mir_func);
 
+    // Map each effect-handler body block to its declared effect parameters.
+    // Used both to give handler bodies their effect-param block params and to
+    // exclude them from merge-live-in analysis.
+    let handler_body_params = effect_handler_body_params(mir_func);
+
     // For each block, collect locals assigned in any predecessor that are
     // used in this block — these need block params when multiple preds exist.
-    let block_liveins = compute_liveins(mir_func, &preds, local_base);
+    let block_liveins = compute_liveins(mir_func, &preds, local_base, &handler_body_params);
 
     // Pre-resolve cross-function call targets (will fill inside builder scope).
     let mut call_targets: HashMap<usize, FuncRef> = HashMap::new();
@@ -1168,7 +1463,7 @@ pub fn compile_mir_function_body(
 
         // Resuming handler body blocks receive their effect parameters as
         // block params (a `perform` jumps to them with the arg values).
-        let handler_body_params = effect_handler_body_params(mir_func);
+        // (`handler_body_params` is computed above, before `compute_liveins`.)
         // A resuming handler invoked more than once needs a continuation-index
         // block param (appended last) so its `Terminator::Resume` can dispatch
         // to the right perform site's continuation.
@@ -1180,46 +1475,23 @@ pub fn compile_mir_function_body(
             .filter(|(_, &c)| c >= 2)
             .map(|(&b, _)| b)
             .collect();
-        // Prior perform destinations that must thread through a shared
-        // resuming handler body so later continuations can read earlier
-        // perform results.
-        let handler_threaded_dsts = handler_threaded_dsts(mir_func);
-        // Guard: multi-perform resuming handlers with perform sites in
-        // DIFFERENT MIR blocks would need per-block threading the same-block
-        // model can't express. Reject rather than silently mis-wire.
-        for body in &multi_cont_bodies {
-            let mut sites: Vec<mir::BlockId> = mir_func
-                .blocks
-                .iter()
-                .filter(|b| {
-                    b.stmts.iter().any(|s| {
-                        matches!(
-                            s,
-                            mir::Stmt::Assign {
-                                op: mir::RValue::Perform {
-                                    resolved_handler: Some(href),
-                                    ..
-                                },
-                                ..
-                            } if mir_func
-                                .handler_tables
-                                .get(href.table_index as usize)
-                                .and_then(|t| t.bindings.get(href.binding_index as usize))
-                                .map(|x| x.resume && x.body == *body)
-                                .unwrap_or(false)
-                        )
-                    })
-                })
-                .map(|b| b.id)
-                .collect();
-            sites.sort_by_key(|x| x.0);
-            sites.dedup();
-            if sites.len() > 1 {
-                return Err(AotCompileError::Unsupported(
-                    "multi-perform resuming handler with perform sites across multiple blocks is not yet supported by the native backend"
-                        .into(),
-                ));
-            }
+        // Uniform threaded-slot width per resuming handler body: the max
+        // number of same-block prior performs any site has. Every perform site
+        // supplies this many threaded values (its real same-block priors, then
+        // dummies), so the handler body's block-param count is consistent
+        // across sites whether they share one block or live on exclusive
+        // cross-block paths.
+        let handler_threaded_width = handler_threaded_width(mir_func);
+        // Guard: reject a multi-block resuming handler only when a continuation
+        // genuinely reads a prior perform result produced in a DIFFERENT block
+        // (a cross-block data dependency the uniform-width threading can't
+        // express). Exclusive-branch sites (each block performs once, no
+        // cross-block read) now compile. See `cross_block_perform_read`.
+        if !cross_block_perform_read(mir_func, &multi_cont_bodies).is_empty() {
+            return Err(AotCompileError::Unsupported(
+                "multi-perform resuming handler reads a cross-block prior perform result; not yet supported by the native backend"
+                    .into(),
+            ));
         }
 
         // Create CLIF blocks — allocate block params for merge blocks.
@@ -1271,10 +1543,9 @@ pub fn compile_mir_function_body(
                 // params follow it.
                 if resuming_counts.get(&block.id).copied().unwrap_or(0) >= 2 {
                     builder.append_block_param(blk, types::I64);
-                    if let Some(td) = handler_threaded_dsts.get(&block.id) {
-                        for _ in td {
-                            builder.append_block_param(blk, types::I64);
-                        }
+                    let width = handler_threaded_width.get(&block.id).copied().unwrap_or(0);
+                    for _ in 0..width {
+                        builder.append_block_param(blk, types::I64);
                     }
                 }
                 blk
@@ -1352,7 +1623,7 @@ pub fn compile_mir_function_body(
                     &block_params,
                     &mut handler_continuations,
                     &multi_cont_bodies,
-                    &handler_threaded_dsts,
+                    &handler_threaded_width,
                     &mut cont_thread,
                 )?;
             }
@@ -1474,7 +1745,7 @@ fn compile_stmt(
     block_params: &HashMap<mir::BlockId, Vec<u32>>,
     handler_continuations: &mut HashMap<mir::BlockId, Vec<(cranelift::prelude::Block, u32)>>,
     multi_cont_bodies: &HashSet<mir::BlockId>,
-    handler_threaded_dsts: &HashMap<mir::BlockId, Vec<u32>>,
+    handler_threaded_width: &HashMap<mir::BlockId, usize>,
     cont_thread: &mut Vec<u32>,
 ) -> AotResult<()> {
     match stmt {
@@ -1562,9 +1833,17 @@ fn compile_stmt(
                         // plus (for a handler invoked from multiple perform
                         // sites) the prior perform results this site's tail may
                         // read — threaded through from earlier continuations.
+                        // The threaded slot count is the handler body's UNIFORM
+                        // width (max same-block priors across all sites); this
+                        // site binds only the same-block priors it actually has,
+                        // leaving the excess params unused.
                         let cont = builder.create_block();
                         builder.append_block_param(cont, types::I64);
-                        for _ in cont_thread.iter() {
+                        let width = handler_threaded_width
+                            .get(&body_block)
+                            .copied()
+                            .unwrap_or(0);
+                        for _ in 0..width {
                             builder.append_block_param(cont, types::I64);
                         }
                         // Jump to the handler body. The handler body's block
@@ -1622,10 +1901,11 @@ fn compile_stmt(
                                 builder.ins().iconst(types::I64, idx as i64),
                             ));
                             // Threaded slots: this site's prior perform results
-                            // (real values, in order), then dummies for the rest.
-                            let thread_total = handler_threaded_dsts
+                            // (real values, in order), then dummies for the rest
+                            // up to the handler body's uniform width.
+                            let thread_total = handler_threaded_width
                                 .get(&body_block)
-                                .map(|v| v.len())
+                                .copied()
                                 .unwrap_or(0);
                             for j in 0..thread_total {
                                 let v = if j < cont_thread.len() {
@@ -3963,6 +4243,118 @@ mod tests {
             Some(23),
             "a = 1+10 = 11, b = 2+10 = 12, a+b = 23"
         );
+    }
+
+    fn aot_compile_source(source: &str) -> crate::aot::AotModule {
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        crate::aot::AotModule::compile(&mir_module).expect("AOT compile")
+    }
+
+    #[test]
+    fn test_aot_resuming_handler_multi_block_if_else() {
+        // Same resuming handler performed from the THEN and ELSE branches of an
+        // `if` — i.e. from two DIFFERENT MIR blocks on exclusive paths. Before
+        // the uniform-threaded-width change this was rejected. Each branch's
+        // continuation reads only its own perform result (no cross-block read).
+        let aot = aot_compile_source(
+            r#"
+            effect Echo { run: Int -> Int }
+            fn f(cond: Bool) -> Int {
+                handle {
+                    if cond then { perform Echo.run(1) } else { perform Echo.run(2) }
+                } { | Echo.run(x) resume => x + 10 }
+            }
+            fn main() { f(true) + f(false) }
+            "#,
+        );
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(23),
+            "f(true)=1+10=11, f(false)=2+10=12, sum=23"
+        );
+    }
+
+    #[test]
+    fn test_aot_resuming_handler_multi_block_discarded_first() {
+        // A resuming perform whose result is discarded (the `if` statement
+        // value is unused), followed by a second perform of the same handler in
+        // a later block. The first site's dst is a dead merge local, not a
+        // cross-block read, so this must compile (not be guarded off).
+        let aot = aot_compile_source(
+            r#"
+            effect Echo { run: Int -> Int }
+            fn f(cond: Bool) -> Int {
+                handle {
+                    if cond then { perform Echo.run(1) }
+                    let b = perform Echo.run(2)
+                    b
+                } { | Echo.run(x) resume => x + 10 }
+            }
+            fn main() { f(true) + f(false) }
+            "#,
+        );
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(24),
+            "f(true)=2+10=12, f(false)=2+10=12, sum=24"
+        );
+    }
+
+    #[test]
+    fn test_aot_resuming_handler_multi_block_cross_read_rejected() {
+        // A resuming perform's result stored to a mutable `acc` in one block
+        // and READ after a second perform of the same handler in a later block
+        // is a genuine cross-block prior read the uniform-width threading can't
+        // express. It must be rejected up front (Phase 2), not silently
+        // mis-wired or left to a CLIF verifier error.
+        let source = r#"
+            effect Echo { run: Int -> Int }
+            fn f(cond: Bool) -> Int {
+                handle {
+                    var acc = 0
+                    if cond then { acc = perform Echo.run(1) }
+                    let b = perform Echo.run(2)
+                    acc + b
+                } { | Echo.run(x) resume => x + 10 }
+            }
+            fn main() { f(true) }
+            "#;
+        let tokens = crate::lexer::Lexer::new(source).lex().unwrap();
+        let ast = crate::parser::Parser::new(tokens).parse_module().unwrap();
+        let mut tc = crate::typechecker::TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = crate::effect_checker::EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        match crate::aot::AotModule::compile(&mir_module) {
+            Err(crate::types::NuError::VMError { msg, .. }) => assert!(
+                msg.contains("cross-block prior perform result"),
+                "unexpected rejection message: {msg}"
+            ),
+            Err(e) => panic!("expected a cross-block prior-read rejection, got: {e:?}"),
+            Ok(_) => panic!("expected a cross-block prior-read rejection, but compilation succeeded"),
+        }
     }
 
     #[test]
