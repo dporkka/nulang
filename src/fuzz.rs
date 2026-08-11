@@ -225,6 +225,21 @@ fn seed_corpus() -> Vec<&'static str> {
         "fn mul(x, y) { x * y }; mul(mul(2, 3), mul(4, 5))",
         "fn choose(c) { if c then 1 else 0 }; choose(true) + choose(false)",
         "let a = [5, 10, 15]; fn get(i) { a[i] }; get(1) + get(2)",
+        // --- Nested structures ---
+        "let a = [[1, 2], [3, 4]]; a[1][1] + a[0][0]",
+        "let a = [{v = 1}, {v = 2}]; a[0].v + a[1].v",
+        "let r = {m = [1, 2]}; r.m[0] + r.m[1]",
+        "let m = [[1, 2], [3]]; m[0][1] + m[1][0]",
+        // --- Empty / boundary ---
+        "let a = []; 0",
+        "let a = [7]; a[0]",
+        "if Array.length([1]) == 1 then 1 else 0",
+        // --- Float in records ---
+        "let r = {x = 1.5, y = 2.5}; r.x + r.y",
+        "let t = (1.5, 2.5); t.0 + t.1",
+        // --- Nested function returns ---
+        "fn f(x) { x * 2 }; fn g(x) { f(x) + 1 }; fn h(x) { g(x) - 1 }; h(5)",
+        "fn pick(b) { if b then 1 else -1 }; pick(true) * pick(false)",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",
