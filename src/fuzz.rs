@@ -155,6 +155,28 @@ fn seed_corpus() -> Vec<&'static str> {
         // --- Large / edge numerics ---
         "1000000000 * 1000000000",
         "2147483647 + 1",
+        // --- Negative / mixed signs ---
+        "-5 + 3",
+        "-3 * -2",
+        "-10 / 2",
+        // --- Float edges ---
+        "0.1 + 0.2",
+        "1.0 / 0.0",
+        "3.5 - 1.5",
+        "2.0 * 3.0 + 1.0",
+        // --- Multi-function composition ---
+        "fn add(a, b) { a + b }; let f = fn(x) { x * 2 }; f(add(1, 2)) + add(3, 4)",
+        "fn triple(x) { x * 3 }; fn square(x) { x * x }; triple(2) + square(3)",
+        "let apply = fn(f, x) { f(x) }; apply(fn(x) { x + 5 }, 10)",
+        // --- String ops ---
+        r#""a" ++ "b" ++ "c""#,
+        r#""x" == "x" and "y" == "y""#,
+        r#"("a" ++ "b") == "ab""#,
+        // --- Deep nesting ---
+        "((((1 + 2) * 3) - 4) / 5)",
+        "let a = 1; let b = a + 1; let c = b * 2; let d = c - 3; d",
+        // --- Recursion with multiple params ---
+        "fn sum(n, acc) { if n <= 0 then acc else sum(n - 1, acc + n) }; sum(5, 0)",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

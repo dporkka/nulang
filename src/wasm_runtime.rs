@@ -424,7 +424,12 @@ fn host_div(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
     let a = a as u64;
     let b = b as u64;
     if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
-        Ok((f64::from_bits(a) / f64::from_bits(b)).to_bits() as i64)
+        // Float division by zero → nil (matches the interpreter's IDiv).
+        let denom = f64::from_bits(b);
+        if denom == 0.0 {
+            return Ok(value_layout::TAG_NIL as i64);
+        }
+        Ok((f64::from_bits(a) / denom).to_bits() as i64)
     } else {
         let denom = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
         if denom == 0 {
@@ -439,7 +444,11 @@ fn host_mod(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
     let a = a as u64;
     let b = b as u64;
     if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
-        Ok((f64::from_bits(a) % f64::from_bits(b)).to_bits() as i64)
+        let denom = f64::from_bits(b);
+        if denom == 0.0 {
+            return Ok(value_layout::TAG_NIL as i64);
+        }
+        Ok((f64::from_bits(a) % denom).to_bits() as i64)
     } else {
         let denom = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
         if denom == 0 {

@@ -8716,6 +8716,13 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_float_div_by_zero() {
+            // Float division by zero → nil (matches the interpreter), not inf.
+            let v = run_source_to_value(r#"fn f() -> Float { 1.0 / 0.0 } f()"#).expect("run");
+            assert!(v.is_nil(), "1.0/0.0 must be nil, got {:?}", v.as_float());
+        }
+
+        #[test]
         fn test_wasm_run_float_comparison() {
             let v = run_source_to_value(r#"fn f() -> Bool { 1.5 < 2.5 } f()"#).expect("run");
             assert_eq!(v.as_bool(), Some(true), "1.5 < 2.5");
