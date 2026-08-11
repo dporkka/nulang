@@ -474,6 +474,23 @@ pub fn take_jit_yield_pc() -> Option<usize> {
     }
 }
 
+/// Bytecode offset where a compiled region exited via a branch to a target
+/// OUTSIDE the region, or `u64::MAX` if none. Unlike `JIT_YIELD_PC` (real
+/// suspensions — PerformDirect / safepoint), a branch exit is NOT a
+/// suspension: the VM just resumes the interpreter at the target pc and keeps
+/// running. Single-scheduler-thread invariant: no CAS needed.
+pub static JIT_BRANCH_EXIT_PC: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Take the branch-exit pc (relative to region start) if one is pending.
+pub fn take_jit_branch_exit_pc() -> Option<usize> {
+    let old = JIT_BRANCH_EXIT_PC.swap(u64::MAX, Ordering::AcqRel);
+    if old == u64::MAX {
+        None
+    } else {
+        Some(old as usize)
+    }
+}
+
 /// Called from JIT-compiled code when the safepoint budget is exhausted.
 ///
 /// Stores the bytecode offset where execution should resume (relative to

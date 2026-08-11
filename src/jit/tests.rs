@@ -72,6 +72,8 @@ fn test_find_region_stops_at_unsupported() {
 /// elsewhere would resume at the wrong instruction.
 #[test]
 fn test_find_region_stops_before_branches_and_halt() {
+    // Forward branches (no loop back-edge) keep the straight-line boundary:
+    // the region stops before the first branch.
     for branch in [
         Instruction::new3(OpCode::Jmp, 0, 2, 0),
         Instruction::new3(OpCode::JmpT, 0, 0, 2),
@@ -91,6 +93,40 @@ fn test_find_region_stops_before_branches_and_halt() {
             instructions[2].opcode
         );
     }
+}
+
+#[test]
+fn test_find_region_includes_loop_back_edge() {
+    // A backward jump landing WITHIN the region (a loop back-edge) extends the
+    // region across the branches so the hot loop compiles natively. Here a
+    // Jmp from pc3 with simm16 -3 targets pc0 (the region start), and a
+    // forward JmpF at pc2 targets pc3.
+    let loop2 = vec![
+        Instruction::new3(OpCode::IAdd, 0, 1, 2), // 0
+        Instruction::new3(OpCode::ISub, 0, 1, 2), // 1
+        Instruction::new3(OpCode::JmpF, 0, 0, 1), // 2: target 2+1 = 3
+        Instruction::new3(OpCode::Jmp, 255, 253, 0), // 3: target 3 + (-3) = 0 (back-edge)
+    ];
+    assert_eq!(
+        find_compilable_region(0, &loop2),
+        4,
+        "loop region must include the back-edge and branches"
+    );
+
+    // A backward jump to BEFORE the region start (an exit, e.g. a return path's
+    // jump back to a RetVal) is NOT a loop back-edge — the region stays
+    // straight-line (stops before the first branch). Jmp at pc3 targets 0.
+    let exit_seq = vec![
+        Instruction::new3(OpCode::IAdd, 0, 1, 2), // 0
+        Instruction::new3(OpCode::ISub, 0, 1, 2), // 1
+        Instruction::new3(OpCode::JmpF, 0, 0, 1), // 2: target 3
+        Instruction::new3(OpCode::Jmp, 255, 253, 0), // 3: target 0 (< offset when offset=1)
+    ];
+    assert_eq!(
+        find_compilable_region(1, &exit_seq),
+        1,
+        "backward jump to before the region start must not count as a loop"
+    );
 }
 
 /// The compiled-region map must record each region's instruction length at

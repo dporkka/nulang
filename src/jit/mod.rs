@@ -361,6 +361,15 @@ impl JitSession {
         ptr as i64
     }
 
+    /// Address of the `JIT_BRANCH_EXIT_PC` static — the non-suspending slot a
+    /// compiled region stores to when it exits via a branch to an outside
+    /// target.
+    pub fn branch_exit_pc_addr() -> i64 {
+        let ptr: *const std::sync::atomic::AtomicU64 =
+            &raw const crate::jit::runtime::JIT_BRANCH_EXIT_PC;
+        ptr as i64
+    }
+
     /// Compile a SIMD-vectorizable bytecode region.
     /// First analyzes the region for vectorizable array loop patterns. If found,
     /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the
@@ -457,38 +466,69 @@ pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
 
 /// Find a contiguous region of compilable instructions starting at `offset`.
 /// Returns the number of instructions in the region.
+///
+/// Regions normally stop BEFORE the first branch (straight-line only): after
+/// a region runs the VM unconditionally advances pc by the region length, so
+/// a compiled branch to an outside target would resume at the wrong place.
+/// HOWEVER, when the scan encounters a BACKWARD edge (a branch whose target
+/// precedes its own pc — the hallmark of a loop), the region is extended to
+/// include the branches so the hot loop compiles natively: the loop head,
+/// body and back-jump run in one VM entry, and any branch to a target outside
+/// the region yields the interpreter there via the branch-exit slot. This
+/// makes tight loops far faster (the straight-line body-slice approach cost a
+/// 256-register snapshot/restore per iteration). Forward-only branchy code
+/// (e.g. an `if`/recursion that leads to a `Call`) keeps the straight-line
+/// boundary, which is why recursion does not regress.
 pub(crate) fn find_compilable_region(
     offset: usize,
     instructions: &[crate::bytecode::Instruction],
 ) -> usize {
     let mut len = 0;
+    let mut first_branch: Option<usize> = None;
+    let mut has_back_edge = false;
     for i in offset..instructions.len().min(offset + 500) {
         if !compiler::is_opcode_compilable(instructions[i].opcode) {
             break;
         }
-        // Stop *before* return instructions so the VM still executes the
-        // return and pops the frame correctly after the JIT region.
-        //
-        // Also stop before any branch or halt: after a region runs, the VM
-        // unconditionally advances pc by the region length, so a compiled
-        // branch whose target lies outside the region would resume at the
-        // wrong instruction. Restricting regions to straight-line code keeps
-        // that pc-advance contract exact (branches themselves stay
-        // interpreted; loop *bodies* still get compiled).
-        if matches!(
-            instructions[i].opcode,
-            crate::bytecode::OpCode::Ret
-                | crate::bytecode::OpCode::RetVal
-                | crate::bytecode::OpCode::Jmp
+        let op = instructions[i].opcode;
+        // Stop *before* return/halt instructions so the VM still executes the
+        // return (frame pop) / halt itself after the JIT region.
+        if matches!(op, crate::bytecode::OpCode::Ret | crate::bytecode::OpCode::RetVal | crate::bytecode::OpCode::Halt)
+        {
+            break;
+        }
+        let is_branch = matches!(
+            op,
+            crate::bytecode::OpCode::Jmp
                 | crate::bytecode::OpCode::JmpT
                 | crate::bytecode::OpCode::JmpF
-                | crate::bytecode::OpCode::Halt
-        ) {
-            break;
+        );
+        if is_branch {
+            if first_branch.is_none() {
+                first_branch = Some(len);
+            }
+            let target = match op {
+                crate::bytecode::OpCode::Jmp => {
+                    (i as i64 + instructions[i].simm16() as i64) as usize
+                }
+                _ => (i as i64 + instructions[i].offset16() as i64) as usize,
+            };
+            // A genuine loop back-edge lands WITHIN the region (target >= offset):
+            // the loop head is the region start or an earlier in-region pc, and
+            // re-entering it continues the loop. A backward jump to BEFORE the
+            // region start (target < offset) is an EXIT (e.g. a return path's
+            // jump back to a RetVal), not a loop — don't treat it as a back-edge.
+            if target >= offset && target < i {
+                has_back_edge = true;
+            }
         }
         len += 1;
     }
-    len
+    if has_back_edge {
+        len
+    } else {
+        first_branch.unwrap_or(len)
+    }
 }
 
 // TieredAction is defined in `crate::backends` so the VM can reference it

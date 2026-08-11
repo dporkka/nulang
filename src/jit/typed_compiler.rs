@@ -33,7 +33,7 @@ use cranelift_module::{Linkage, Module};
 use std::collections::HashMap;
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
-use crate::jit::compiler::{emit_arr_load, CompileError};
+use crate::jit::compiler::{emit_arr_load, emit_yield_pc, CompileError};
 use crate::jit::JitSession;
 
 // ---------------------------------------------------------------------------
@@ -1437,35 +1437,52 @@ pub fn compile_bytecode_region_typed(
                 if let Some(&target_block) = blocks.get(&target) {
                     builder.ins().jump(target_block, &[]);
                 } else {
+                    emit_yield_pc(&mut builder, start_offset, target);
                     builder.ins().jump(return_block, &[]);
                 }
             }
             OpCode::JmpT => {
                 let target = (pc as i64 + instr.offset16() as i64) as usize;
                 let cond_val = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
+                // Branch conditions are NaN-tagged bools; truthiness is the low
+                // payload bit (matches `Value::as_bool`), not the whole value.
+                let one = builder.ins().iconst(types::I64, 1);
+                let cond_bit = builder.ins().band(cond_val, one);
                 let zero = builder.ins().iconst(types::I64, 0);
-                let is_nonzero = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
+                let is_true = builder.ins().icmp(IntCC::NotEqual, cond_bit, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
                     builder
                         .ins()
-                        .brif(is_nonzero, target_block, &[], fallthrough, &[]);
+                        .brif(is_true, target_block, &[], fallthrough, &[]);
                 } else {
-                    builder.ins().jump(fallthrough, &[]);
+                    let outside = builder.create_block();
+                    builder.ins().brif(is_true, outside, &[], fallthrough, &[]);
+                    builder.switch_to_block(outside);
+                    emit_yield_pc(&mut builder, start_offset, target);
+                    builder.ins().jump(return_block, &[]);
+                    builder.seal_block(outside);
                 }
             }
             OpCode::JmpF => {
                 let target = (pc as i64 + instr.offset16() as i64) as usize;
                 let cond_val = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
+                let one = builder.ins().iconst(types::I64, 1);
+                let cond_bit = builder.ins().band(cond_val, one);
                 let zero = builder.ins().iconst(types::I64, 0);
-                let is_zero = builder.ins().icmp(IntCC::Equal, cond_val, zero);
+                let is_false = builder.ins().icmp(IntCC::Equal, cond_bit, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
                     builder
                         .ins()
-                        .brif(is_zero, target_block, &[], fallthrough, &[]);
+                        .brif(is_false, target_block, &[], fallthrough, &[]);
                 } else {
-                    builder.ins().jump(fallthrough, &[]);
+                    let outside = builder.create_block();
+                    builder.ins().brif(is_false, outside, &[], fallthrough, &[]);
+                    builder.switch_to_block(outside);
+                    emit_yield_pc(&mut builder, start_offset, target);
+                    builder.ins().jump(return_block, &[]);
+                    builder.seal_block(outside);
                 }
             }
 

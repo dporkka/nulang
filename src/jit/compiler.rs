@@ -177,6 +177,24 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+/// Store the relative target pc (target - region start) to the JIT
+/// BRANCH-EXIT slot, so the VM resumes the interpreter there after the region
+/// returns. Used when a compiled branch targets an instruction outside the
+/// region. A branch exit is NOT a suspension (unlike the JIT_YIELD_PC used by
+/// PerformDirect / safepoints), so it must not make the VM halt.
+pub(crate) fn emit_yield_pc(
+    builder: &mut FunctionBuilder,
+    start_offset: usize,
+    target: usize,
+) {
+    let exit_pc_addr = JitSession::branch_exit_pc_addr();
+    let exit_pc_ptr = builder.ins().iconst(types::I64, exit_pc_addr);
+    // Target may precede the region (a backward jump); the VM adds the signed
+    // relative offset to the region-start pc, so wrap the subtraction.
+    let rel = builder.ins().iconst(types::I64, target.wrapping_sub(start_offset) as i64);
+    builder.ins().store(MemFlags::new(), rel, exit_pc_ptr, 0);
+}
+
 /// Compile a bytecode region to a native function.
 pub fn compile_bytecode_region(
     module: &mut JITModule,
@@ -568,35 +586,58 @@ pub fn compile_bytecode_region(
                 if let Some(&target_block) = blocks.get(&target) {
                     builder.ins().jump(target_block, &[]);
                 } else {
+                    // Target outside the region: yield the target pc so the
+                    // interpreter resumes there (branch-exit, not a suspension).
+                    emit_yield_pc(&mut builder, start_offset, target);
                     builder.ins().jump(return_block, &[]);
                 }
             }
             OpCode::JmpT => {
                 let target = (pc as i64 + instr.offset16() as i64) as usize;
                 let cond_val = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
+                // Branch conditions are NaN-tagged bools; truthiness is the low
+                // payload bit (matches `Value::as_bool`), not the whole value.
+                let one = builder.ins().iconst(types::I64, 1);
+                let cond_bit = builder.ins().band(cond_val, one);
                 let zero = builder.ins().iconst(types::I64, 0);
-                let is_nonzero = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
+                let is_true = builder.ins().icmp(IntCC::NotEqual, cond_bit, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
                     builder
                         .ins()
-                        .brif(is_nonzero, target_block, &[], fallthrough, &[]);
+                        .brif(is_true, target_block, &[], fallthrough, &[]);
                 } else {
-                    builder.ins().jump(fallthrough, &[]);
+                    // Target outside the region: yield to it on the taken path.
+                    // Fill the current block first (Cranelift requires the
+                    // current block to be terminated before switching).
+                    let outside = builder.create_block();
+                    builder.ins().brif(is_true, outside, &[], fallthrough, &[]);
+                    builder.switch_to_block(outside);
+                    emit_yield_pc(&mut builder, start_offset, target);
+                    builder.ins().jump(return_block, &[]);
+                    builder.seal_block(outside);
                 }
             }
             OpCode::JmpF => {
                 let target = (pc as i64 + instr.offset16() as i64) as usize;
                 let cond_val = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
+                let one = builder.ins().iconst(types::I64, 1);
+                let cond_bit = builder.ins().band(cond_val, one);
                 let zero = builder.ins().iconst(types::I64, 0);
-                let is_zero = builder.ins().icmp(IntCC::Equal, cond_val, zero);
+                let is_false = builder.ins().icmp(IntCC::Equal, cond_bit, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
                     builder
                         .ins()
-                        .brif(is_zero, target_block, &[], fallthrough, &[]);
+                        .brif(is_false, target_block, &[], fallthrough, &[]);
                 } else {
-                    builder.ins().jump(fallthrough, &[]);
+                    // Target outside the region: yield to it on the taken path.
+                    let outside = builder.create_block();
+                    builder.ins().brif(is_false, outside, &[], fallthrough, &[]);
+                    builder.switch_to_block(outside);
+                    emit_yield_pc(&mut builder, start_offset, target);
+                    builder.ins().jump(return_block, &[]);
+                    builder.seal_block(outside);
                 }
             }
 

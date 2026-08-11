@@ -2579,7 +2579,18 @@ impl VM {
                 self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
             }
 
-            // Check if JIT yielded at a safepoint.
+            // A compiled region that exited via a branch to an outside target
+            // resumes the interpreter at that pc WITHOUT suspending (a plain
+            // control-flow exit, not an effect/LLM suspension).
+            if let Some(exit_offset) = crate::jit::runtime::take_jit_branch_exit_pc() {
+                let base = pc as isize;
+                let off = exit_offset as i64 as isize;
+                self.frames[frame_idx].pc = (base + off).max(0) as usize;
+                self.step_count += 1;
+                return true;
+            }
+
+            // Check if JIT yielded at a safepoint (a real suspension).
             if let Some(yield_offset) = crate::jit::runtime::take_jit_yield_pc() {
                 self.frames[frame_idx].pc = pc + yield_offset;
                 self.yield_pending = true;
