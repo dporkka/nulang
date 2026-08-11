@@ -11,6 +11,22 @@ Operations:
 
 ---
 
+## [2026-08-11] refresh | AOT multi-block resuming — Phase 2 (continuation live-ins) landed
+
+Implemented cross-block continuation live-in threading: a resuming perform's
+continuation reads values produced in an earlier block (e.g. a mutable
+accumulator set by one perform, read after a later perform) by threading them
+through the handler's Resume dispatch. `continuation_live_ins` (backward
+liveness over normal successors), `resuming_threading` (per-site extras +
+uniform width), threaded slots allocated even for single-site bodies (fixing a
+loop-carried regression in the single-continuation Resume path). Commit
+`c51df8e`. The AOT backend is now functionally complete for non-distributed
+programs.
+
+Touched: [[queries/aot-multi-block-resuming]], `src/aot/codegen.rs`
+
+---
+
 ## [2026-08-11] refresh | AOT multi-block resuming — general SSA phi fix
 
 While scoping Phase 2 (cross-block prior-result reads) found the

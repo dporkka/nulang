@@ -2,7 +2,9 @@
 
 **Status:** Phase 1 IMPLEMENTED (`758ce4d`, 2026-08-11). General SSA phi fix
 (prerequisite) IMPLEMENTED (`8d0c286`, 2026-08-11). Phase 2 (cross-block
-prior-result reads) still open — narrowed to *continuation live-in threading*.
+continuation live-ins) IMPLEMENTED (`c51df8e`, 2026-08-11). The AOT backend is
+now functionally complete for non-distributed programs (only remote
+spawn/ask remain, genuinely out of scope).
 **Symptom (before fix):** `Error: AOT unsupported: multi-perform resuming handler with perform sites across multiple blocks is not yet supported by the native backend`
 **Source of truth:** `src/aot/codegen.rs` (compile_mir_function_body + helpers).
 
@@ -196,23 +198,30 @@ successor of the handler body) is NOT dominated by that block, so it still
 can't read `acc` unless the value is threaded through the handler's Resume
 dispatch into the continuation's params.
 
-**Narrowed Phase 2 design (continuation live-in threading):**
-1. At each resuming perform site, extend the uniform threaded slot set to also
-   carry the perform block's live-in registers that the continuation reads
-   (the post-perform code's operands that aren't recomputed in it).
-2. The handler body's threaded width becomes max over sites of (same-block
-   priors + continuation live-ins); each site supplies its own set padded to
-   that width.
-3. `Resume` forwards the full threaded set (as it already does post-Phase-1);
-   the continuation binds the live-in slots to their local registers.
-4. Remove `cross_block_perform_read` for the now-supported patterns (keep it
-   only where a value is live into a later site's block but not available at
-   that site — the genuinely inexpressible remainder).
+**Narrowed Phase 2 — implemented (`c51df8e`):**
+1. `continuation_live_ins` computes, per resuming perform site, the register
+   set live at the continuation entry via a backward liveness walk from each
+   block's live-out — over NORMAL successors only (the handler body is not a
+   real flow successor, so its effect params must not count as live into the
+   perform block).
+2. `resuming_threading` derives per-site "extras" (continuation live-ins minus
+   the site's dst and same-block priors) and the per-body uniform width =
+   max over sites of (priors + extras).
+3. The handler body allocates threaded slots whenever any site has them
+   (width > 0), not just for multi-cont bodies — a single-site loop
+   continuation still needs them (this was a regression found and fixed: the
+   single-continuation `Resume` path must forward the threaded set too, not
+   just the resume value).
+4. Each site packs [same-block priors, extras] padded to width; the
+   continuation binds both; `Resume` forwards the full threaded set on both
+   the single- and multi-continuation paths. `cross_block_perform_read` removed.
 
-Still not done — deferred. The pattern is rare (a resuming perform result
-stored to a mutable var, then a SECOND perform of the same handler reads it),
-and the change risks destabilizing the now-correct Phase 1 continuations.
-Anything the current guard misses still fails loudly in the CLIF verifier.
+The general phi fix (8d0c286) is the prerequisite: it makes the cross-block
+value a proper merge block param, so it is available at the site to thread.
+Verified patterns: exclusive if/else (23), same-block multi (23/28),
+discarded-first sequential (24), cross-block prior read (35), pre-perform
+compute read cross-block (34), loop-carried resuming (3) — all match the
+interpreter.
 
 ## Files / functions to touch
 
