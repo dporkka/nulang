@@ -521,6 +521,15 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // PerformAsync routes boxed argument values to the runtime's async-effect
+    // dispatcher; an unboxed (raw) Int argument would be misread there.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::PerformAsync { .. }, .. }) {
+                return false;
+            }
+        }
+    }
     // Captured closures allocate a closure object holding boxed capture values
     // and dispatch through a runtime helper; the capture slots must be tagged.
     for block in &func.blocks {
@@ -926,6 +935,32 @@ pub fn compile_mir_function_body(
             h_sig.params.push(AbiParam::new(types::I64)); // closure value
             for _ in 0..n {
                 h_sig.params.push(AbiParam::new(types::I64)); // explicit args
+            }
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(h_name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(h_name, func_ref);
+        }
+        // async-effect helpers: nulang_aot_perform_async_N(effect, arg0..)
+        // -> i64
+        const AOT_PERFORM_ASYNC_HELPERS: [&str; 9] = [
+            "nulang_aot_perform_async_0",
+            "nulang_aot_perform_async_1",
+            "nulang_aot_perform_async_2",
+            "nulang_aot_perform_async_3",
+            "nulang_aot_perform_async_4",
+            "nulang_aot_perform_async_5",
+            "nulang_aot_perform_async_6",
+            "nulang_aot_perform_async_7",
+            "nulang_aot_perform_async_8",
+        ];
+        for (n, h_name) in AOT_PERFORM_ASYNC_HELPERS.iter().enumerate() {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // effect name (TAG_STRING)
+            for _ in 0..n {
+                h_sig.params.push(AbiParam::new(types::I64));
             }
             h_sig.returns.push(AbiParam::new(types::I64));
             let h_id = module
@@ -2093,9 +2128,54 @@ fn compile_rvalue(
             }
             Ok(copy)
         }
-        mir::RValue::PerformAsync { .. } => Err(AotCompileError::Unsupported(
-            "PerformAsync: async effect dispatch requires the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::RValue::PerformAsync { effect_op, args, .. } => {
+            // Async-effect dispatch: route through `nulang_aot_perform_async_N`,
+            // which calls the callbacks' `perform_async` (the same path the
+            // bytecode PerformAsync opcode takes). Synchronously-completing
+            // effects (Pipeline.*, Supervisor.*, Timer.sleep(0)) deliver their
+            // result; suspending effects (LLM/Inference.ask, Timer.sleep with
+            // a positive delay) degrade to nil — the native backend has no VM
+            // suspension to park the actor mid-behavior.
+            let eff_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(effect_op.clone()),
+                mode,
+                constants,
+            )?;
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|id| {
+                    let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                    local_vals.get(&reg).copied().ok_or_else(|| {
+                        AotCompileError::Internal(format!(
+                            "perform_async arg local {} uninitialized",
+                            id.0
+                        ))
+                    })
+                })
+                .collect::<AotResult<Vec<_>>>()?;
+            let helper_name = match arg_vals.len() {
+                0 => "nulang_aot_perform_async_0",
+                1 => "nulang_aot_perform_async_1",
+                2 => "nulang_aot_perform_async_2",
+                3 => "nulang_aot_perform_async_3",
+                4 => "nulang_aot_perform_async_4",
+                5 => "nulang_aot_perform_async_5",
+                6 => "nulang_aot_perform_async_6",
+                7 => "nulang_aot_perform_async_7",
+                8 => "nulang_aot_perform_async_8",
+                n => {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "perform_async with {} args (max 8 in AOT)",
+                        n
+                    )))
+                }
+            };
+            let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+            call_args.push(eff_val);
+            call_args.extend(arg_vals);
+            call_helper(builder, helpers, helper_name, &call_args)
+        }
         mir::RValue::SignalWait { .. } => Err(AotCompileError::Unsupported(
             "SignalWait: workflow signals require the bytecode backend (unavailable with --backend native)".into(),
         )),
@@ -3831,6 +3911,65 @@ mod tests {
             log[0].1.first(),
             Some(&crate::vm::Value::nil()),
             "AOT ask on an AOT-wired target follows the native fire-and-forget contract (nil)"
+        );
+    }
+
+    #[test]
+    fn test_aot_runtime_native_perform_async() {
+        // `perform Pipeline.new()` in an AOT-compiled behavior must compile
+        // and route through the Runtime's `perform_async` path (the same one
+        // the bytecode PerformAsync opcode takes). Pipeline.new completes
+        // synchronously with a string id, which the helper materializes as a
+        // heap string; the behavior emits it as an event arg.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor W {
+                behavior go() {
+                    let pid = Pipeline.new()
+                    emit Got(pid)
+                }
+            }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+
+        let mut rt = crate::runtime::Runtime::new();
+        rt.register_aot_module(aot);
+        // Behavior index 0 = W.go.
+        let w = rt
+            .spawn_from_module(&code, 0, Vec::new())
+            .as_actor_id()
+            .expect("W spawn");
+
+        rt.send_message_by_id(w, 0, &[]);
+        rt.run_scheduler();
+
+        let log = &rt.actors.get(&w).expect("W actor").event_log;
+        assert_eq!(log.len(), 1, "one event should be emitted");
+        assert_eq!(log[0].0, "Got", "event name should match");
+        let pid = log[0].1.first().expect("event should carry the pipeline id");
+        assert!(
+            pid.is_string() || pid.as_ptr().is_some(),
+            "pipeline id must be a string value, got {:?}",
+            pid
         );
     }
 

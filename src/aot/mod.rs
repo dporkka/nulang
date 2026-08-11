@@ -536,6 +536,18 @@ pub fn clear_aot_module_ctx() {
     AOT_MODULE_CTX.with(|c| *c.borrow_mut() = std::ptr::null());
 }
 
+/// The armed module's constant pool, for callbacks that resolve string
+/// arguments (async effect dispatch). Empty when no module is armed.
+pub fn aot_module_constants() -> &'static [crate::bytecode::Constant] {
+    let module = AOT_MODULE_CTX.with(|c| *c.borrow());
+    if module.is_null() {
+        &[]
+    } else {
+        // SAFETY: the armed module outlives the dispatched native call.
+        unsafe { (*module).constants() }
+    }
+}
+
 /// Native-code entry point for captured-closure dispatch: resolve a compiled
 /// function pointer by MIR function index from the armed module context.
 /// Returns the pointer as u64 (0 when no module is armed or the index is out
@@ -1068,6 +1080,20 @@ impl crate::vm::ActorVmCallbacks for AotRuntimeCallbacks {
         bc.perform_builtin_effect_in_module(effect_name, op_name, module, regs)
     }
 
+    fn perform_async(
+        &mut self,
+        effect_op: &str,
+        constants: &[crate::bytecode::Constant],
+        args: &[crate::vm::Value],
+    ) -> crate::vm::PerformAsyncResult {
+        // Delegate to the bytecode callbacks, which route the async-effect
+        // family (Inference/LLM.ask, Timer.sleep, Pipeline.*, Supervisor.*)
+        // through the real Runtime — the exact bytecode PerformAsync path.
+        let mut bc =
+            crate::runtime::callbacks::BytecodeRuntimeCallbacks::new(self.runtime, self.actor_id);
+        bc.perform_async(effect_op, constants, args)
+    }
+
     fn emit_event(&mut self, event: &str, args: &[crate::vm::Value]) {
         // SAFETY: as above.
         unsafe { (*self.runtime).emit_event(self.actor_id, event, args) };
@@ -1273,6 +1299,15 @@ fn collect_rvalue_field_and_consts(
                         constants.push(c);
                     }
                 }
+            }
+        }
+        mir::RValue::PerformAsync { effect_op, .. } => {
+            // Intern the fully-qualified effect name so AOT codegen can emit
+            // it as a TAG_STRING constant resolved back to content at dispatch
+            // time by `nulang_aot_perform_async_N`.
+            let c = crate::bytecode::Constant::String(effect_op.clone());
+            if !constants.contains(&c) {
+                constants.push(c);
             }
         }
         _ => {}

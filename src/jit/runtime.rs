@@ -1327,6 +1327,57 @@ define_aot_call_closure!(nulang_aot_call_closure_7, a0, a1, a2, a3, a4, a5, a6);
 define_aot_call_closure!(nulang_aot_call_closure_8, a0, a1, a2, a3, a4, a5, a6, a7);
 
 // ---------------------------------------------------------------------------
+// AOT async effect dispatch
+// ---------------------------------------------------------------------------
+// `perform Effect.op(args)` for the async-effect family (LLM/Inference.ask,
+// Timer.sleep, Pipeline.*, Supervisor.*) lowers to an arity-matched
+// `nulang_aot_perform_async_N` call. The helper resolves the fully-qualified
+// effect name from the module pool, routes through the current callbacks'
+// `perform_async` (the same path the bytecode PerformAsync opcode takes), and
+// materializes the result: Ready(Some(content)) becomes a heap string,
+// Ready(None) and unarmed callbacks become nil. Effects that return Pending
+// (LLM.ask, Timer.sleep with a positive delay) degrade to nil — the native
+// backend has no VM suspension, so the actor cannot be parked mid-behavior.
+
+macro_rules! define_aot_perform_async {
+    ($name:ident, $($arg:ident),*) => {
+        /// Dispatch an async effect from AOT-compiled code.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(effect_raw: u64 $(, $arg: u64)*) -> u64 {
+            let args = [$($arg),*];
+            let effect_op = resolve_string_coerce(effect_raw).unwrap_or_default();
+            let constants = crate::aot::aot_module_constants();
+            let vals: Vec<Value> = args.iter().map(|a| Value::from_bits(*a)).collect();
+            match try_with_callbacks(|cb| cb.perform_async(&effect_op, constants, &vals)) {
+                Some(crate::vm::PerformAsyncResult::Ready(Some(content))) => {
+                    let bytes = content.into_bytes();
+                    if let Some(ptr) = alloc_obj(bytes.len() + 1, HeapTypeTag::String) {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                        Value::ptr(ptr).as_raw()
+                    } else {
+                        Value::nil().as_raw()
+                    }
+                }
+                // Ready(None), unarmed callbacks, or Pending (no native
+                // suspension) all degrade to nil.
+                _ => Value::nil().as_raw(),
+            }
+        }
+    };
+}
+
+define_aot_perform_async!(nulang_aot_perform_async_0,);
+define_aot_perform_async!(nulang_aot_perform_async_1, a0);
+define_aot_perform_async!(nulang_aot_perform_async_2, a0, a1);
+define_aot_perform_async!(nulang_aot_perform_async_3, a0, a1, a2);
+define_aot_perform_async!(nulang_aot_perform_async_4, a0, a1, a2, a3);
+define_aot_perform_async!(nulang_aot_perform_async_5, a0, a1, a2, a3, a4);
+define_aot_perform_async!(nulang_aot_perform_async_6, a0, a1, a2, a3, a4, a5);
+define_aot_perform_async!(nulang_aot_perform_async_7, a0, a1, a2, a3, a4, a5, a6);
+define_aot_perform_async!(nulang_aot_perform_async_8, a0, a1, a2, a3, a4, a5, a6, a7);
+
+// ---------------------------------------------------------------------------
 // AOT selective receive
 // ---------------------------------------------------------------------------
 // `receive { | Behavior(params) => ... }` in an AOT-compiled behavior lowers
