@@ -5900,6 +5900,41 @@ mod vm_tests {
     }
 
     /// Closure capture environments: Closure + CapStore then Call + CapLoad
+    /// A source-compiled arithmetic `while` loop (the hot_loop bench source)
+    /// must tier up through the JIT: the compiler's loop bytecode has a
+    /// back-edge, so `find_compilable_region` detects the loop and compiles
+    /// it natively. Guards against silent regressions to interpreter-only
+    /// arithmetic hot loops.
+    #[test]
+    fn test_jit_source_hot_loop_tiers_up() {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+
+        let source = "var sum = 0; var i = 0; while i < 100000 { sum = sum + i * 3 - i / 7; i = i + 1; }; sum";
+        let mut type_checker = TypeChecker::new();
+        let tokens = Lexer::new(source).lex().expect("lex");
+        let ast = Parser::new(tokens).parse_module().expect("parse");
+        type_checker.check_module(&ast).expect("typecheck");
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+        let mut mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
+        let module = crate::mir_codegen::compile_mir(&mut mir, "test").expect("compile");
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run().unwrap();
+        let compiled = vm
+            .jit_session
+            .as_ref()
+            .map(|j| j.compiled_count())
+            .unwrap_or(0);
+        assert!(
+            compiled > 0,
+            "source-compiled hot loop must JIT-compile, got {compiled} regions"
+        );
+        assert!(result.is_int(), "hot_loop must return an Int, got {result:?}");
+    }
+
     /// round-trips the captured value into the callee frame.
     #[test]
     fn test_closure_capture_env_roundtrip() {
