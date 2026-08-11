@@ -630,8 +630,6 @@ fn main() {
             }
         }
     }
-    return;
-
     if let Some(path) = opts.check_file {
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
