@@ -80,12 +80,15 @@ pub struct JitSession {
     /// region crosses TIER2_THRESHOLD, a more aggressive compilation is
     /// attempted. Reset after each promotion attempt.
     tier2_counters: FxHashMap<(usize, usize), u64>,
-    /// Hot counters keyed by `(module_idx, offset)` so identical offsets in
-    /// different modules do not share (or pollute) each other's counts.
-    /// Per-session rather than process-global: VMs never share counters,
-    /// and the single-scheduler-thread invariant means no synchronization
-    /// is needed — same as `compiled` and `typed_regions`.
-    hot_counters: FxHashMap<(usize, usize), u64>,
+    /// Hot counters, flat `Vec<Vec<u32>>` indexed `[module_idx][offset]` so
+    /// identical offsets in different modules keep independent counts.
+    /// A flat array (not an `FxHashMap`) because `record_and_check_hot` runs
+    /// on EVERY interpreted step of a JIT-enabled VM — even cold code that
+    /// never tiers up — so the per-step cost must be a bounds-check + array
+    /// increment, not a hash insert. Rows grow lazily on first touch. `u32`
+    /// is ample: a region crosses HOT_THRESHOLD (1000) and compiles long
+    /// before a counter could wrap.
+    hot_counts: Vec<Vec<u32>>,
     /// Regions compiled through the type-directed (guard-stripped) path in
     /// `typed_compiler`, i.e. where inferred register types were available.
     typed_regions: FxHashSet<(usize, usize)>,
@@ -133,7 +136,7 @@ impl JitSession {
         Some(JitSession {
             module,
             compiled: FxHashMap::default(),
-            hot_counters: FxHashMap::default(),
+            hot_counts: Vec::new(),
             typed_regions: FxHashSet::default(),
             builder_context: FunctionBuilderContext::new(),
             tier2_counters: FxHashMap::default(),
@@ -146,15 +149,25 @@ impl JitSession {
     /// interpreted at least `HOT_THRESHOLD` times, making it eligible for
     /// JIT compilation.
     pub fn record_and_check_hot(&mut self, module_idx: usize, offset: usize) -> bool {
-        let count = self.hot_counters.entry((module_idx, offset)).or_insert(0);
+        if module_idx >= self.hot_counts.len() {
+            self.hot_counts.resize(module_idx + 1, Vec::new());
+        }
+        let row = &mut self.hot_counts[module_idx];
+        if offset >= row.len() {
+            // Grow geometrically so first-touch allocation across a whole
+            // module is linear overall, not O(offset) per distinct pc.
+            let new_len = (offset + 1).max(row.len().max(1) * 2);
+            row.resize(new_len, 0);
+        }
+        let count = &mut row[offset];
         *count += 1;
-        *count >= HOT_THRESHOLD
+        u64::from(*count) >= HOT_THRESHOLD
     }
 
     /// Reset all hot counters (used by tests that re-heat a region on an
     /// existing session).
     pub fn reset_hot_counters(&mut self) {
-        self.hot_counters.clear();
+        self.hot_counts.clear();
     }
 
     /// Record one execution of an already-compiled region and attempt
@@ -316,6 +329,12 @@ impl JitSession {
 
     /// Check if a `(module_idx, offset)` region has already been compiled.
     pub fn is_compiled(&self, module_idx: usize, offset: usize) -> bool {
+        // Fast path: before any region is compiled — the common case for a
+        // cold program, which is exactly when the probe runs on every step —
+        // skip the hash entirely.
+        if self.compiled.is_empty() {
+            return false;
+        }
         self.compiled.contains_key(&(module_idx, offset))
     }
 
@@ -541,13 +560,47 @@ pub use crate::backends::TieredAction;
 
 impl crate::backends::JitBackend for JitSession {
     fn is_compiled(&self, module_idx: usize, pc: usize) -> bool {
+        // Fast path: skip the hash while nothing is compiled (the common
+        // per-step probe on a cold program).
+        if self.compiled.is_empty() {
+            return false;
+        }
         self.compiled.contains_key(&(module_idx, pc))
     }
 
     fn record_and_check_hot(&mut self, module_idx: usize, pc: usize) -> bool {
-        let count = self.hot_counters.entry((module_idx, pc)).or_insert(0);
+        if module_idx >= self.hot_counts.len() {
+            self.hot_counts.resize(module_idx + 1, Vec::new());
+        }
+        let row = &mut self.hot_counts[module_idx];
+        if pc >= row.len() {
+            let new_len = (pc + 1).max(row.len().max(1) * 2);
+            row.resize(new_len, 0);
+        }
+        let count = &mut row[pc];
         *count += 1;
-        *count >= HOT_THRESHOLD
+        u64::from(*count) >= HOT_THRESHOLD
+    }
+
+    fn probe_and_maybe_hot(&mut self, module_idx: usize, pc: usize) -> bool {
+        // Single inlined probe — the per-step interpreter cost when the JIT
+        // is enabled. `is_compiled` and `record_and_check_hot` bodies are
+        // inlined here (not called through `dyn`) so the common cold case is
+        // a couple of bounds checks + a flat-array increment, no hash.
+        if !self.compiled.is_empty() && self.compiled.contains_key(&(module_idx, pc)) {
+            return true;
+        }
+        if module_idx >= self.hot_counts.len() {
+            self.hot_counts.resize(module_idx + 1, Vec::new());
+        }
+        let row = &mut self.hot_counts[module_idx];
+        if pc >= row.len() {
+            let new_len = (pc + 1).max(row.len().max(1) * 2);
+            row.resize(new_len, 0);
+        }
+        let count = &mut row[pc];
+        *count += 1;
+        u64::from(*count) >= HOT_THRESHOLD
     }
 
     fn compiled_region_len(&self, module_idx: usize, pc: usize) -> Option<usize> {
@@ -563,7 +616,7 @@ impl crate::backends::JitBackend for JitSession {
     }
 
     fn reset_hot_counters(&mut self) {
-        self.hot_counters.clear();
+        self.hot_counts.clear();
     }
 
     fn tiered_execute_step_typed(

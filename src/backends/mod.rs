@@ -77,6 +77,21 @@ pub trait JitBackend {
     /// Record one interpretation and return `true` when the region is hot.
     fn record_and_check_hot(&mut self, module_idx: usize, pc: usize) -> bool;
 
+    /// Fast combined per-step probe: return `true` when the region at
+    /// `(module_idx, pc)` should execute now — because it is already
+    /// compiled, or it just became hot (recording one interpretation when
+    /// not compiled). This is the ONLY per-step probe the interpreter pays
+    /// when the JIT is enabled, so it must be a single dyn-dispatch call
+    /// (the default delegates to `is_compiled` + `record_and_check_hot` for
+    /// alternative backends; `JitSession` overrides it with inlined logic).
+    fn probe_and_maybe_hot(&mut self, module_idx: usize, pc: usize) -> bool {
+        if self.is_compiled(module_idx, pc) {
+            true
+        } else {
+            self.record_and_check_hot(module_idx, pc)
+        }
+    }
+
     /// Number of bytecode instructions in the compiled region at `(module_idx, pc)`.
     fn compiled_region_len(&self, module_idx: usize, pc: usize) -> Option<usize>;
 

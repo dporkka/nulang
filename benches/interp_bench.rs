@@ -104,10 +104,44 @@ fn bench_interp_record_loop(c: &mut Criterion) {
     });
 }
 
+/// A loop below HOT_THRESHOLD (500 < 1000 iterations), so no region ever
+/// tiers up. Comparing JIT-enabled (`VM::new`) vs JIT-disabled
+/// (`new_without_jit`) on identical source quantifies the per-instruction
+/// JIT-probe overhead the default path pays on cold code (two FxHashMap
+/// lookups per step: `is_compiled` + `record_and_check_hot`).
+fn bench_interp_cold_jit_probe(c: &mut Criterion) {
+    let source =
+        "var sum = 0; var i = 0; while i < 500 { sum = sum + i * 2 - i / 3; i = i + 1; }; sum";
+    let module = compile(source);
+
+    // Baseline: JIT disabled — pure interpreter dispatch, no probes.
+    c.bench_function("interp/cold_jit_off", |b| {
+        b.iter_batched(
+            || fresh_interp_vm(&module),
+            |mut vm| black_box(vm.run().unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+
+    // JIT enabled but nothing hot: every step pays the JIT probe.
+    c.bench_function("interp/cold_jit_on", |b| {
+        b.iter_batched(
+            || {
+                let mut vm = VM::new(); // JIT enabled (default)
+                vm.load_module(module.clone());
+                vm
+            },
+            |mut vm| black_box(vm.run().unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 criterion_group!(
     benches,
     bench_interp_int_loop,
     bench_interp_float_loop,
     bench_interp_function_call,
     bench_interp_record_loop,
+    bench_interp_cold_jit_probe,
 );

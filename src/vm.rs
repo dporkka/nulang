@@ -2530,6 +2530,20 @@ impl VM {
     fn try_jit_execute(&mut self, frame_idx: usize) -> bool {
         let module_idx = self.frames[frame_idx].module_idx;
         let pc = self.frames[frame_idx].pc;
+        let jit = match &mut self.jit_session {
+            Some(j) => j.as_mut(),
+            None => return false,
+        };
+
+        // Check cheap: already compiled, or newly hot? Single probe call so
+        // the per-step cost is one vtable dispatch into inlined logic (a
+        // flat-array increment for cold code), not two dyn calls. The
+        // module/constants fetch below is deferred until AFTER the probe so
+        // a cold step (probe returns false) doesn't pay it at all.
+        if !jit.probe_and_maybe_hot(module_idx, pc) {
+            return false;
+        }
+
         let module = match self.modules.get(module_idx) {
             Some(m) => m,
             None => return false,
@@ -2539,17 +2553,6 @@ impl VM {
             .get(module_idx)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        let jit = match &mut self.jit_session {
-            Some(j) => j.as_mut(),
-            None => return false,
-        };
-
-        // Check cheap: already compiled, or newly hot?
-        // Short-circuit: record_and_check_hot is only called when not
-        // already compiled, preserving the original two-branch logic.
-        if !jit.is_compiled(module_idx, pc) && !jit.record_and_check_hot(module_idx, pc) {
-            return false;
-        }
 
         // Snapshot registers into a flat array for the JIT ABI.
         let mut regs: [u64; 256] = [0; 256];
