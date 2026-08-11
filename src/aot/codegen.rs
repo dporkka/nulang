@@ -568,6 +568,43 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     if !func.captures.is_empty() {
         return false;
     }
+    // A call through a closure value whose target is not statically known
+    // (a parameter, a recursive-closure const binding, or a captured closure)
+    // dispatches through the runtime helper with boxed arguments; an unboxed
+    // caller would pass raw Ints the helper misreads. Only direct calls to
+    // statically-known uncaptured closures stay unboxed.
+    let mut direct_closure_locals: HashSet<u32> = HashSet::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign {
+                dst,
+                op: mir::RValue::Closure { captures, .. },
+                ..
+            } = stmt
+            {
+                if captures.is_empty() {
+                    direct_closure_locals.insert(mir::FunctionBuilder::LOCAL_BASE + dst.0);
+                }
+            }
+        }
+    }
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign {
+                op: mir::RValue::Call {
+                    func: mir::FuncRef::Local(id),
+                    ..
+                },
+                ..
+            } = stmt
+            {
+                let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                if !direct_closure_locals.contains(&reg) {
+                    return false;
+                }
+            }
+        }
+    }
     let local_base = mir::FunctionBuilder::LOCAL_BASE as usize;
     for param in &func.params {
         let reg = local_base + param.0 as usize;
@@ -1828,56 +1865,61 @@ fn compile_rvalue(
                 })?,
                 mir::FuncRef::Local(closure_id) => {
                     let reg = mir::FunctionBuilder::LOCAL_BASE + closure_id.0;
-                    let target_idx = closure_targets.get(&reg).copied().ok_or_else(|| {
-                        AotCompileError::Unsupported(
-                            "indirect call: closure target unknown at compile time".into(),
-                        )
-                    })?;
-                    if captured_closure_locals.contains(&reg) {
-                        // Captured closure: the explicit args travel with the
-                        // closure value; the helper reads the stored capture
-                        // values and dispatches to the compiled target with
-                        // (args + captures). Mirrors the bytecode ClosureCall.
-                        let closure_val = local_vals.get(&reg).ok_or_else(|| {
-                            AotCompileError::Internal("closure value uninitialized".into())
-                        })?;
-                        let arg_vals: Vec<Value> =
-                            args.iter()
-                                .map(|id| {
-                                    let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
-                                    local_vals.get(&reg).copied().ok_or_else(|| {
-                                        AotCompileError::Internal("call arg uninitialized".into())
+                    match closure_targets.get(&reg) {
+                        Some(&target_idx) if !captured_closure_locals.contains(&reg) => {
+                            // Statically-known uncaptured closure: direct call.
+                            call_targets.get(&target_idx).copied().ok_or_else(|| {
+                                AotCompileError::Internal(format!(
+                                    "call target fn {} not compiled yet",
+                                    target_idx
+                                ))
+                            })?
+                        }
+                        _ => {
+                            // Captured closure (statically known) or a closure
+                            // value whose target is not statically known (e.g.
+                            // passed as a parameter): route through the runtime
+                            // helper, which dispatches on the value's tag
+                            // (TAG_CLOSURE object → args + captures; TAG_INT →
+                            // uncaptured fn index → args only). Mirrors the
+                            // bytecode ClosureCall.
+                            let closure_val = local_vals.get(&reg).ok_or_else(|| {
+                                AotCompileError::Internal("closure value uninitialized".into())
+                            })?;
+                            let arg_vals: Vec<Value> =
+                                args.iter()
+                                    .map(|id| {
+                                        let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                                        local_vals.get(&reg).copied().ok_or_else(|| {
+                                            AotCompileError::Internal(
+                                                "call arg uninitialized".into(),
+                                            )
+                                        })
                                     })
-                                })
-                                .collect::<AotResult<Vec<_>>>()?;
-                        let helper_name = match arg_vals.len() {
-                            0 => "nulang_aot_call_closure_0",
-                            1 => "nulang_aot_call_closure_1",
-                            2 => "nulang_aot_call_closure_2",
-                            3 => "nulang_aot_call_closure_3",
-                            4 => "nulang_aot_call_closure_4",
-                            5 => "nulang_aot_call_closure_5",
-                            6 => "nulang_aot_call_closure_6",
-                            7 => "nulang_aot_call_closure_7",
-                            8 => "nulang_aot_call_closure_8",
-                            n => {
-                                return Err(AotCompileError::Unsupported(format!(
-                                    "closure call with {} args (max 8 in AOT)",
-                                    n
-                                )))
-                            }
-                        };
-                        let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
-                        call_args.push(*closure_val);
-                        call_args.extend(arg_vals);
-                        return call_helper(builder, helpers, helper_name, &call_args);
+                                    .collect::<AotResult<Vec<_>>>()?;
+                            let helper_name = match arg_vals.len() {
+                                0 => "nulang_aot_call_closure_0",
+                                1 => "nulang_aot_call_closure_1",
+                                2 => "nulang_aot_call_closure_2",
+                                3 => "nulang_aot_call_closure_3",
+                                4 => "nulang_aot_call_closure_4",
+                                5 => "nulang_aot_call_closure_5",
+                                6 => "nulang_aot_call_closure_6",
+                                7 => "nulang_aot_call_closure_7",
+                                8 => "nulang_aot_call_closure_8",
+                                n => {
+                                    return Err(AotCompileError::Unsupported(format!(
+                                        "closure call with {} args (max 8 in AOT)",
+                                        n
+                                    )))
+                                }
+                            };
+                            let mut call_args = Vec::with_capacity(arg_vals.len() + 1);
+                            call_args.push(*closure_val);
+                            call_args.extend(arg_vals);
+                            return call_helper(builder, helpers, helper_name, &call_args);
+                        }
                     }
-                    call_targets.get(&target_idx).copied().ok_or_else(|| {
-                        AotCompileError::Internal(format!(
-                            "call target fn {} not compiled yet",
-                            target_idx
-                        ))
-                    })?
                 }
             };
             let arg_vals: Vec<Value> =
@@ -4309,6 +4351,43 @@ mod tests {
             val.as_int(),
             Some(42),
             "closure capturing a=30, b=10 applied to 2 should yield 42"
+        );
+    }
+
+    #[test]
+    fn test_aot_closure_passed_as_argument() {
+        // A captured closure handed to another function whose body calls it
+        // (closure target not statically known at the call site) must dispatch
+        // through the runtime helper, which reads the TAG_CLOSURE object's fn
+        // index and captures at call time.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source =
+            "fn apply(f, x) { f(x) } let a = 40 in let add = fn(x) { x + a } in apply(add, 2)";
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let raw = aot.run().expect("native run");
+        let val = crate::vm::Value::from_raw(raw);
+        assert_eq!(
+            val.as_int(),
+            Some(42),
+            "closure passed as an argument and called there should yield 42"
         );
     }
 

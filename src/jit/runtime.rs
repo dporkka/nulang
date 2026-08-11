@@ -1292,24 +1292,41 @@ unsafe fn call_closure_dispatch(fn_ptr: u64, all: &[u64]) -> u64 {
 
 macro_rules! define_aot_call_closure {
     ($name:ident, $($arg:ident),*) => {
-        /// Invoke a captured closure: read fn_idx + captures, then dispatch.
+        /// Invoke a closure value: an uncaptured closure is a tagged fn index
+        /// (dispatch with the explicit args only); a captured closure is a
+        /// TAG_CLOSURE object carrying fn_idx + captures (dispatch with
+        /// args + captures). Handles closures whose target is not statically
+        /// known at the call site (e.g. passed as a parameter).
         #[no_mangle]
         pub unsafe extern "C" fn $name(closure_raw: u64 $(, $arg: u64)*) -> u64 {
-            let ptr = (closure_raw & PAYLOAD_MASK) as *mut u64;
-            if ptr.is_null() {
+            let args = [$($arg),*];
+            let fn_ptr;
+            let mut all: Vec<u64>;
+            if (closure_raw & TAG_MASK) == TAG_INT {
+                // Uncaptured closure: the tagged payload is the fn index.
+                let fn_idx = (closure_raw & PAYLOAD_MASK) as i64;
+                fn_ptr = crate::aot::nulang_aot_resolve_fn(fn_idx as u64);
+                all = Vec::with_capacity(args.len());
+                all.extend_from_slice(&args);
+            } else if (closure_raw & TAG_MASK) == TAG_CLOSURE {
+                // Captured closure object: [fn_idx, cap_count, cap0..].
+                let ptr = (closure_raw & PAYLOAD_MASK) as *mut u64;
+                if ptr.is_null() {
+                    return Value::nil().as_raw();
+                }
+                let fn_idx = *ptr;
+                let cap_count = *ptr.add(1) as usize;
+                fn_ptr = crate::aot::nulang_aot_resolve_fn(fn_idx);
+                all = Vec::with_capacity(args.len() + cap_count);
+                all.extend_from_slice(&args);
+                for i in 0..cap_count {
+                    all.push(*ptr.add(2 + i));
+                }
+            } else {
                 return Value::nil().as_raw();
             }
-            let fn_idx = *ptr;
-            let cap_count = *ptr.add(1) as usize;
-            let fn_ptr = crate::aot::nulang_aot_resolve_fn(fn_idx);
             if fn_ptr == 0 {
                 return Value::nil().as_raw();
-            }
-            let args = [$($arg),*];
-            let mut all: Vec<u64> = Vec::with_capacity(args.len() + cap_count);
-            all.extend_from_slice(&args);
-            for i in 0..cap_count {
-                all.push(*ptr.add(2 + i));
             }
             call_closure_dispatch(fn_ptr, &all)
         }
