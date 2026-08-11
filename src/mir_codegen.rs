@@ -1832,16 +1832,18 @@ fn dead_store_elim(func: &mut mir::Function) -> bool {
             let removable = match &stmt {
                 mir::Stmt::Assign { dst, op } => {
                     let self_move = matches!(op, mir::RValue::Load(src) if src == dst);
-                    // Named locals stay visible to the debugger at
+                    // Source-named locals stay visible to the debugger at
                     // breakpoints: constant propagation can make their
                     // definition look dead (the folded RValue no longer
                     // references them), but removing the store would make
-                    // the paused frame report nil. Only anonymous temps
-                    // are safe to drop.
+                    // the paused frame report nil. Only anonymous temps and
+                    // compiler-generated names (hir_lower's `__tmpN`) are
+                    // safe to drop.
                     let named = func
                         .locals
                         .get(dst.0 as usize)
-                        .map(|l| l.name.is_some())
+                        .and_then(|l| l.name.as_deref())
+                        .map(|n| !n.starts_with("__"))
                         .unwrap_or(false);
                     self_move
                         || (!named
@@ -3275,7 +3277,6 @@ mod optimize_tests {
     fn test_fold_string_concat() {
         // `"hello" + " " + "world"` folds to a single string constant.
         let module = compile_source(r#""hello" + " " + "world""#).unwrap();
-        eprintln!("DEBUG constants: {:?}", module.constants);
         assert!(
             module
                 .constants
@@ -3299,7 +3300,6 @@ mod optimize_tests {
         // Const(42); Return. After threading, block0 jumps straight to
         // block2 and the trampoline block1 becomes an unreachable Return.
         let mut b = mir::FunctionBuilder::new("t", Some(crate::types::Type::int()));
-        let b0 = b.current_block();
         let b1 = b.create_block();
         let b2 = b.create_block();
         b.terminate(mir::Terminator::Jump(b1));

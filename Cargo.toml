@@ -42,7 +42,7 @@ wasm-backend = ["dep:wasm-encoder", "dep:wasmtime", "dep:wat"]
 # `suspend` payloads).
 wasmfx-backend = ["wasm-backend", "wasmtime/gc-null"]
 http-client = ["dep:reqwest", "dep:tokio"]
-otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio"]
+otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio", "dep:tracing-opentelemetry"]
 tls = []
 
 [dependencies]
@@ -67,6 +67,7 @@ toml = "1"
 rustc-hash = "2"
 # Tracing/logging framework for structured diagnostics (zero-cost when off)
 tracing = "0.1"
+tracing-opentelemetry = { version = "0.25", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # REPL line editing, history, and completion

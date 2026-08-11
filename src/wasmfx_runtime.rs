@@ -253,7 +253,7 @@ mod tests {
         let ast = crate::parser::Parser::new(tokens).parse_module().unwrap();
         let mut tc = crate::typechecker::TypeChecker::new();
         tc.check_module(&ast).unwrap();
-        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir).unwrap();
         let mut backend = crate::wasmfx_backend::WasmFxBackend::new();
         backend.compile(&mir, "test").unwrap()

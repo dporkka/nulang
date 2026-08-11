@@ -56,6 +56,10 @@ pub fn init_tracer(url: &str, service_name: &str) -> Result<(), String> {
         .install_simple()
         .map_err(|e| format!("failed to build OTLP trace pipeline: {e}"))?;
 
+    // Keep the concrete SDK provider so `init_tracing` can build an
+    // `opentelemetry_sdk::trace::Tracer` (which implements
+    // `tracing_opentelemetry::PreSampledTracer`).
+    *TRACER_PROVIDER.lock() = Some(provider.clone());
     global::set_tracer_provider(provider);
     *guard = true;
     Ok(())
@@ -106,6 +110,54 @@ pub fn shutdown() {
     // does not expose a typed shutdown method.
     let mut mg = METER_INIT.lock();
     *mg = false;
+}
+
+/// Whether the tracing subscriber has been installed by [`init_tracing`].
+static TRACING_INIT: Mutex<bool> = Mutex::new(false);
+
+/// Concrete SDK tracer provider created by [`init_tracer`], kept so
+/// [`init_tracing`] can build an `opentelemetry_sdk::trace::Tracer` (the
+/// `tracing_opentelemetry` layer requires a `PreSampledTracer`, which the
+/// boxed global tracer is not).
+static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::TracerProvider>> =
+    Mutex::new(None);
+
+/// Install a `tracing` subscriber that forwards spans to both the terminal
+/// (formatted layer, filtered by `RUST_LOG`) and OpenTelemetry/OTLP, using
+/// the global tracer provider configured by [`init_tracer`].
+///
+/// Idempotent: the first call installs the subscriber; later calls are no-ops.
+/// Call after [`init_tracer`] so spans reach the OTLP exporter; if no tracer
+/// provider is configured the layer forwards to a no-op tracer (spans are
+/// dropped) while terminal logging still works.
+pub fn init_tracing(service_name: &str) -> Result<(), String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use opentelemetry::trace::TracerProvider as _;
+    let mut guard = TRACING_INIT.lock();
+    if *guard {
+        return Ok(());
+    }
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+    // Use the configured SDK provider when available; otherwise fall back to
+    // a no-op SDK provider so terminal logging still works and spans are
+    // dropped (the layer requires a `PreSampledTracer`).
+    let tracer = TRACER_PROVIDER
+        .lock()
+        .as_ref()
+        .map(|p| p.tracer(service_name.to_owned()))
+        .unwrap_or_else(|| {
+            opentelemetry_sdk::trace::TracerProvider::default().tracer(service_name.to_owned())
+        });
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+    *guard = true;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

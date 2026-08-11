@@ -4875,6 +4875,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn test_aot_capability_check_is_true() {
         // Capability checks are compile-time only; the AOT backend must
         // compile `CapabilityCheck` to tagged true (the bytecode backend

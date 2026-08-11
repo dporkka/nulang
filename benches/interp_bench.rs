@@ -42,8 +42,8 @@ fn compile(source: &str) -> CodeModule {
         }
     }
     let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
-    let mir = nulang::mir_lower::lower_module(&hir).expect("mir lower failed");
-    nulang::mir_codegen::compile_mir(&mir, "bench").expect("codegen failed")
+    let mut mir = nulang::mir_lower::lower_module(&hir).expect("mir lower failed");
+    nulang::mir_codegen::compile_mir(&mut mir, "bench").expect("codegen failed")
 }
 
 /// Fresh interpreter-only VM loaded with a clone of `module`. Each timed

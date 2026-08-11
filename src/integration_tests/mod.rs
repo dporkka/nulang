@@ -8469,7 +8469,7 @@ match { a: 2, b: 9 } with {
             let mut tc = TypeChecker::new();
             tc.check_module(&ast)?;
             let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-            let mut mir = crate::mir_lower::lower_module(&hir)?;
+            let mir = crate::mir_lower::lower_module(&hir)?;
             let mut backend = WasmBackend::new();
             backend.compile(&mir, "test")
         }
