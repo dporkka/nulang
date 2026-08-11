@@ -136,6 +136,9 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "arith_cmp", host_cmp)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_neg", host_neg)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -175,10 +178,11 @@ impl WasmRuntime {
     }
 
     pub fn run(&mut self) -> NuResult<crate::vm::Value> {
-        self.init_func
+        let raw = self
+            .init_func
             .call(&mut self.store, ())
-            .map(|raw| crate::vm::Value::from_raw(raw as u64))
-            .map_err(map_wasmtime_err)
+            .map_err(map_wasmtime_err)?;
+        Ok(crate::vm::Value::from_raw(raw as u64))
     }
 
     /// Resolve a tagged string `Value` (`TAG_STRING | offset`) to its text by
@@ -457,6 +461,23 @@ fn host_mod(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
         Ok(value_layout::tag_int(
             value_layout::sext48(a & value_layout::PAYLOAD_MASK) % denom,
         ) as i64)
+    }
+}
+
+/// `env.arith_neg(a: i64) -> i64`
+///
+/// Unary negation: flip the sign bit for a float, negate the payload for an
+/// int (matching the interpreter's INeg/FNeg). The WASM backend's inline
+/// `UnOp::Neg` previously OR'd TAG_INT unconditionally, corrupting floats.
+fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
+    let a = a as u64;
+    if value_layout::is_float_raw(a) {
+        // Flip the IEEE-754 sign bit (bit 63), NOT `SIGN_BIT` (bit 47, the
+        // 48-bit payload sign used for ints) — XORing the mantissa would
+        // corrupt the float.
+        Ok((a ^ 0x8000_0000_0000_0000) as i64)
+    } else {
+        Ok(value_layout::tag_int(-value_layout::sext48(a & value_layout::PAYLOAD_MASK)) as i64)
     }
 }
 

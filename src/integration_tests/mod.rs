@@ -8727,6 +8727,22 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_neg_float() {
+            // Positive literal alone must be exact.
+            let wasm = compile_source_to_wasm(r#"3.55"#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            eprintln!("TMP 3.55 wasm float = {:?}", val.as_float());
+            assert_eq!(val.as_float(), Some(3.55), "3.55 literal must be exact");
+            // Negated literal.
+            let wasm = compile_source_to_wasm(r#"-3.55"#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            eprintln!("TMP -3.55 wasm float = {:?}", val.as_float());
+            assert_eq!(val.as_float(), Some(-3.55), "-3.55 must negate the float");
+        }
+
+        #[test]
         fn test_wasm_run_float_div_by_zero() {
             // Float division by zero → nil (matches the interpreter), not inf.
             let v = run_source_to_value(r#"fn f() -> Float { 1.0 / 0.0 } f()"#).expect("run");

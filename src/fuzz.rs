@@ -191,6 +191,31 @@ fn seed_corpus() -> Vec<&'static str> {
         // --- Tuple/record in expressions ---
         "let t = (1, 2, 3); t.0 * t.1 + t.2",
         "let r = {a = 5, b = 6}; let r2 = {r .. a = 1}; r2.a * r2.b",
+        // --- Unary negation ---
+        "-(1 + 2)",
+        "-3.5",
+        "let x = 5; -x + 3",
+        // --- Complex boolean logic ---
+        "(1 < 2) and (3 > 2) or not false",
+        "not (1 == 2)",
+        "if (2 <= 3) and (4 >= 4) then 10 else 20",
+        // --- Float arrays ---
+        "let a = [1.5, 2.5]; a[0] + a[1]",
+        "let a = [1.0, 2.0, 3.0]; a[2] - a[0]",
+        // --- Edge numerics ---
+        "0 - 5",
+        "-7 % 3",
+        "-7 / 3",
+        "let a = 100; let b = a / 7; let c = a % 7; b * 7 + c",
+        // --- Arrays of records / nested calls ---
+        "let a = [{x = 1}, {x = 2}]; a[1].x",
+        "fn f(x) { x + 1 }; fn g(x) { f(x) * 2 }; g(5)",
+        "fn f(x) { x * 3 }; let a = [1, 2, 3]; f(a[1]) + f(a[2])",
+        "let r = {v = [1, 2]}; r.v[0] + r.v[1]",
+        // --- More strings ---
+        r#""foo" == "foo" and "bar" == "bar""#,
+        r#"let s = "ab"; (s ++ "c") == "abc""#,
+        r#"if "x" == "x" then 7 else 8"#,
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

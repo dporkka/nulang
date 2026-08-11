@@ -39,13 +39,17 @@ const IMPORT_ARITH_DIV: u32 = 11;
 const IMPORT_ARITH_MOD: u32 = 12;
 /// Function index of `env.arith_cmp` — float/int comparison (i64, i64, i64) -> i64.
 const IMPORT_ARITH_CMP: u32 = 13;
+/// Function index of `env.arith_neg` — unary negation (i64) -> i64.
+const IMPORT_ARITH_NEG: u32 = 14;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 14;
+const FUNC_IMPORT_COUNT: u32 = 15;
 
 const TY_VOID_TO_I64: u32 = 0;
 
 /// (i64, i64) -> i64 — used by `env.str_concat`.
 const TY_I64I64_TO_I64: u32 = 2;
+/// (i64) -> i64 — used by `env.arith_neg`.
+const TY_I64_TO_I64: u32 = 1;
 
 /// (i64, i64, i64) -> i64 — used by `env.arith_cmp`.
 const TY_I64I64I64_TO_I64: u32 = 3;
@@ -289,6 +293,7 @@ impl WasmBackend {
         imports.import("env", "arith_div", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "arith_mod", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "arith_cmp", EntityType::Function(TY_I64I64I64_TO_I64));
+        imports.import("env", "arith_neg", EntityType::Function(TY_I64_TO_I64));
         self.imports = imports;
     }
 
@@ -1034,19 +1039,13 @@ impl WasmBackend {
         func: &mir::Function,
     ) {
         use crate::ast::UnOp;
-        let pm = value_layout::PAYLOAD_MASK as i64;
 
         match op {
             UnOp::Neg => {
-                body.instruction(&Instruction::I64Const(0));
+                // Route through `env.arith_neg` so float operands negate their
+                // sign bit instead of being int-corrupted.
                 body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
-                body.instruction(&Instruction::I64Const(pm));
-                body.instruction(&Instruction::I64And);
-                body.instruction(&Instruction::I64Sub);
-                body.instruction(&Instruction::I64Const(pm));
-                body.instruction(&Instruction::I64And);
-                body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
-                body.instruction(&Instruction::I64Or);
+                body.instruction(&Instruction::Call(IMPORT_ARITH_NEG));
             }
             UnOp::Not => {
                 let tf = value_layout::tag_bool(false) as i64;
