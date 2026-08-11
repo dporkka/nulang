@@ -8610,6 +8610,44 @@ match { a: 2, b: 9 } with {
             let val = rt.run().expect("run");
             assert_eq!(val.as_int(), Some(42), "IIFE must run its closure body");
         }
+
+        #[test]
+        fn test_wasm_run_capability_check() {
+            // Capability checks are compile-time-only and erased at runtime, so
+            // CapabilityCheck must compile to tagged true (mirroring the
+            // interpreter's Const1 and the AOT backend). No source syntax
+            // produces it, so construct the MIR directly. Previously this
+            // silently fell through to nil in the WASM backend.
+            let mut builder =
+                crate::mir::FunctionBuilder::new("main", Some(crate::types::Type::bool()));
+            let tmp = builder.add_temp(crate::types::Type::int());
+            let out = builder.add_temp(crate::types::Type::bool());
+            builder.assign(
+                tmp,
+                crate::mir::RValue::Const(crate::bytecode::Constant::Int(1)),
+            );
+            builder.assign(out, crate::mir::RValue::CapabilityCheck { val: tmp });
+            builder.terminate(crate::mir::Terminator::Return(Some(out)));
+            let func = builder.build();
+            let module = crate::mir::Module {
+                name: "capcheck".into(),
+                functions: vec![func],
+                behaviors: vec![],
+                actor_metadata: vec![],
+                compensation_of: vec![],
+                parallel_branches_of: vec![],
+                foreign_functions: vec![],
+            };
+            let mut backend = WasmBackend::new();
+            let wasm = backend.compile(&module, "main").expect("wasm compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(
+                val.as_bool(),
+                Some(true),
+                "CapabilityCheck must yield true in WASM"
+            );
+        }
     }
 
     /// Entity declarations (with events and apply blocks) must pass through

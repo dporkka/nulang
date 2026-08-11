@@ -697,6 +697,15 @@ impl WasmBackend {
             RValue::ArrayLen(arr) => {
                 self.compile_array_len(body, arr, func);
             }
+            RValue::CapabilityCheck { .. } => {
+                // Reference capabilities are compile-time-only and erased at
+                // runtime, so the check always succeeds — mirroring the
+                // interpreter (`CapabilityCheck` compiles to `Const1`) and the
+                // AOT backend. Previously this silently fell through to nil.
+                body.instruction(&Instruction::I64Const(
+                    value_layout::tag_bool(true) as i64
+                ));
+            }
             _ => {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
             }
