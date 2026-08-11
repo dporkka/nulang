@@ -3769,7 +3769,7 @@ impl VM {
         // Try JIT execution for hot bytecode regions before interpreting.
         // Disabled while a debugger is attached so every instruction flows
         // through the interpreter (and the debug hook below).
-        if self.debug_hook.is_none() && self.try_jit_execute(frame_idx) {
+        if self.debug_hook.is_none() && self.jit_session.is_some() && self.try_jit_execute(frame_idx) {
             return Ok(());
         }
 
