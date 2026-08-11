@@ -2156,13 +2156,33 @@ fn binary_type(op: &ast::BinOp, l: &hir::Operand, r: &hir::Operand) -> Type {
             // real type is known).
             if l.ty() == Type::string() || r.ty() == Type::string() {
                 Type::string()
+            } else if is_float_operand(l) || is_float_operand(r) {
+                Type::float()
             } else {
                 Type::Primitive(PrimitiveType::Int)
             }
         }
         BinOp::Range => Type::Array(Box::new(Type::int())),
-        _ => Type::Primitive(PrimitiveType::Int),
+        // Arithmetic (Sub/Mul/Div/Mod/Pow) and any other non-boolean op:
+        // propagate a Float result when either operand is a float, otherwise
+        // Int. Without this, the result local's declared type is Int even for
+        // float operands, so downstream `Unary Neg` (and friends) mis-compile
+        // the float bits as an int (e.g. `-(0.1 + 0.22)`).
+        _ => {
+            if is_float_operand(l) || is_float_operand(r) {
+                Type::float()
+            } else {
+                Type::Primitive(PrimitiveType::Int)
+            }
+        }
     }
+}
+
+/// Whether an HIR operand carries a statically-known float type. Variable
+/// operands lower to `Type::unit()` (their precise type lives in the MIR
+/// locals), so this is a best-effort check for literal/derived operands.
+fn is_float_operand(o: &hir::Operand) -> bool {
+    o.ty() == Type::float()
 }
 /// Returns `Some(builtin_name)` if the call's func is a field access on a
 /// known builtin name (Pipeline, Supervisor, Debate), `None` otherwise.

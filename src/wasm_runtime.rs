@@ -421,9 +421,10 @@ fn host_arith_fi(
     if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
         fop(f64::from_bits(a), f64::from_bits(b)).to_bits() as i64
     } else {
-        // sext48 expects the 48-bit payload already masked off the tag.
-        let ia = value_layout::sext48(a & value_layout::PAYLOAD_MASK);
-        let ib = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
+        // Non-float, non-string operands (e.g. arrays) → 0, matching the
+        // interpreter's `as_int().unwrap_or(0)`.
+        let ia = crate::jit::runtime::as_int_or_zero(a);
+        let ib = crate::jit::runtime::as_int_or_zero(b);
         value_layout::tag_int(iop(ia, ib)) as i64
     }
 }
@@ -453,13 +454,11 @@ fn host_div(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
         }
         Ok((f64::from_bits(a) / denom).to_bits() as i64)
     } else {
-        let denom = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
+        let denom = crate::jit::runtime::as_int_or_one(b);
         if denom == 0 {
             return Ok(value_layout::TAG_NIL as i64);
         }
-        Ok(value_layout::tag_int(
-            value_layout::sext48(a & value_layout::PAYLOAD_MASK) / denom,
-        ) as i64)
+        Ok(value_layout::tag_int(crate::jit::runtime::as_int_or_zero(a) / denom) as i64)
     }
 }
 fn host_mod(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
@@ -472,13 +471,11 @@ fn host_mod(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
         }
         Ok((f64::from_bits(a) % denom).to_bits() as i64)
     } else {
-        let denom = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
+        let denom = crate::jit::runtime::as_int_or_one(b);
         if denom == 0 {
             return Ok(value_layout::TAG_NIL as i64);
         }
-        Ok(value_layout::tag_int(
-            value_layout::sext48(a & value_layout::PAYLOAD_MASK) % denom,
-        ) as i64)
+        Ok(value_layout::tag_int(crate::jit::runtime::as_int_or_zero(a) % denom) as i64)
     }
 }
 
@@ -495,7 +492,10 @@ fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
         // corrupt the float.
         Ok((a ^ 0x8000_0000_0000_0000) as i64)
     } else {
-        Ok(value_layout::tag_int(-value_layout::sext48(a & value_layout::PAYLOAD_MASK)) as i64)
+        // Non-float operand → treat as int via `as_int().unwrap_or(0)`,
+        // matching the interpreter (negating a tuple/array yields 0, not a
+        // corrupted pointer payload).
+        Ok(value_layout::tag_int(-crate::jit::runtime::as_int_or_zero(a)) as i64)
     }
 }
 
@@ -648,15 +648,31 @@ fn host_cmp(_caller: Caller<'_, HostState>, a: i64, b: i64, code: i64) -> Result
 /// Integer exponentiation `a ** b` for tagged integer values. Mirrors the
 /// interpreter/AOT `nulang_pow`: negative exponent or overflow → nil; 0^0 = 1.
 fn host_pow(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
-    let base = crate::vm::Value::from_raw(a as u64).as_int().unwrap_or(0);
-    let exp = crate::vm::Value::from_raw(b as u64).as_int().unwrap_or(0);
+    let a = a as u64;
+    let b = b as u64;
+    // Match the interpreter: both floats → powf; else int pow with
+    // wrapping_mul (negative exponent → nil).
+    if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
+        return Ok(f64::from_bits(a).powf(f64::from_bits(b)).to_bits() as i64);
+    }
+    let base = crate::jit::runtime::as_int_or_zero(a);
+    let exp = crate::jit::runtime::as_int_or_zero(b);
     if exp < 0 {
         return Ok(value_layout::TAG_NIL as i64);
     }
-    match base.checked_pow(exp as u32) {
-        Some(r) => Ok(value_layout::tag_int(r) as i64),
-        None => Ok(value_layout::TAG_NIL as i64),
+    let mut result: i64 = 1;
+    let mut base = base;
+    let mut exp = exp;
+    while exp > 0 {
+        if exp & 1 != 0 {
+            result = result.wrapping_mul(base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = base.wrapping_mul(base);
+        }
     }
+    Ok(value_layout::tag_int(result) as i64)
 }
 
 /// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)`

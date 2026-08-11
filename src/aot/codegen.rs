@@ -4470,6 +4470,57 @@ mod tests {
     }
 
     #[test]
+    fn test_aot_float_pow_and_int_pow_overflow() {
+        // `3.14 ** 2.0` (float pow) must equal the interpreter's `powf`
+        // result, not the int-only 1. And int pow overflow must WRAP (0),
+        // matching the interpreter's `wrapping_mul`, not return nil.
+        let aot = aot_compile_source(
+            r#"
+            fn main() -> Float { 3.14 ** 2.0 }
+            "#,
+        );
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_float(),
+            Some(9.8596),
+            "3.14 ** 2.0 must be a float pow"
+        );
+
+        let aot = aot_compile_source(r#"fn main() -> Int { 1000000000 ** 1000000000 }"#);
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(0),
+            "int pow overflow wraps (wrapping_mul), not nil"
+        );
+    }
+
+    #[test]
+    fn test_aot_unary_neg_of_computed_float() {
+        // `-(0.1 + 0.22)` previously mis-compiled: `binary_type` typed the
+        // float add result as Int (HIR vars carry Type::unit()), so the MIR
+        // local metadata marked it Int and `Unary Neg` took the int path —
+        // negating the float bits as a payload → garbage. Both the literal
+        // case and the through-a-var case must match the interpreter (-0.32).
+        let aot = aot_compile_source(r#"fn main() -> Float { -(0.1 + 0.22) }"#);
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_float(),
+            Some(-0.32),
+            "neg of literal float sum"
+        );
+
+        let aot =
+            aot_compile_source(r#"fn main() -> Float { let x = 0.1; let y = 0.2; -(x + y) }"#);
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_float(),
+            Some(-0.30000000000000004),
+            "neg of float sum through vars"
+        );
+    }
+
+    #[test]
     fn test_aot_div_by_zero_returns_nil() {
         // Integer division/modulo by zero must return nil (matching the
         // interpreter), not trap. The AOT previously computed `sdiv`/`srem`
@@ -4479,7 +4530,6 @@ mod tests {
         // the top level (boxed entry).
         let aot = aot_compile_source(r#"fn main() { 1 / 0 }"#);
         let raw = aot.run().expect("native run");
-        eprintln!("TMP 1/0 value = {:?}", crate::vm::Value::from_raw(raw));
         assert!(crate::vm::Value::from_raw(raw).is_nil(), "1/0 must be nil");
         let aot = aot_compile_source(r#"fn f() -> Int { 1 % 0 } fn main() { f() }"#);
         let raw = aot.run().expect("native run");

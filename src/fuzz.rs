@@ -237,6 +237,19 @@ fn seed_corpus() -> Vec<&'static str> {
         // --- Float in records ---
         "let r = {x = 1.5, y = 2.5}; r.x + r.y",
         "let t = (1.5, 2.5); t.0 + t.1",
+        // Float exponentiation / pow (AOT/WASM used int-only pow → wrong).
+        "3.14 ** 2.0",
+        "0.5 ** 2.0",
+        "2.0 ** 3.0 + 1.0",
+        // Int pow overflow wraps (matching interpreter), not nil.
+        "1000000000 ** 1000000000",
+        // Unary neg of a computed float (result type was Int in MIR → AOT garbage).
+        "-(0.1 + 0.22)",
+        "-(3.0 + 0.0)",
+        "let x = 0.1; let y = 0.2; -(x + y)",
+        // Adding/negating non-numeric values yields 0, not corrupted pointers.
+        "let a = [5, 10, 15]; fn get(i) { [i] }; get(1) + get(2)",
+        "-(1 + 2,)",
         // --- Nested function returns ---
         "fn f(x) { x * 2 }; fn g(x) { f(x) + 1 }; fn h(x) { g(x) - 1 }; h(5)",
         "fn pick(b) { if b then 1 else -1 }; pick(true) * pick(false)",

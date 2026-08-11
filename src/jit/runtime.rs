@@ -70,7 +70,7 @@ pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::float(f64::from_bits(a) + f64::from_bits(b)).as_raw()
     } else {
-        tag_int(sext48(a & PAYLOAD_MASK) + sext48(b & PAYLOAD_MASK))
+        tag_int(as_int_or_zero(a) + as_int_or_zero(b))
     }
 }
 
@@ -79,7 +79,7 @@ pub extern "C" fn nulang_isub(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::float(f64::from_bits(a) - f64::from_bits(b)).as_raw()
     } else {
-        tag_int(sext48(a & PAYLOAD_MASK) - sext48(b & PAYLOAD_MASK))
+        tag_int(as_int_or_zero(a) - as_int_or_zero(b))
     }
 }
 
@@ -88,7 +88,7 @@ pub extern "C" fn nulang_imul(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::float(f64::from_bits(a) * f64::from_bits(b)).as_raw()
     } else {
-        tag_int(sext48(a & PAYLOAD_MASK).wrapping_mul(sext48(b & PAYLOAD_MASK)))
+        tag_int(as_int_or_zero(a).wrapping_mul(as_int_or_zero(b)))
     }
 }
 
@@ -101,11 +101,11 @@ pub extern "C" fn nulang_idiv(a: u64, b: u64) -> u64 {
         }
         return Value::float(f64::from_bits(a) / bv).as_raw();
     }
-    let bv = sext48(b & PAYLOAD_MASK);
+    let bv = as_int_or_one(b);
     if bv == 0 {
         return Value::nil().as_raw();
     }
-    tag_int(sext48(a & PAYLOAD_MASK) / bv)
+    tag_int(as_int_or_zero(a) / bv)
 }
 
 #[no_mangle]
@@ -117,16 +117,27 @@ pub extern "C" fn nulang_imod(a: u64, b: u64) -> u64 {
         }
         return Value::float(f64::from_bits(a) % bv).as_raw();
     }
-    let bv = sext48(b & PAYLOAD_MASK);
+    let bv = as_int_or_one(b);
     if bv == 0 {
         return Value::nil().as_raw();
     }
-    tag_int(sext48(a & PAYLOAD_MASK) % bv)
+    tag_int(as_int_or_zero(a) % bv)
+}
+
+/// Denominator for div/mod, matching the interpreter's `as_int().unwrap_or(1)`:
+/// a non-int-tagged denominator is 1 (no div-by-zero), while a tagged int 0
+/// still yields div-by-zero → nil.
+pub(crate) fn as_int_or_one(v: u64) -> i64 {
+    if (v & TAG_MASK) == TAG_INT {
+        sext48(v & PAYLOAD_MASK)
+    } else {
+        1
+    }
 }
 
 /// Extract the integer payload like the interpreter's `as_int().unwrap_or(0)`:
 /// non-int-tagged values contribute 0.
-fn as_int_or_zero(v: u64) -> i64 {
+pub(crate) fn as_int_or_zero(v: u64) -> i64 {
     if (v & TAG_MASK) == TAG_INT {
         sext48(v & PAYLOAD_MASK)
     } else {
@@ -175,12 +186,14 @@ pub extern "C" fn nulang_ineg(a: u64) -> u64 {
     if is_float_raw(a) {
         Value::float(-f64::from_bits(a)).as_raw()
     } else {
-        tag_int(-sext48(a & PAYLOAD_MASK))
+        tag_int(-as_int_or_zero(a))
     }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_iinc(a: u64) -> u64 {
+    // IInc/IDec read the raw 48-bit payload as a signed value (tag ignored),
+    // matching step_iinc — NOT as_int_or_zero (which would zero non-int tags).
     tag_int(sext48(a & PAYLOAD_MASK) + 1)
 }
 
@@ -876,21 +889,38 @@ pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
     alloc_string_value(result)
 }
 
-/// Power operation: a^b for tagged integers.
-/// Returns tagged int or nil (for negative exponent / overflow).
+/// Power operation: float pow when both operands are floats, else int pow.
+/// Int overflow wraps (wrapping_mul, matching the interpreter); a negative
+/// int exponent returns nil.
 #[no_mangle]
 pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
+    // Match the interpreter's step_ipow: both floats → powf; else int pow
+    // with wrapping_mul (negative exponent → nil).
+    if is_float_raw(a) && is_float_raw(b) {
+        let af = f64::from_bits(a);
+        let bf = f64::from_bits(b);
+        return Value::float(af.powf(bf)).as_raw();
+    }
     let base = as_int_or_zero(a);
     let exp = as_int_or_zero(b);
     if exp < 0 {
         return Value::nil().as_raw();
     }
-    // 0^0 = 1 in Nulang (matching Rust's checked_pow and math convention for discrete exponentiation)
-    let result = base
-        .checked_pow(exp as u32)
-        .map(|r| Value::int(r).as_raw())
-        .unwrap_or_else(|| Value::nil().as_raw());
-    result
+    // Binary exponentiation with wrapping_mul, matching the interpreter (so
+    // overflow wraps instead of nil — e.g. 1000000000 ** 1000000000 == 0).
+    let mut result: i64 = 1;
+    let mut base = base;
+    let mut exp = exp;
+    while exp > 0 {
+        if exp & 1 != 0 {
+            result = result.wrapping_mul(base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    Value::int(result).as_raw()
 }
 
 /// # Safety

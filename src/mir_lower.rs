@@ -963,6 +963,18 @@ impl<'c> FnLowerer<'c> {
                     }
                     _ => {
                         self.b.assign(dst, mir::RValue::Binary(*op, lid, rid));
+                        // The dst local was created by `hir_lower::binary_type`,
+                        // which cannot see through variable operands (HIR vars
+                        // carry `Type::unit()`). Consult the MIR operand locals
+                        // (which hold the real types) so a float arithmetic
+                        // result is typed Float — otherwise downstream unary
+                        // ops (e.g. `-(x + y)` for float x,y) mis-compile the
+                        // float bits as an int.
+                        let lt = self.b.local_ty(lid);
+                        let rt = self.b.local_ty(rid);
+                        if *lt == Type::float() || *rt == Type::float() {
+                            self.b.set_local_ty(dst, Type::float());
+                        }
                     }
                 }
                 Ok(())

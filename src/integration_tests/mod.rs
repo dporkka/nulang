@@ -8468,6 +8468,33 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_float_pow_and_neg() {
+            // `3.14 ** 2.0` (float pow) and `-(0.1 + 0.22)` (neg of a computed
+            // float) previously mis-compiled on the WASM backend (int-only pow
+            // → 1; pointer-payload neg → garbage). Both must match the
+            // interpreter.
+            let val = run_source_to_value("3.14 ** 2.0").expect("run");
+            assert_eq!(
+                val.as_float(),
+                Some(9.8596),
+                "wasm float pow must match interpreter"
+            );
+            let val = run_source_to_value("-(0.1 + 0.22)").expect("run");
+            assert_eq!(
+                val.as_float(),
+                Some(-0.32),
+                "wasm neg of computed float must match interpreter"
+            );
+            // Int pow overflow wraps (wrapping_mul), not nil.
+            let val = run_source_to_value("1000000000 ** 1000000000").expect("run");
+            assert_eq!(
+                val.as_int(),
+                Some(0),
+                "wasm int pow overflow must wrap, not nil"
+            );
+        }
+
+        #[test]
         fn test_wasm_compile_literal_int() {
             let wasm = compile_source_to_wasm("42").expect("compile");
             assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
