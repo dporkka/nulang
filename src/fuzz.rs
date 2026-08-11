@@ -273,6 +273,12 @@ fn seed_corpus() -> Vec<&'static str> {
         r#""ab" == "ab""#,
         r#""ab" == "ac""#,
         r#""a" + "b" == "ab""#,
+        // --- Loops (exercise JIT tier-up and STRAIGHT_LINE_MIN boundary) ---
+        "var i = 0; var s = 0; while i < 100 { s = s + i * 2 - i / 3; i = i + 1; }; s",
+        "var i = 0.0; var s = 0.0; while i < 100.0 { s = s + i * 2.5 - i / 3.0; i = i + 1.0; }; s",
+        "let a = [1, 2, 3, 4, 5]; var i = 0; var s = 0; while i < 5 { s = s + a[i]; i = i + 1; }; s",
+        "let r = {x = 10, y = 20}; var i = 0; var s = 0; while i < r.x { s = s + r.y; i = i + 1; }; s",
+        "var i = 0; var s = 0; while i < 10 { var j = 0; while j < 10 { s = s + i * j; j = j + 1; }; i = i + 1; }; s",
     ]
 }
 

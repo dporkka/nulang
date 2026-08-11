@@ -640,7 +640,14 @@ fn host_cmp(_caller: Caller<'_, HostState>, a: i64, b: i64, code: i64) -> Result
             _ => ia >= ib,
         }
     };
-    Ok(value_layout::tag_bool(eq) as i64)
+    // Float comparisons return a tagged float 0.0/1.0 (matching the
+    // interpreter's step_fcmp_*) — not a bool — otherwise `-(0.3 >= 3.22)`
+    // negates a bool as int 0 instead of a float -0.0.
+    if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
+        Ok(crate::vm::Value::float(if eq { 1.0 } else { 0.0 }).as_raw() as i64)
+    } else {
+        Ok(value_layout::tag_bool(eq) as i64)
+    }
 }
 
 /// `env.pow(a: i64, b: i64) -> i64`

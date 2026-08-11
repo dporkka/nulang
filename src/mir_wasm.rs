@@ -215,6 +215,11 @@ impl WasmBackend {
                             | RValue::PerformAsync { .. }
                             | RValue::SignalWait { .. }
                             | RValue::Closure { .. } => true,
+                            // The borrow (`&`) and dereference operators touch
+                            // reference capabilities which are compile-time
+                            // only (no runtime representation in the WASM VM).
+                            RValue::Unary(crate::ast::UnOp::Ref(_), _)
+                            | RValue::Unary(crate::ast::UnOp::Deref, _) => true,
                             // Only the IO.print/println/read and Array.length
                             // builtins are handled; any user-defined effect
                             // previously compiled to nil.

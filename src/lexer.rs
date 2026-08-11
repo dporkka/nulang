@@ -423,9 +423,9 @@ impl<'a> Lexer<'a> {
                     let mut tok = if self.bytes.get(self.pos + 1) == Some(&b'"')
                         && self.bytes.get(self.pos + 2) == Some(&b'"')
                     {
-                        self.read_triple_string().unwrap()
+                        self.read_triple_string()?
                     } else {
-                        self.read_string().unwrap()
+                        self.read_string()?
                     };
                     if let TokenKind::StringLit(s) = tok.kind {
                         tok.kind = TokenKind::FStringLit(s);
