@@ -530,6 +530,15 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // SignalWait delivers a boxed signal value (unit/nil); an unboxed function
+    // would misread it if used as a raw int.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::SignalWait { .. }, .. }) {
+                return false;
+            }
+        }
+    }
     // Captured closures allocate a closure object holding boxed capture values
     // and dispatch through a runtime helper; the capture slots must be tagged.
     for block in &func.blocks {
@@ -968,6 +977,17 @@ pub fn compile_mir_function_body(
                 .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert(h_name, func_ref);
+        }
+        // signal-wait helper: nulang_aot_signal_wait(name) -> i64
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64)); // signal name (TAG_STRING)
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_signal_wait", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_signal_wait", func_ref);
         }
         // receive helpers: nulang_aot_receive_match_N(id0..idN-1) -> i64,
         // nulang_aot_receive_payload(i) -> i64
@@ -2176,9 +2196,21 @@ fn compile_rvalue(
             call_args.extend(arg_vals);
             call_helper(builder, helpers, helper_name, &call_args)
         }
-        mir::RValue::SignalWait { .. } => Err(AotCompileError::Unsupported(
-            "SignalWait: workflow signals require the bytecode backend (unavailable with --backend native)".into(),
-        )),
+        mir::RValue::SignalWait { name } => {
+            // Workflow signal wait: route through `nulang_aot_signal_wait`,
+            // which calls the callbacks' `wait_signal` (the same path the
+            // bytecode SignalWait opcode takes). A ready signal delivers its
+            // value (and outside a workflow the default callback delivers
+            // unit); a signal that has not been received degrades to nil —
+            // the native backend has no VM suspension.
+            let name_val = compile_const(
+                builder,
+                &crate::bytecode::Constant::String(name.clone()),
+                mode,
+                constants,
+            )?;
+            call_helper(builder, helpers, "nulang_aot_signal_wait", &[name_val])
+        }
         // Handled by the Assign arm (multi-register write); never reached here.
         mir::RValue::ReceiveMatch { .. } | mir::RValue::ReceiveWait { .. } => {
             Err(AotCompileError::Internal(
@@ -3970,6 +4002,63 @@ mod tests {
             pid.is_string() || pid.as_ptr().is_some(),
             "pipeline id must be a string value, got {:?}",
             pid
+        );
+    }
+
+    #[test]
+    fn test_aot_runtime_native_signal_wait() {
+        // `perform Signal.wait("sig")` in an AOT-compiled behavior must
+        // compile and route through the callbacks' `wait_signal` (the same
+        // path the bytecode SignalWait opcode takes). Outside a workflow the
+        // default callback delivers unit, which the behavior emits.
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        let source = r#"
+            actor W {
+                behavior go() {
+                    let s = perform Signal.wait("sig")
+                    emit Got(s)
+                }
+            }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut tc = TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let mut ec = EffectChecker::new();
+        ec.check_module(&ast.decls).unwrap();
+        let mut ca = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        for d in crate::effect_checker::flatten_decls(&ast.decls) {
+            if let crate::ast::Decl::Function { body, .. } = d {
+                ca.infer_cap(&ctx, body).unwrap();
+            }
+        }
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
+        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+
+        let mut rt = crate::runtime::Runtime::new();
+        rt.register_aot_module(aot);
+        // Behavior index 0 = W.go.
+        let w = rt
+            .spawn_from_module(&code, 0, Vec::new())
+            .as_actor_id()
+            .expect("W spawn");
+
+        rt.send_message_by_id(w, 0, &[]);
+        rt.run_scheduler();
+
+        let log = &rt.actors.get(&w).expect("W actor").event_log;
+        assert_eq!(log.len(), 1, "one event should be emitted");
+        assert_eq!(log[0].0, "Got", "event name should match");
+        assert_eq!(
+            log[0].1.first(),
+            Some(&crate::vm::Value::unit()),
+            "Signal.wait outside a workflow delivers unit"
         );
     }
 

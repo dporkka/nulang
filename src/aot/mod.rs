@@ -1310,6 +1310,14 @@ fn collect_rvalue_field_and_consts(
                 constants.push(c);
             }
         }
+        mir::RValue::SignalWait { name } => {
+            // Intern the signal name so AOT codegen can emit it as a TAG_STRING
+            // constant resolved back to content by `nulang_aot_signal_wait`.
+            let c = crate::bytecode::Constant::String(name.clone());
+            if !constants.contains(&c) {
+                constants.push(c);
+            }
+        }
         _ => {}
     }
 }

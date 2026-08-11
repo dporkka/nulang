@@ -1378,6 +1378,27 @@ define_aot_perform_async!(nulang_aot_perform_async_7, a0, a1, a2, a3, a4, a5, a6
 define_aot_perform_async!(nulang_aot_perform_async_8, a0, a1, a2, a3, a4, a5, a6, a7);
 
 // ---------------------------------------------------------------------------
+// AOT workflow signal wait
+// ---------------------------------------------------------------------------
+// `perform Signal.wait("name")` lowers to a `nulang_aot_signal_wait` call.
+// The helper resolves the signal name from the module pool and routes through
+// the current callbacks' `wait_signal` (the same path the bytecode SignalWait
+// opcode takes): a ready signal delivers its value, and outside a workflow
+// context the default callback delivers unit. A signal that has not been
+// received degrades to nil — the native backend has no VM suspension to park
+// the actor mid-behavior.
+
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_signal_wait(name_raw: u64) -> u64 {
+    let name = resolve_string_coerce(name_raw).unwrap_or_default();
+    match try_with_callbacks(|cb| cb.wait_signal(&name)) {
+        Some(crate::vm::SignalWaitResult::Ready(v)) => v.as_raw(),
+        // NotReady or unarmed callbacks degrade to nil (no native suspension).
+        _ => Value::nil().as_raw(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AOT selective receive
 // ---------------------------------------------------------------------------
 // `receive { | Behavior(params) => ... }` in an AOT-compiled behavior lowers
