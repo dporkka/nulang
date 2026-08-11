@@ -11,7 +11,25 @@ Operations:
 
 ---
 
-## [2026-08-09] refresh | performance-assessment — immediate improvements shipped
+## [2026-08-11] query | AOT multi-block resuming handler — scoping
+
+Scoped the last reachable correctness gap in the AOT native backend: a
+resuming effect handler (`| E.op(x) resume => ...`) performed from different
+MIR blocks is rejected ("multi-perform resuming handler with perform sites
+across multiple blocks is not yet supported"). Confirmed the failing pattern
+(`if cond then perform E.run(1) else perform E.run(2)`) on `--backend native`.
+
+Root-caused the same-block model: `cont_thread` is per-block while
+`handler_threaded_dsts` is per-body (global), so cross-block perform sites
+make the jump-arg count ≠ handler param count. Proposed a phased design:
+Phase 1 = uniform threaded-slot width (max per-block, dummy-padded) covering
+exclusive-branch patterns without cross-block reads; Phase 2 = thread prior
+perform results through `compute_liveins` for loop-carried/accumulated
+results. After this, the only remaining AOT rejects are distribution
+(remote spawn/ask) and dead defensive arms.
+
+Touched: [[queries/aot-multi-block-resuming]]
+
 
 Implemented the "Immediate" tier of [[queries/performance-assessment]] and recorded an `## Implementation status` section on that page.
 
