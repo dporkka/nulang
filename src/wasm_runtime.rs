@@ -139,6 +139,9 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "arith_neg", host_neg)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arr_load", host_arr_load)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -479,6 +482,33 @@ fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
     } else {
         Ok(value_layout::tag_int(-value_layout::sext48(a & value_layout::PAYLOAD_MASK)) as i64)
     }
+}
+
+/// `env.arr_load(arr: i64, idx: i64) -> i64`
+///
+/// Array element load with bounds check. `arr` is a TAG_PTR to a heap block
+/// `[count][elem0]..`; reads element `idx` or nil when out of range (matching
+/// the interpreter). Negative indices become huge after payload masking → OOB.
+fn host_arr_load(mut caller: Caller<'_, HostState>, arr: i64, idx: i64) -> Result<i64, Error> {
+    let arr = arr as u64;
+    let base = (arr & value_layout::PAYLOAD_MASK) as usize;
+    let idx = (idx as u64 & value_layout::PAYLOAD_MASK) as usize;
+    let mem = get_memory(&mut caller)?;
+    let data = mem.data(&caller);
+    let read = |off: usize| -> u64 {
+        data.get(off..)
+            .map(|s| {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&s[..8.min(s.len())]);
+                u64::from_le_bytes(b)
+            })
+            .unwrap_or(0)
+    };
+    let count = read(base) as usize;
+    if idx >= count {
+        return Ok(value_layout::TAG_NIL as i64);
+    }
+    Ok(read(base + (idx + 1) * 8) as i64)
 }
 
 /// `env.arith_cmp(a: i64, b: i64, code: i64) -> i64`

@@ -216,6 +216,15 @@ fn seed_corpus() -> Vec<&'static str> {
         r#""foo" == "foo" and "bar" == "bar""#,
         r#"let s = "ab"; (s ++ "c") == "abc""#,
         r#"if "x" == "x" then 7 else 8"#,
+        // --- Out-of-bounds / negative array index (nil) ---
+        "let a = [1, 2]; a[5]",
+        "let a = [1, 2]; a[-1]",
+        "let a = [10]; Array.length(a)",
+        // --- More function calls / args ---
+        "fn add3(a, b, c) { a + b + c }; add3(1, 2, 3)",
+        "fn mul(x, y) { x * y }; mul(mul(2, 3), mul(4, 5))",
+        "fn choose(c) { if c then 1 else 0 }; choose(true) + choose(false)",
+        "let a = [5, 10, 15]; fn get(i) { a[i] }; get(1) + get(2)",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

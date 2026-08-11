@@ -8727,6 +8727,21 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_array_oob() {
+            // Out-of-range and negative array indices must yield nil, not
+            // garbage. In-range access still works.
+            let v = run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[5] } f()"#)
+                .expect("run");
+            assert!(v.is_nil(), "a[5] must be nil, got {:?}", v.as_int());
+            let v = run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[-1] } f()"#)
+                .expect("run");
+            assert!(v.is_nil(), "a[-1] must be nil");
+            let v = run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[0] + a[1] } f()"#)
+                .expect("run");
+            assert_eq!(v.as_int(), Some(3), "in-range access must still work");
+        }
+
+        #[test]
         fn test_wasm_run_neg_float() {
             // Positive literal alone must be exact.
             let wasm = compile_source_to_wasm(r#"3.55"#).expect("compile");

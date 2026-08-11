@@ -41,8 +41,10 @@ const IMPORT_ARITH_MOD: u32 = 12;
 const IMPORT_ARITH_CMP: u32 = 13;
 /// Function index of `env.arith_neg` — unary negation (i64) -> i64.
 const IMPORT_ARITH_NEG: u32 = 14;
+/// Function index of `env.arr_load` — bounds-checked array load (i64, i64) -> i64.
+const IMPORT_ARR_LOAD: u32 = 15;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 15;
+const FUNC_IMPORT_COUNT: u32 = 16;
 
 const TY_VOID_TO_I64: u32 = 0;
 
@@ -294,6 +296,7 @@ impl WasmBackend {
         imports.import("env", "arith_mod", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "arith_cmp", EntityType::Function(TY_I64I64I64_TO_I64));
         imports.import("env", "arith_neg", EntityType::Function(TY_I64_TO_I64));
+        imports.import("env", "arr_load", EntityType::Function(TY_I64I64_TO_I64));
         self.imports = imports;
     }
 
@@ -1408,32 +1411,12 @@ impl WasmBackend {
         idx: &LocalId,
         func: &mir::Function,
     ) {
-        // Bounds: no bounds check. We rely on the guard-page trap model
-        // (OOB access SIGSEGVs into a Wasmtime trap).
-        let pm = value_layout::PAYLOAD_MASK as i64;
-        // base = arr & PAYLOAD_MASK
+        // Route through `env.arr_load` for a BOUNDS CHECK: out-of-range (and
+        // negative) indices must yield nil, matching the interpreter. The old
+        // inline path had no check and read garbage for OOB indices.
         body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
-        body.instruction(&Instruction::I64Const(pm));
-        body.instruction(&Instruction::I64And);
-        // idx = idx & PAYLOAD_MASK
         body.instruction(&Instruction::LocalGet(self.mir_local(idx, func)));
-        body.instruction(&Instruction::I64Const(pm));
-        body.instruction(&Instruction::I64And);
-        // (idx + 1) * 8
-        body.instruction(&Instruction::I64Const(8));
-        body.instruction(&Instruction::I64Mul);
-        body.instruction(&Instruction::I64Const(8));
-        body.instruction(&Instruction::I64Add);
-        // base + (idx + 1) * 8
-        body.instruction(&Instruction::I64Add);
-        // i32 address
-        body.instruction(&Instruction::I32WrapI64);
-        // load
-        body.instruction(&Instruction::I64Load(MemArg {
-            offset: 0,
-            align: 3,
-            memory_index: 0,
-        }));
+        body.instruction(&Instruction::Call(IMPORT_ARR_LOAD));
     }
 
     fn compile_array_len(&self, body: &mut Function, arr: &LocalId, func: &mir::Function) {
