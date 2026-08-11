@@ -8703,6 +8703,19 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_bit_ops() {
+            // Bit shifts / bitwise ops (previously nil in WASM).
+            let v = run_source_to_value(r#"fn f() -> Int { 1 << 2 } f()"#).expect("run");
+            assert_eq!(v.as_int(), Some(4), "1 << 2");
+            let v = run_source_to_value(r#"fn f() -> Int { 8 >> 2 } f()"#).expect("run");
+            assert_eq!(v.as_int(), Some(2), "8 >> 2");
+            let v = run_source_to_value(r#"fn f() -> Int { 5 & 3 } f()"#).expect("run");
+            assert_eq!(v.as_int(), Some(1), "5 & 3");
+            let v = run_source_to_value(r#"fn f() -> Int { 5 ^ 3 } f()"#).expect("run");
+            assert_eq!(v.as_int(), Some(6), "5 ^ 3");
+        }
+
+        #[test]
         fn test_wasm_run_float_comparison() {
             let v = run_source_to_value(r#"fn f() -> Bool { 1.5 < 2.5 } f()"#).expect("run");
             assert_eq!(v.as_bool(), Some(true), "1.5 < 2.5");

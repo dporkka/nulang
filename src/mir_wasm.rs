@@ -1192,6 +1192,23 @@ impl WasmBackend {
                 sign_extend_both(body);
                 body.instruction(&Instruction::I64RemS);
             }
+            BinOp::BitAnd => {
+                body.instruction(&Instruction::I64And);
+            }
+            BinOp::BitOr => {
+                body.instruction(&Instruction::I64Or);
+            }
+            BinOp::BitXor => {
+                body.instruction(&Instruction::I64Xor);
+            }
+            BinOp::Shl => {
+                sign_extend_both(body);
+                body.instruction(&Instruction::I64Shl);
+            }
+            BinOp::Shr => {
+                sign_extend_both(body);
+                body.instruction(&Instruction::I64ShrS);
+            }
             cmp @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) => {
                 sign_extend_both(body);
                 match cmp {

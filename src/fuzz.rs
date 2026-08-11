@@ -143,6 +143,18 @@ fn seed_corpus() -> Vec<&'static str> {
         // --- Deeper expressions ---
         "((1 + 2) * 3) - 4 / 2",
         "let x = 5; let y = x * 2 + 1; y - x",
+        // --- Nested arrays ---
+        "let a = [[1, 2], [3, 4]]; a[0][1]",
+        "let a = [[1], [2]]; a[1][0]",
+        // --- String comparison ---
+        r#""abc" == "abc""#,
+        r#""abc" == "abd""#,
+        // --- Division / modulo by zero (nil result, must not trap) ---
+        "1 / 0",
+        "1 % 0",
+        // --- Large / edge numerics ---
+        "1000000000 * 1000000000",
+        "2147483647 + 1",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

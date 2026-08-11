@@ -940,6 +940,35 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // Nil-producing / heap-object operations must stay boxed. An unboxed
+    // function tags its raw result, so a nil (div-by-zero, out-of-bounds
+    // array access) would be re-tagged as int 0, and heap objects hold tagged
+    // values the unboxed raw int path would corrupt.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            let nil_or_object = match stmt {
+                mir::Stmt::Assign { op, .. } => matches!(
+                    op,
+                    mir::RValue::Binary(
+                        crate::ast::BinOp::Div | crate::ast::BinOp::Mod,
+                        ..
+                    ) | mir::RValue::ArrayLit(_)
+                        | mir::RValue::ArrayLoad { .. }
+                        | mir::RValue::ArrayLen(_)
+                        | mir::RValue::Record(_)
+                        | mir::RValue::Tuple(_)
+                        | mir::RValue::RecordUpdate { .. }
+                        | mir::RValue::LoadFieldNamed { .. }
+                        | mir::RValue::LoadFieldPos { .. }
+                ),
+                mir::Stmt::StoreFieldNamed { .. } | mir::Stmt::ArrayStore { .. } => true,
+                _ => false,
+            };
+            if nil_or_object {
+                return false;
+            }
+        }
+    }
     // Captured closures allocate a closure object holding boxed capture values
     // and dispatch through a runtime helper; the capture slots must be tagged.
     for block in &func.blocks {
@@ -3107,37 +3136,17 @@ fn compile_binary(
             }
         }
         BinOp::Div => {
-            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int)
-                && mode == CompileMode::Boxed
-            {
-                // Inline div-by-zero → nil check for boxed Int operands.
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let zero = builder.ins().iconst(types::I64, 0);
-                let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                let nil = builder.ins().iconst(types::I64, TAG_NIL_I64);
-                let div_result = builder.ins().sdiv(l, r);
-                let tagged = emit_tag_int(builder, div_result);
-                Ok(builder.ins().select(is_zero, nil, tagged))
-            } else {
-                call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
-            }
+            // Route through `nulang_idiv` ALWAYS (not just for unknown/float
+            // operands): it checks for a zero divisor BEFORE dividing and
+            // returns nil, matching the interpreter. The old inline `sdiv` +
+            // `select` computed the division unconditionally, so a zero
+            // divisor TRAPPED (SIGILL) before the select could return nil.
+            call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
         }
         BinOp::Mod => {
-            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int)
-                && mode == CompileMode::Boxed
-            {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let zero = builder.ins().iconst(types::I64, 0);
-                let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                let nil = builder.ins().iconst(types::I64, TAG_NIL_I64);
-                let rem_result = builder.ins().srem(l, r);
-                let tagged = emit_tag_int(builder, rem_result);
-                Ok(builder.ins().select(is_zero, nil, tagged))
-            } else {
-                call_helper(builder, helpers, "nulang_imod", &[lhs_val, rhs_val])
-            }
+            // Route through `nulang_imod` always for the same reason: `srem`
+            // by zero traps, so the division must be guarded in the helper.
+            call_helper(builder, helpers, "nulang_imod", &[lhs_val, rhs_val])
         }
         BinOp::Eq => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
@@ -4458,6 +4467,23 @@ mod tests {
             Some(2),
             "array indexing must work"
         );
+    }
+
+    #[test]
+    fn test_aot_div_by_zero_returns_nil() {
+        // Integer division/modulo by zero must return nil (matching the
+        // interpreter), not trap. The AOT previously computed `sdiv`/`srem`
+        // unconditionally and `select`-ed nil AFTER — so a zero divisor
+        // trapped (SIGILL) before the select. Now routed through the
+        // zero-checking helper. Exercised both from a function (unboxed) and
+        // the top level (boxed entry).
+        let aot = aot_compile_source(r#"fn main() { 1 / 0 }"#);
+        let raw = aot.run().expect("native run");
+        eprintln!("TMP 1/0 value = {:?}", crate::vm::Value::from_raw(raw));
+        assert!(crate::vm::Value::from_raw(raw).is_nil(), "1/0 must be nil");
+        let aot = aot_compile_source(r#"fn f() -> Int { 1 % 0 } fn main() { f() }"#);
+        let raw = aot.run().expect("native run");
+        assert!(crate::vm::Value::from_raw(raw).is_nil(), "1%0 must be nil");
     }
 
     #[test]
