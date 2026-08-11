@@ -1593,6 +1593,7 @@ fn run_source(
                         Ok(json) => eprintln!("[metrics] {}", json),
                         Err(_) => eprintln!("[metrics] <serialization error>"),
                     }
+                    eprintln!("{}", rt.render_topology());
                 }
                 value
             } else {
