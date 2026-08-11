@@ -211,18 +211,26 @@ impl WasmBackend {
         }
 
         if !mir.functions.is_empty() {
-            // Export the actual entry function as `nulang_init`, not the last
-            // one. Lifted closure functions are appended after `__main`, so
-            // `len()-1` can point at a closure carrying parameters, which the
-            // host rejects when it looks for a `() -> i64` export.
-            let main_in_module = mir
+            // Export the actual entry function as `nulang_init`. Lifted closure
+            // functions are appended after `__main`, so `len()-1` can point at
+            // a closure carrying parameters, which the host rejects when it
+            // looks for a `() -> i64` export.
+            if let Some(main_in_module) = mir
                 .functions
                 .iter()
-                .position(|f| f.name == "__main")
-                .unwrap_or(mir.functions.len() - 1);
-            let main_idx = FUNC_IMPORT_COUNT + main_in_module as u32;
-            self.exports
-                .export("nulang_init", ExportKind::Func, main_idx);
+                .position(|f| f.name == "__main" || f.name == "main")
+            {
+                let main_idx = FUNC_IMPORT_COUNT + main_in_module as u32;
+                self.exports
+                    .export("nulang_init", ExportKind::Func, main_idx);
+            } else {
+                // Library module (no entry expression): export a synthetic
+                // `() -> i64` function returning nil, matching the interpreter
+                // (a program with only function definitions evaluates to nil).
+                // Falling back to the last module function could be a
+                // parameterized one, which the host can't call as `() -> i64`.
+                self.emit_nil_entry();
+            }
         }
 
         // Emit data segment.
@@ -321,6 +329,19 @@ impl WasmBackend {
     }
 
     // ── Function compilation ───────────────────────────────────────
+
+    /// Emit a synthetic `() -> i64` function returning nil and export it as
+    /// `nulang_init` — the entry for a module with no `__main`/`main`.
+    fn emit_nil_entry(&mut self) {
+        let wasm_idx = self.next_func_idx;
+        self.next_func_idx += 1;
+        self.functions.function(TY_VOID_TO_I64);
+        let mut body = Function::new(vec![]);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+        body.instruction(&Instruction::End); // function end
+        self.codes.function(&body);
+        self.exports.export("nulang_init", ExportKind::Func, wasm_idx);
+    }
 
     fn compile_function(&mut self, func: &mir::Function, mir_idx: usize) {
         let wasm_idx = self.next_func_idx;

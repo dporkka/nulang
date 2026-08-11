@@ -8716,6 +8716,17 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_no_entry_library() {
+            // A module with only a function definition (no top-level
+            // expression) must export a nil-returning `nulang_init` — not a
+            // parameterized function the host can't call as `() -> i64`.
+            let wasm = compile_source_to_wasm(r#"fn mix(x, y) { x + y * 2 }"#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert!(val.is_nil(), "library module must run to nil");
+        }
+
+        #[test]
         fn test_wasm_run_float_div_by_zero() {
             // Float division by zero → nil (matches the interpreter), not inf.
             let v = run_source_to_value(r#"fn f() -> Float { 1.0 / 0.0 } f()"#).expect("run");

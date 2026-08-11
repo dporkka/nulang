@@ -4813,6 +4813,18 @@ mod tests {
     }
 
     #[test]
+    fn test_aot_no_entry_function_returns_nil() {
+        // A module with only a function definition (no top-level expression)
+        // has no entry; running it must yield nil, not call a parameterized
+        // function with no args (which previously returned garbage).
+        let aot = aot_compile_source(r#"fn mix(x, y) { x + y * 2 }"#);
+        let raw = aot.run().expect("native run");
+        assert!(
+            crate::vm::Value::from_raw(raw).is_nil(),
+            "library module must run to nil"
+        );
+    }
+
     fn test_aot_capability_check_is_true() {
         // Capability checks are compile-time only; the AOT backend must
         // compile `CapabilityCheck` to tagged true (the bytecode backend

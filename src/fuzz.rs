@@ -177,6 +177,20 @@ fn seed_corpus() -> Vec<&'static str> {
         "let a = 1; let b = a + 1; let c = b * 2; let d = c - 3; d",
         // --- Recursion with multiple params ---
         "fn sum(n, acc) { if n <= 0 then acc else sum(n - 1, acc + n) }; sum(5, 0)",
+        // --- String-heavy programs ---
+        r#"fn greet(n) { "Hello, " ++ n ++ "!" }; greet("world")"#,
+        r#"let s = "a" ++ "b"; let t = s ++ "c"; t == "abc""#,
+        r#""x" ++ "y" == "xy" and "z" ++ "w" == "zw""#,
+        // --- Mixed types in functions ---
+        "fn mix(x, y) { x + y * 2 }; mix(3, 4)",
+        "fn cond(c, a, b) { if c then a else b }; cond(true, 1, 2) + cond(false, 10, 20)",
+        // --- Larger programs ---
+        "let x = 5; let y = 10; let z = x + y; let w = z * 2; w - x",
+        "fn fib(n) { if n <= 1 then n else fib(n - 1) + fib(n - 2) }; fib(8)",
+        "let total = fn(items) { if Array.length(items) == 0 then 0 else items[0] }; total([42])",
+        // --- Tuple/record in expressions ---
+        "let t = (1, 2, 3); t.0 * t.1 + t.2",
+        "let r = {a = 5, b = 6}; let r2 = {r .. a = 1}; r2.a * r2.b",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

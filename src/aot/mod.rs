@@ -387,7 +387,14 @@ impl AotModule {
     /// Execute the module entry point and return the result as a u64 value.
     ///
     pub fn run(&self) -> NuResult<u64> {
-        let idx = self.entry_idx.unwrap_or(0);
+        // A module with no `__main`/`main` (e.g. only function definitions, a
+        // library) has no entry expression; running it yields nil, matching the
+        // interpreter. Do NOT fall back to function 0 — that could be a
+        // parameterized function, and calling it with no args would return
+        // garbage.
+        let Some(idx) = self.entry_idx else {
+            return Ok(crate::vm::Value::nil().as_raw());
+        };
         let ptr = self
             .compiled_funcs
             .get(idx)
