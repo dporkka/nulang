@@ -342,7 +342,7 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 /// Allocations go through a private `ActorHeap` so that `Drop` actually
 /// reclaims memory instead of leaking.
 #[derive(Debug)]
-struct StandaloneVmCallbacks {
+pub(crate) struct StandaloneVmCallbacks {
     heap: ActorHeap,
     gc: crate::runtime::OrcaGc,
     /// Test hook: when set, `IO.print` output is recorded here instead of
@@ -351,7 +351,7 @@ struct StandaloneVmCallbacks {
 }
 
 impl StandaloneVmCallbacks {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut heap = ActorHeap::new(1024 * 1024);
         heap.set_actor_id(0);
         Self {

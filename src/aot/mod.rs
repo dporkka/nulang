@@ -389,6 +389,11 @@ impl AotModule {
 
     /// Execute the module entry point and return the result as a u64 value.
     ///
+    /// A module with no `__main`/`main` (e.g. only function definitions, a
+    /// library) has no entry expression; running it yields nil, matching the
+    /// interpreter. Do NOT fall back to function 0 — that could be a
+    /// parameterized function, and calling it with no args would return
+    /// garbage.
     pub fn run(&self) -> NuResult<u64> {
         // A module with no `__main`/`main` (e.g. only function definitions, a
         // library) has no entry expression; running it yields nil, matching the
@@ -421,12 +426,26 @@ impl AotModule {
         // their target's native entry point.
         set_aot_module_ctx(self);
 
+        // Install StandaloneVmCallbacks so perform_builtin_effect works
+        // (e.g., IO.print, String.length, etc.) in the native backend.
+        // This mirrors how the bytecode VM uses StandaloneVmCallbacks for
+        // top-level execution in `VM::run()`.
+        let callbacks = Box::new(crate::vm::StandaloneVmCallbacks::new());
+        let callbacks_ptr = Box::into_raw(callbacks) as *mut dyn crate::vm::ActorVmCallbacks;
+        unsafe {
+            crate::jit::runtime::set_jit_callbacks(callbacks_ptr);
+        }
+
         // Call the compiled function. Signature: extern "C" fn() -> u64
         // (for the entry point with no params).
         let func: extern "C" fn() -> u64 = unsafe { std::mem::transmute(*ptr) };
         let result = func();
 
-        // Clean up.
+        // Clean up: reconstruct Box to drop callbacks and free heap/GC.
+        unsafe {
+            crate::jit::runtime::clear_jit_callbacks();
+            let _ = Box::from_raw(callbacks_ptr as *mut crate::vm::StandaloneVmCallbacks);
+        }
         crate::jit::runtime::aot_clear_constants();
         clear_aot_module_ctx();
         let _ = crate::jit::runtime::aot_take_heap();
