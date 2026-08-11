@@ -59,6 +59,16 @@ pub const HOT_THRESHOLD: u64 = 1000;
 /// or SIMD if the region is amenable).
 pub const TIER2_THRESHOLD: u64 = 10_000;
 
+/// Minimum length for a STRAIGHT-LINE region (no internal loop back-edge) to
+/// be worth JIT-compiling. Such a region is re-entered by the interpreter
+/// every iteration of an enclosing loop, so the JIT enter/exit + probe cost
+/// is paid per iteration — compiling a small fragment is slower than
+/// interpreting it (a call-heavy loop benchmarked ~4x slower when its
+/// fragments were compiled). Genuine loops (internal back-edge) are always
+/// compiled regardless of length; only straight-line fragments below this
+/// threshold are rejected.
+pub const STRAIGHT_LINE_MIN: usize = 16;
+
 // ---------------------------------------------------------------------------
 // JIT Session
 // ---------------------------------------------------------------------------
@@ -544,9 +554,27 @@ pub(crate) fn find_compilable_region(
         len += 1;
     }
     if has_back_edge {
+        // A genuine loop loops INTERNALLY in the compiled code, so the JIT
+        // enter/exit + probe cost is amortized across all its iterations —
+        // always worth compiling.
         len
     } else {
-        first_branch.unwrap_or(len)
+        let straight = first_branch.unwrap_or(len);
+        // A small straight-line region — whether a function body or a loop
+        // fragment — is re-entered by the interpreter once per call (a body)
+        // or per enclosing-loop iteration (a fragment), so the JIT
+        // enter/exit + probe cost is paid EVERY time. That exceeds the cost of
+        // just interpreting `straight` instructions below ~STRAIGHT_LINE_MIN,
+        // so compiling a small non-looping region is a regression (a
+        // call-heavy loop benchmarked ~4.6x SLOWER when its 2-instruction
+        // callee was compiled). Genuine loops (internal back-edge) loop
+        // natively and amortize the cost, so they are always compiled; only
+        // small non-looping regions are rejected.
+        if straight < STRAIGHT_LINE_MIN {
+            0
+        } else {
+            straight
+        }
     }
 }
 
@@ -649,6 +677,16 @@ impl crate::backends::JitBackend for JitSession {
                     func(regs.as_mut_ptr(), constants.as_ptr());
                     return crate::backends::TieredAction::RanJit;
                 }
+            }
+            // Rejected (too small / fragmented) or compile failed. Reset the
+            // hot counter so the per-step `record_and_check_hot` doesn't keep
+            // returning true and re-scanning every step — a rejected pc would
+            // otherwise call `find_compilable_region` on every execution,
+            // regressing call-heavy loops ~5x.
+            if module_idx < self.hot_counts.len()
+                && pc < self.hot_counts[module_idx].len()
+            {
+                self.hot_counts[module_idx][pc] = 0;
             }
         }
 

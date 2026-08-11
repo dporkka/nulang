@@ -78,4 +78,42 @@ fn bench_jit_hot_loop(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_jit_hot_loop);
+/// A hot loop that calls a function each iteration. `Call`/`TailCall` are not
+/// in the JIT compilable opcode set, so `find_compilable_region` fragments at
+/// the call: the loop's arithmetic around the call is JIT-compiled, but the
+/// call itself (frame push + dispatch) is interpreted every iteration. This
+/// quantifies the real-world JIT gap for call-heavy loops — the largest
+/// remaining coverage hole — against the pure-interpreter `interp/function_call`
+/// baseline and the no-call `jit/hot_loop_warm` ceiling.
+fn bench_jit_function_call_loop(c: &mut Criterion) {
+    let source = "fn add(x: Int, y: Int) -> Int { x + y }; var sum = 0; var i = 0; while i < 100000 { sum = add(sum, i); i = i + 1; }; sum";
+    let module = compile(source);
+
+    c.bench_function("jit/function_call_loop", |b| {
+        b.iter_batched(
+            || {
+                let mut vm = fresh_vm(&module);
+                let _ = vm.run();
+                vm
+            },
+            |mut vm| black_box(vm.run().unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+
+    // JIT-disabled interp baseline for the IDENTICAL source, so the bench
+    // directly shows whether the JIT helps or hurts call-heavy loops.
+    c.bench_function("jit/function_call_loop_interp", |b| {
+        b.iter_batched(
+            || {
+                let mut vm = nulang::vm::VM::new_without_jit();
+                vm.load_module(module.clone());
+                vm
+            },
+            |mut vm| black_box(vm.run().unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+criterion_group!(benches, bench_jit_hot_loop, bench_jit_function_call_loop);

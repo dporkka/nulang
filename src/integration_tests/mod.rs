@@ -2007,6 +2007,10 @@ match { a: 2, b: 9 } with {
                 r#"
                 fn fdivz(n: Int, acc: Float) -> Float {{
                     if n < 1 then acc else {{
+                        let _ = acc + 1.0 in
+                        let _ = acc + 1.0 in
+                        let _ = acc + 1.0 in
+                        let _ = acc + 1.0 in
                         let a = acc + 1.0 in
                         let b = a * 2.0 in
                         let c = b - 3.0 in
@@ -2053,6 +2057,9 @@ match { a: 2, b: 9 } with {
         let source = r#"
             fn hotf(n: Int, acc: Float) -> Float {
                 if n < 1 then acc else {
+                    let _ = acc + 1.0 in
+                    let _ = acc + 1.0 in
+                    let _ = acc + 1.0 in
                     let a = acc * 2.0 in
                     let b = a + 1.0 in
                     hotf(n - 1, b / 4.0)

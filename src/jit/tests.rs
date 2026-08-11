@@ -48,23 +48,50 @@ fn test_hot_counters_are_per_session() {
 
 #[test]
 fn test_find_compilable_region() {
-    let instructions = vec![
+    // A SMALL straight-line region (function body) is rejected: it is
+    // re-entered per call and JIT enter/exit exceeds interpretation below
+    // STRAIGHT_LINE_MIN.
+    let small = vec![
         Instruction::new3(OpCode::IAdd, 0, 1, 2),
         Instruction::new3(OpCode::ISub, 0, 1, 2),
         Instruction::new0(OpCode::Ret),
     ];
+    assert_eq!(find_compilable_region(0, &small), 0, "small body rejected");
+
+    // A LARGE straight-line region compiles (amortizes the JIT overhead).
+    let mut large: Vec<Instruction> = (0..STRAIGHT_LINE_MIN)
+        .map(|_| Instruction::new3(OpCode::IAdd, 0, 1, 2))
+        .collect();
+    large.push(Instruction::new0(OpCode::Ret));
     // The region stops *before* Ret so the VM still executes the return.
-    assert_eq!(find_compilable_region(0, &instructions), 2);
+    assert_eq!(find_compilable_region(0, &large), STRAIGHT_LINE_MIN);
 }
 
 #[test]
 fn test_find_region_stops_at_unsupported() {
+    // A SMALL straight-line fragment ending at an unsupported opcode is
+    // rejected (returns 0): it is a loop-head prefix that the interpreter
+    // re-enters every iteration, so JIT-compiling it would regress (paying
+    // enter/exit + probe per iteration).
     let instructions = vec![
         Instruction::new3(OpCode::IAdd, 0, 1, 2),
         Instruction::new3(OpCode::Spawn, 0, 0, 0),
         Instruction::new3(OpCode::ISub, 0, 1, 2),
     ];
-    assert_eq!(find_compilable_region(0, &instructions), 1);
+    assert_eq!(find_compilable_region(0, &instructions), 0);
+
+    // A LARGE straight-line prefix ending at an unsupported opcode is still
+    // worth compiling (a real function body).
+    let mut large = Vec::new();
+    for _ in 0..STRAIGHT_LINE_MIN {
+        large.push(Instruction::new3(OpCode::IAdd, 0, 1, 2));
+    }
+    large.push(Instruction::new3(OpCode::Spawn, 0, 0, 0));
+    assert_eq!(
+        find_compilable_region(0, &large),
+        STRAIGHT_LINE_MIN,
+        "large straight-line region ending at unsupported op is compiled"
+    );
 }
 
 /// Regions must stop before branches and Halt: after a region runs, the VM
@@ -80,17 +107,18 @@ fn test_find_region_stops_before_branches_and_halt() {
         Instruction::new3(OpCode::JmpF, 0, 0, 2),
         Instruction::new0(OpCode::Halt),
     ] {
-        let instructions = vec![
-            Instruction::new3(OpCode::IAdd, 0, 1, 2),
-            Instruction::new3(OpCode::ISub, 0, 1, 2),
-            branch,
-            Instruction::new3(OpCode::IMul, 0, 1, 2),
-        ];
+        // A prefix at/above STRAIGHT_LINE_MIN so the small-region rejection
+        // does not mask the "stops before the branch/Halt" behavior.
+        let mut instructions: Vec<Instruction> = (0..STRAIGHT_LINE_MIN)
+            .map(|_| Instruction::new3(OpCode::IAdd, 0, 1, 2))
+            .collect();
+        instructions.push(branch);
+        instructions.push(Instruction::new3(OpCode::IMul, 0, 1, 2));
         assert_eq!(
             find_compilable_region(0, &instructions),
-            2,
+            STRAIGHT_LINE_MIN,
             "region must stop before {:?}",
-            instructions[2].opcode
+            instructions[STRAIGHT_LINE_MIN].opcode
         );
     }
 }
@@ -116,6 +144,9 @@ fn test_find_region_includes_loop_back_edge() {
     // A backward jump to BEFORE the region start (an exit, e.g. a return path's
     // jump back to a RetVal) is NOT a loop back-edge — the region stays
     // straight-line (stops before the first branch). Jmp at pc3 targets 0.
+    // A backward jump to BEFORE the region start (an exit, e.g. a return path's
+    // jump back to a RetVal) is NOT a loop back-edge — and the resulting
+    // 1-instruction straight-line fragment is rejected (small region).
     let exit_seq = vec![
         Instruction::new3(OpCode::IAdd, 0, 1, 2), // 0
         Instruction::new3(OpCode::ISub, 0, 1, 2), // 1
@@ -124,8 +155,8 @@ fn test_find_region_includes_loop_back_edge() {
     ];
     assert_eq!(
         find_compilable_region(1, &exit_seq),
-        1,
-        "backward jump to before the region start must not count as a loop"
+        0,
+        "small straight-line fragment (backward exit) must not count as a loop"
     );
 }
 
@@ -135,13 +166,13 @@ fn test_find_region_includes_loop_back_edge() {
 #[test]
 fn test_compiled_region_len_recorded() {
     let mut jit = make_jit();
-    let instructions = vec![
-        Instruction::new3(OpCode::IAdd, 0, 1, 2),
-        Instruction::new3(OpCode::ISub, 0, 1, 2),
-        Instruction::new0(OpCode::Ret),
-    ];
+    // A region at/above STRAIGHT_LINE_MIN so it is actually compilable.
+    let mut instructions: Vec<Instruction> = (0..STRAIGHT_LINE_MIN)
+        .map(|_| Instruction::new3(OpCode::IAdd, 0, 1, 2))
+        .collect();
+    instructions.push(Instruction::new0(OpCode::Ret));
     let len = find_compilable_region(0, &instructions);
-    assert_eq!(len, 2);
+    assert_eq!(len, STRAIGHT_LINE_MIN);
     assert_eq!(jit.compiled_region_len(0, 0), None, "not compiled yet");
     let ptr = unsafe { jit.compile_region(0, 0, len, &instructions) };
     assert!(ptr.is_some());
