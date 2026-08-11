@@ -200,6 +200,30 @@ impl WasmBackend {
                                 span: crate::types::Span::default(),
                             });
                         }
+                        // Reject RValues the standalone WASM runtime has no
+                        // actor/effect machinery for — they previously silently
+                        // compiled to nil. Fail loudly at compile time instead.
+                        let unsupported = match op {
+                            RValue::Send { .. }
+                            | RValue::Spawn { .. }
+                            | RValue::Ask { .. }
+                            | RValue::Receive
+                            | RValue::ReceiveMatch { .. }
+                            | RValue::ReceiveWait { .. }
+                            | RValue::ReceiveCommit
+                            | RValue::Migrate { .. }
+                            | RValue::PerformAsync { .. }
+                            | RValue::SignalWait { .. }
+                            | RValue::Closure { .. } => true,
+                            _ => false,
+                        };
+                        if unsupported {
+                            return Err(crate::types::NuError::VMError {
+                                msg: "WASM backend does not support this actor/effect operation"
+                                    .into(),
+                                span: crate::types::Span::default(),
+                            });
+                        }
                         self.intern_const_strings(op);
                     }
                 }
