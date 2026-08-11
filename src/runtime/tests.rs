@@ -147,6 +147,23 @@ fn test_metrics_snapshot_topology_and_crdt() {
 }
 
 #[test]
+fn test_render_topology_nested_supervisors() {
+    let mut rt = Runtime::new();
+    // top -> mid -> leaf actor
+    let top_id = rt.create_supervisor("top", RestartStrategy::OneForAll);
+    let mid_id = rt.create_supervisor("mid", RestartStrategy::OneForOne);
+    let leaf_id = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(top_id, ChildSpec::new("m", RestartPolicy::Permanent), mid_id);
+    rt.supervise_child(mid_id, ChildSpec::new("l", RestartPolicy::Transient), leaf_id);
+
+    let text = rt.render_topology();
+    let top_pos = text.find("supervisor top [OneForAll]").expect("top rendered");
+    let mid_pos = text.find("supervisor mid [OneForOne]").expect("mid rendered");
+    assert!(text.contains(&format!("actor {leaf_id} (l)")), "leaf rendered: {text}");
+    assert!(mid_pos > top_pos, "mid must nest under top:\n{text}");
+}
+
+#[test]
 fn test_scheduler_enqueue_steal() {
     let sched = Scheduler::new(4);
     assert!(sched.steal_one().is_none());

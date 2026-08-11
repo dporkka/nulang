@@ -4830,6 +4830,12 @@ impl Runtime {
         }
     }
 
+    /// Render the runtime's supervision tree and CRDT state as ASCII text
+    /// for a terminal topology view.
+    pub fn render_topology(&self) -> String {
+        self.metrics_snapshot().render_topology_text()
+    }
+
     /// Start a Prometheus-format metrics server on the given port.
     ///
     /// Spawns a background TCP listener that serves `GET /metrics`.
