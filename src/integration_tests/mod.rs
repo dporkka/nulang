@@ -8579,6 +8579,27 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_string_eq() {
+            // `s1 == s2` for strings lowers to RValue::StringEq; the host
+            // str_eq helper must compare CONTENT, not data offset.
+            let val = run_source_to_value(r#""abc" == "abc""#).expect("run");
+            assert_eq!(val.as_bool(), Some(true), "equal strings must be == ");
+            let val = run_source_to_value(r#""abc" == "abd""#).expect("run");
+            assert_eq!(val.as_bool(), Some(false), "different strings must not be ==");
+        }
+
+        #[test]
+        fn test_wasm_run_string_eq_concat() {
+            // A runtime concat result with the same text as an interned
+            // constant must compare equal by content even though their data
+            // offsets differ: "a" + "bc" is a fresh buffer, "abc" is interned.
+            let wasm = compile_source_to_wasm(r#"("a" + "bc") == "abc""#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(val.as_bool(), Some(true), "concat result must equal its text");
+        }
+
+        #[test]
         fn test_wasm_run_iife_closure() {
             // An immediately-invoked closure appends a lifted `__lambda_N`
             // function after `__main`. nulang_init must export `__main` (the

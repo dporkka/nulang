@@ -139,6 +139,11 @@ fn seed_corpus() -> Vec<&'static str> {
         "if true then () else ()",
         r#"let s = "hello"; s"#,
         r#"let s = "a" ++ "b"; s"#,
+        // String content equality (bool result — differentially comparable
+        // across the interpreter, AOT, and WASM backends).
+        r#""ab" == "ab""#,
+        r#""ab" == "ac""#,
+        r#""a" + "b" == "ab""#,
     ]
 }
 

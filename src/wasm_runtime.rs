@@ -100,6 +100,9 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "str_concat", host_str_concat)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "str_eq", host_str_eq)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -267,6 +270,37 @@ fn host_str_concat(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<
         data[dst + text_a.len() + text_b.len()] = 0;
     }
     Ok(value_layout::TAG_STRING as i64 | new_off as i64)
+}
+
+/// `env.str_eq(a: i64, b: i64) -> i64`
+///
+/// String content equality: both operands must be tagged strings (read their
+/// null-terminated bytes from memory); returns a tagged bool of whether they
+/// hold the same text. Compares by content, not by data offset, so an
+/// interned constant and a runtime `str_concat` result with identical text
+/// compare equal. Returns `false` when either operand is not a string —
+/// mirroring the interpreter's SCmpEq.
+fn host_str_eq(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    let eq = {
+        let mem = get_memory(&mut caller)?;
+        let data = mem.data(&caller);
+        let read = |v: i64| -> Option<String> {
+            if (v as u64 & value_layout::TAG_MASK) != value_layout::TAG_STRING {
+                return None;
+            }
+            let off = (v as u64 & value_layout::PAYLOAD_MASK) as usize;
+            let bytes: Vec<u8> = data
+                .get(off..)
+                .map(|s| s.iter().take_while(|&&c| c != 0).copied().collect())
+                .unwrap_or_default();
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        match (read(a), read(b)) {
+            (Some(sa), Some(sb)) => sa == sb,
+            _ => false,
+        }
+    };
+    Ok(value_layout::tag_bool(eq) as i64)
 }
 
 /// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)`

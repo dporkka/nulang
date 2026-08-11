@@ -27,8 +27,10 @@ const IMPORT_IO_PRINT: u32 = 3;
 const IMPORT_IO_READ: u32 = 4;
 /// Function index of `env.str_concat` — string concatenation (i64, i64) -> i64.
 const IMPORT_STR_CONCAT: u32 = 5;
+/// Function index of `env.str_eq` — string content equality (i64, i64) -> i64.
+const IMPORT_STR_EQ: u32 = 6;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 6;
+const FUNC_IMPORT_COUNT: u32 = 7;
 
 const TY_VOID_TO_I64: u32 = 0;
 
@@ -238,6 +240,7 @@ impl WasmBackend {
         imports.import("env", "io_print", EntityType::Function(TY_I32I32_TO_I64));
         imports.import("env", "io_read", EntityType::Function(TY_VOID_TO_I64));
         imports.import("env", "str_concat", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "str_eq", EntityType::Function(TY_I64I64_TO_I64));
         self.imports = imports;
     }
 
@@ -666,6 +669,16 @@ impl WasmBackend {
                 body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
                 body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
                 body.instruction(&Instruction::Call(IMPORT_STR_CONCAT));
+            }
+            RValue::StringEq(a, b) => {
+                // String content equality (`s1 == s2`): compare by text, not by
+                // pool/data offset — an interned constant and a runtime concat
+                // result with the same text must compare equal. The host helper
+                // returns a tagged bool (false when either operand is not a
+                // string), mirroring the interpreter's SCmpEq.
+                body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+                body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
+                body.instruction(&Instruction::Call(IMPORT_STR_EQ));
             }
             RValue::Call { func: fr, args } => {
                 self.compile_call(body, fr, args, func);
