@@ -126,6 +126,23 @@ fn seed_corpus() -> Vec<&'static str> {
         "let r = {a = 1, b = 2}; r.a",
         "let t = (1, 2, 3); t.0 + t.2",
         "let r = {a = 1, b = 2}; let r2 = {r .. a = 10}; r2.a + r2.b",
+        // --- Nested records ---
+        "let r = {a = {b = 1}}; r.a.b",
+        // --- Arrays ---
+        "[1, 2, 3]",
+        "let a = [1, 2, 3]; a[1]",
+        "let a = [1, 2, 3]; Array.length(a)",
+        "let a = [\"x\", \"y\"]; a[0]",
+        // --- Floats ---
+        "1.5 + 2.5",
+        "3.14 * 2.0",
+        "10.0 / 4.0",
+        // --- String + int coercion ---
+        r#""n=" + 42"#,
+        r#""a" + "b" == "ab""#,
+        // --- Deeper expressions ---
+        "((1 + 2) * 3) - 4 / 2",
+        "let x = 5; let y = x * 2 + 1; y - x",
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",

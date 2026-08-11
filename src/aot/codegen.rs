@@ -4441,6 +4441,26 @@ mod tests {
     }
 
     #[test]
+    fn test_aot_array_access_boxed_entry() {
+        // Array indexing at the top level (a BOXED entry function) previously
+        // returned nil: the boxed ArrayLoad passed the TAGGED index to
+        // `nulang_obj_get`, which used it raw → out of range. Masking the
+        // payload fixes both boxed and unboxed paths.
+        let aot = aot_compile_source(
+            r#"
+            fn f() -> Int { let a = [1, 2, 3] in a[1] }
+            fn main() { f() }
+            "#,
+        );
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(2),
+            "array indexing must work"
+        );
+    }
+
+    #[test]
     fn test_aot_mutable_var_assigned_in_branch_read_after_join() {
         // A `var` assigned in ONE branch and read after the merge point is a
         // general SSA/phi-placement case: it gets a different value on each

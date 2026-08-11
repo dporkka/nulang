@@ -716,7 +716,9 @@ pub unsafe extern "C" fn nulang_obj_get(obj: u64, idx: u64) -> u64 {
     let header = &*ActorHeap::header_of(obj_ptr);
     let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
     let len = payload_size / std::mem::size_of::<Value>();
-    let i = idx as usize;
+    // idx may be a raw slot index (records/tuples, unboxed arrays) or a tagged
+    // Int (boxed arrays) — mask off any tag bits to get the slot position.
+    let i = (idx & PAYLOAD_MASK) as usize;
     if i < len {
         (*((obj_ptr as *const Value).add(i))).as_raw()
     } else {
@@ -735,7 +737,9 @@ pub unsafe extern "C" fn nulang_obj_set(obj: u64, idx: u64, val: u64) {
     let header = &*ActorHeap::header_of(obj_ptr);
     let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
     let len = payload_size / std::mem::size_of::<Value>();
-    let i = idx as usize;
+    // idx may be a raw slot index (records/tuples, unboxed arrays) or a tagged
+    // Int (boxed arrays) — mask off any tag bits to get the slot position.
+    let i = (idx & PAYLOAD_MASK) as usize;
     if i < len {
         if let Some(ptr) = val.as_ptr() {
             retain_obj(ptr);

@@ -118,6 +118,24 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "pow", host_pow)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_add", host_add)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_sub", host_sub)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_mul", host_mul)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_div", host_div)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_mod", host_mod)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "arith_cmp", host_cmp)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -362,6 +380,106 @@ fn host_str_eq(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64,
         match (read(a), read(b)) {
             (Some(sa), Some(sb)) => sa == sb,
             _ => false,
+        }
+    };
+    Ok(value_layout::tag_bool(eq) as i64)
+}
+
+/// Dispatch an arithmetic op: when BOTH operands are floats (raw non-tag bit
+/// patterns) do the f64 op; otherwise treat both as tagged ints. Mirrors the
+/// interpreter's IAdd/ISub/IMul/IDiv/IMod semantics. The WASM backend has no
+/// float arithmetic of its own (its `emit_binop` is integer-only), so numeric
+/// ops route here.
+fn host_arith_fi(
+    a: u64,
+    b: u64,
+    fop: fn(f64, f64) -> f64,
+    iop: fn(i64, i64) -> i64,
+) -> i64 {
+    if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
+        fop(f64::from_bits(a), f64::from_bits(b)).to_bits() as i64
+    } else {
+        // sext48 expects the 48-bit payload already masked off the tag.
+        let ia = value_layout::sext48(a & value_layout::PAYLOAD_MASK);
+        let ib = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
+        value_layout::tag_int(iop(ia, ib)) as i64
+    }
+}
+
+fn host_add(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    Ok(host_arith_fi(a as u64, b as u64, |x, y| x + y, |x, y| x + y))
+}
+fn host_sub(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    Ok(host_arith_fi(a as u64, b as u64, |x, y| x - y, |x, y| x - y))
+}
+fn host_mul(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    Ok(host_arith_fi(
+        a as u64,
+        b as u64,
+        |x, y| x * y,
+        |x, y| x.wrapping_mul(y),
+    ))
+}
+fn host_div(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    let a = a as u64;
+    let b = b as u64;
+    if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
+        Ok((f64::from_bits(a) / f64::from_bits(b)).to_bits() as i64)
+    } else {
+        let denom = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
+        if denom == 0 {
+            return Ok(value_layout::TAG_NIL as i64);
+        }
+        Ok(value_layout::tag_int(
+            value_layout::sext48(a & value_layout::PAYLOAD_MASK) / denom,
+        ) as i64)
+    }
+}
+fn host_mod(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    let a = a as u64;
+    let b = b as u64;
+    if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
+        Ok((f64::from_bits(a) % f64::from_bits(b)).to_bits() as i64)
+    } else {
+        let denom = value_layout::sext48(b & value_layout::PAYLOAD_MASK);
+        if denom == 0 {
+            return Ok(value_layout::TAG_NIL as i64);
+        }
+        Ok(value_layout::tag_int(
+            value_layout::sext48(a & value_layout::PAYLOAD_MASK) % denom,
+        ) as i64)
+    }
+}
+
+/// `env.arith_cmp(a: i64, b: i64, code: i64) -> i64`
+///
+/// Compare two values (float when both are floats, else signed int). `code`:
+/// 0=Eq, 1=Ne, 2=Lt, 3=Gt, 4=Le, 5=Ge. Returns a tagged bool.
+fn host_cmp(_caller: Caller<'_, HostState>, a: i64, b: i64, code: i64) -> Result<i64, Error> {
+    let a = a as u64;
+    let b = b as u64;
+    let (fa, fb) = (f64::from_bits(a), f64::from_bits(b));
+    let (ia, ib) = (
+        value_layout::sext48(a & value_layout::PAYLOAD_MASK),
+        value_layout::sext48(b & value_layout::PAYLOAD_MASK),
+    );
+    let eq = if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
+        match code {
+            0 => fa == fb,
+            1 => fa != fb,
+            2 => fa < fb,
+            3 => fa > fb,
+            4 => fa <= fb,
+            _ => fa >= fb,
+        }
+    } else {
+        match code {
+            0 => ia == ib,
+            1 => ia != ib,
+            2 => ia < ib,
+            3 => ia > ib,
+            4 => ia <= ib,
+            _ => ia >= ib,
         }
     };
     Ok(value_layout::tag_bool(eq) as i64)

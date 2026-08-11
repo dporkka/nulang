@@ -31,16 +31,26 @@ const IMPORT_STR_CONCAT: u32 = 5;
 const IMPORT_STR_EQ: u32 = 6;
 /// Function index of `env.pow` — integer exponentiation (i64, i64) -> i64.
 const IMPORT_POW: u32 = 7;
+/// Function index of `env.arith_add` — float/int add (i64, i64) -> i64.
+const IMPORT_ARITH_ADD: u32 = 8;
+const IMPORT_ARITH_SUB: u32 = 9;
+const IMPORT_ARITH_MUL: u32 = 10;
+const IMPORT_ARITH_DIV: u32 = 11;
+const IMPORT_ARITH_MOD: u32 = 12;
+/// Function index of `env.arith_cmp` — float/int comparison (i64, i64, i64) -> i64.
+const IMPORT_ARITH_CMP: u32 = 13;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 8;
+const FUNC_IMPORT_COUNT: u32 = 14;
 
 const TY_VOID_TO_I64: u32 = 0;
 
 /// (i64, i64) -> i64 — used by `env.str_concat`.
 const TY_I64I64_TO_I64: u32 = 2;
 
-const TY_I32I32_TO_I64: u32 = 3;
-const TY_FIXED_COUNT: u32 = 4;
+/// (i64, i64, i64) -> i64 — used by `env.arith_cmp`.
+const TY_I64I64I64_TO_I64: u32 = 3;
+const TY_I32I32_TO_I64: u32 = 4;
+const TY_FIXED_COUNT: u32 = 5;
 
 // ── WasmBackend ──────────────────────────────────────────────────────
 
@@ -75,7 +85,10 @@ impl WasmBackend {
             .function([ValType::I64, ValType::I64], [ValType::I64]); // 2
         types
             .ty()
-            .function([ValType::I32, ValType::I32], [ValType::I64]); // 3
+            .function([ValType::I64, ValType::I64, ValType::I64], [ValType::I64]); // 3
+        types
+            .ty()
+            .function([ValType::I32, ValType::I32], [ValType::I64]); // 4
 
         let mut imports = ImportSection::new();
         imports.import(
@@ -262,6 +275,12 @@ impl WasmBackend {
         imports.import("env", "str_concat", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "str_eq", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "pow", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "arith_add", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "arith_sub", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "arith_mul", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "arith_div", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "arith_mod", EntityType::Function(TY_I64I64_TO_I64));
+        imports.import("env", "arith_cmp", EntityType::Function(TY_I64I64I64_TO_I64));
         self.imports = imports;
     }
 
@@ -677,12 +696,43 @@ impl WasmBackend {
             RValue::Binary(op, a, b) => {
                 body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
                 body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
-                if matches!(op, crate::ast::BinOp::Pow) {
-                    // Integer exponentiation `a ** b` needs a host helper
-                    // (checked_pow; negative exponent / overflow → nil).
-                    body.instruction(&Instruction::Call(IMPORT_POW));
-                } else {
-                    self.emit_binop(body, *op);
+                use crate::ast::BinOp;
+                // Numeric ops route through host helpers so float operands
+                // (raw bit patterns the inline integer path would corrupt) get
+                // f64 arithmetic, matching the interpreter. Comparisons too.
+                let import = match op {
+                    BinOp::Add => Some(IMPORT_ARITH_ADD),
+                    BinOp::Sub => Some(IMPORT_ARITH_SUB),
+                    BinOp::Mul => Some(IMPORT_ARITH_MUL),
+                    BinOp::Div => Some(IMPORT_ARITH_DIV),
+                    BinOp::Mod => Some(IMPORT_ARITH_MOD),
+                    BinOp::Pow => Some(IMPORT_POW),
+                    BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::Le
+                    | BinOp::Ge => {
+                        let code = match op {
+                            BinOp::Eq => 0,
+                            BinOp::Ne => 1,
+                            BinOp::Lt => 2,
+                            BinOp::Gt => 3,
+                            BinOp::Le => 4,
+                            _ => 5, // Ge
+                        };
+                        body.instruction(&Instruction::I64Const(code));
+                        Some(IMPORT_ARITH_CMP)
+                    }
+                    _ => None,
+                };
+                match import {
+                    Some(imp) => {
+                        body.instruction(&Instruction::Call(imp));
+                    }
+                    None => {
+                        self.emit_binop(body, *op);
+                    }
                 }
             }
             RValue::Unary(op, a) => {

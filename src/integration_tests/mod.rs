@@ -8686,6 +8686,31 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_float_arithmetic() {
+            // Float add/sub/mul/div (previously the WASM integer-only path
+            // corrupted float bit patterns).
+            let v = run_source_to_value(r#"fn f() -> Float { 1.5 + 2.5 } f()"#).expect("run");
+            assert_eq!(v.as_float(), Some(4.0), "1.5 + 2.5");
+            let v = run_source_to_value(r#"fn f() -> Float { 10.0 / 4.0 } f()"#).expect("run");
+            assert_eq!(v.as_float(), Some(2.5), "10.0 / 4.0");
+            let v = run_source_to_value(r#"fn f() -> Float { 3.0 * 2.0 } f()"#).expect("run");
+            assert_eq!(v.as_float(), Some(6.0), "3.0 * 2.0");
+            // Int ops still work through the same helpers.
+            let v = run_source_to_value(r#"fn f() -> Int { 100 / 5 } f()"#).expect("run");
+            assert_eq!(v.as_int(), Some(20), "100 / 5");
+            let v = run_source_to_value(r#"fn f() -> Int { 7 % 3 } f()"#).expect("run");
+            assert_eq!(v.as_int(), Some(1), "7 % 3");
+        }
+
+        #[test]
+        fn test_wasm_run_float_comparison() {
+            let v = run_source_to_value(r#"fn f() -> Bool { 1.5 < 2.5 } f()"#).expect("run");
+            assert_eq!(v.as_bool(), Some(true), "1.5 < 2.5");
+            let v = run_source_to_value(r#"fn f() -> Bool { 3 > 2 } f()"#).expect("run");
+            assert_eq!(v.as_bool(), Some(true), "3 > 2");
+        }
+
+        #[test]
         fn test_wasm_run_pow() {
             // Integer exponentiation `a ** b` (previously returned nil in WASM).
             let val = run_source_to_value(r#"fn f() -> Int { 10 - 3 ** 2 } f()"#).expect("run");
