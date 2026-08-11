@@ -290,6 +290,22 @@ impl TransportStream {
         }
     }
 
+    /// Set the underlying TCP stream's read timeout. For TLS streams, must
+    /// acquire the session lock.
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            TransportStream::Raw(s) => s.set_read_timeout(timeout),
+            TransportStream::TlsServer(s) => {
+                let locked = s.lock().unwrap();
+                locked.get_ref().set_read_timeout(timeout)
+            }
+            TransportStream::TlsClient(s) => {
+                let locked = s.lock().unwrap();
+                locked.get_ref().set_read_timeout(timeout)
+            }
+        }
+    }
+
     /// Return the peer's certificate fingerprint as a `NodeId`, if TLS is
     /// active and the peer presented a certificate.
     ///
@@ -350,9 +366,7 @@ fn tls_wrap_server(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportSt
     let cfg = config.server_config()?;
     let conn = rustls::ServerConnection::new(std::sync::Arc::new(cfg))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    // Short read timeout so the reader periodically releases the Mutex,
-    // giving the sender thread windows to interleave writes.
-    tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
+    // Read timeout is set after the handshake in connection_reader/connect.
     Ok(TransportStream::TlsServer(std::sync::Arc::new(
         std::sync::Mutex::new(rustls::StreamOwned::new(conn, tcp)),
     )))
@@ -365,7 +379,7 @@ fn tls_wrap_client(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportSt
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let conn = rustls::ClientConnection::new(std::sync::Arc::new(cfg), name)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
+    // Read timeout is set after the handshake in connection_reader/connect.
     Ok(TransportStream::TlsClient(std::sync::Arc::new(
         std::sync::Mutex::new(rustls::StreamOwned::new(conn, tcp)),
     )))
@@ -1801,12 +1815,17 @@ impl TcpTransport {
             ));
         }
 
+
         let conn = TcpConnection {
             node_id,
             addr,
             stream,
             last_activity: Instant::now(),
         };
+
+        // Short read timeout so the reader periodically releases the Mutex,
+        // giving the sender thread windows to interleave writes.
+        let _ = conn.stream.set_read_timeout(Some(Duration::from_millis(50)));
 
         let read_stream = conn.stream.try_clone()?;
         {
@@ -2047,6 +2066,10 @@ fn connection_reader(
             }
         }
     }
+
+    // Short read timeout so the reader periodically releases the Mutex,
+    // giving the sender thread windows to interleave writes.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
 
     {
         let mut conns = lock_ignore_poison(&connections);

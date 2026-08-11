@@ -11,6 +11,29 @@ use crate::types::{NuError, NuResult, Span};
 
 use crate::registry::RegistryClient;
 
+thread_local! {
+    /// Optional per-thread override for the package root, set by tests to
+    /// avoid mutating the process-global working directory. `set_current_dir`
+    /// in one test raced with unrelated parallel tests resolving `stdlib::*`
+    /// and example files relative to `current_dir()`, causing random
+    /// cross-test failures that vanished in isolation.
+    static PACKAGE_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        std::cell::RefCell::new(None);
+}
+
+/// The base directory a `cmd_*` function operates in: a per-thread test
+/// override if present (see `PACKAGE_ROOT_OVERRIDE`), else the process
+/// working directory. Never mutates global CWD state.
+fn package_root() -> NuResult<PathBuf> {
+    if let Some(dir) = PACKAGE_ROOT_OVERRIDE.with(|c| c.borrow().clone()) {
+        return Ok(dir);
+    }
+    std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })
+}
+
 /// Dispatch a `nula` invocation (`args` excludes the leading `nula`).
 pub fn run(args: &[String]) -> NuResult<()> {
     match args.first().map(String::as_str) {
@@ -261,10 +284,7 @@ fn cmd_new(path_arg: Option<&str>, template: Option<&str>) -> NuResult<()> {
 
 /// `nula init`: scaffold a package in the current directory.
 fn cmd_init() -> NuResult<()> {
-    let dir = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let dir = package_root()?;
     let manifest_path = dir.join(MANIFEST_FILE);
     if manifest_path.exists() {
         return Err(NuError::PackageError {
@@ -414,10 +434,7 @@ fn template_files(name: &str) -> Vec<(&'static str, &'static str)> {
 /// Resolve the package in the current directory, write `Nulang.lock`, and
 /// return the entry point path.
 fn prepare_package() -> NuResult<PathBuf> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
         msg: format!(
@@ -541,10 +558,7 @@ fn nulang_exe(args: &[&str]) -> NuResult<()> {
 /// `nula build`: resolve dependencies, write the lockfile, type-check and
 /// compile to a .nbc artifact in .nula/dist/.
 fn cmd_build() -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
         msg: format!("failed to load {}: {}", manifest_path.display(), e),
@@ -576,10 +590,7 @@ fn cmd_build() -> NuResult<()> {
 /// `nula build-wasm`: compile package to .wasm + AOT .cwasm.
 /// `nula build-wasm`: compile package to .wasm + AOT .cwasm in .nula/dist/.
 fn cmd_build_wasm() -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
         msg: format!("failed to load {}: {}", manifest_path.display(), e),
@@ -617,10 +628,7 @@ fn cmd_run() -> NuResult<()> {
 /// `nula run --watch` (or `nula watch`): build, run, and re-run when source
 /// files change under `src/`. Uses simple mtime polling.
 fn cmd_run_watch() -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let entry = prepare_package()?;
     let entry_str = entry.to_string_lossy().into_owned();
 
@@ -692,12 +700,7 @@ fn collect_mtimes_recursive(dir: &Path, out: &mut Vec<(PathBuf, std::time::Syste
 fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
     eprintln!("Preparing package...");
     let _entry = prepare_package()?;
-    let tests_dir = std::env::current_dir()
-        .map_err(|e| NuError::PackageError {
-            msg: format!("cannot read current directory: {}", e),
-            span: Span::default(),
-        })?
-        .join("tests");
+    let tests_dir = package_root()?.join("tests");
     let mut test_files: Vec<PathBuf> = match std::fs::read_dir(&tests_dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -820,10 +823,7 @@ fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
 /// `nula test --watch` (or `nula test -w`): run tests and re-run when source
 /// files change under `src/` or `tests/`. Uses simple mtime polling.
 fn cmd_test_watch(filter: Option<&str>, verbose: bool) -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
 
     // Initial run
     let _ = cmd_test(filter, verbose);
@@ -929,10 +929,7 @@ fn run_test_file(file_path: &str) -> Result<(), String> {
 
 /// `nula list`: print all locked dependencies with versions and sources.
 fn cmd_list() -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let lock_path = root.join(LOCKFILE_FILE);
     let lockfile = Lockfile::load(&root).map_err(|e| NuError::PackageError {
         msg: format!(
@@ -956,10 +953,7 @@ fn cmd_list() -> NuResult<()> {
 /// `nula clean`: remove build artifacts (.nbc files).
 /// `nula clean`: remove build artifacts (.nula/dist/ directory).
 fn cmd_clean() -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let dist_dir = root.join(".nula").join("dist");
     if dist_dir.exists() {
         eprintln!("Cleaning build artifacts...");
@@ -981,10 +975,7 @@ fn cmd_clean() -> NuResult<()> {
 /// a combined `docs/api.md`. With `--open`, spawns `xdg-open` on the
 /// output file (best-effort).
 fn cmd_doc(open: bool) -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     if !manifest_path.exists() {
         return Err(NuError::PackageError {
@@ -1011,10 +1002,7 @@ fn cmd_doc(open: bool) -> NuResult<()> {
 /// `nula publish [--registry <url>] [--token <token>]` — package and upload
 /// the current package to a registry.
 fn cmd_publish(registry_url: Option<String>, token: Option<String>) -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     if !manifest_path.exists() {
         return Err(NuError::PackageError {
@@ -1114,10 +1102,7 @@ struct DeployResponse {
 /// `nula deploy [--wasm] [--url <url>] [--token <token>]` — build and deploy
 /// the current package to Nulang Cloud.
 fn cmd_deploy(wasm: bool, cloud_url: Option<String>, token: Option<String>) -> NuResult<()> {
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     if !manifest_path.exists() {
         return Err(NuError::PackageError {
@@ -1308,10 +1293,7 @@ fn cmd_add(
     })?;
     validate_package_name(name)?;
 
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     if !manifest_path.exists() {
         return Err(NuError::PackageError {
@@ -1384,10 +1366,7 @@ fn cmd_remove(name: Option<&str>) -> NuResult<()> {
         span: Span::default(),
     })?;
 
-    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
-        msg: format!("cannot read current directory: {}", e),
-        span: Span::default(),
-    })?;
+    let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     if !manifest_path.exists() {
         return Err(NuError::PackageError {
@@ -1444,7 +1423,6 @@ mod tests {
 
     #[test]
     fn test_manifest_language_pin() {
-        let _cwd = cwd_guard();
         let dir = std::env::temp_dir().join(format!("nulang_lang_pin_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1473,15 +1451,7 @@ mod tests {
     }
 
     use crate::package::manifest::DEFAULT_ENTRY;
-    use std::sync::LazyLock;
-    use std::sync::Mutex;
 
-    /// Serialize tests that change the process CWD so they don't interfere
-    /// with one another during parallel execution.
-    static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    fn cwd_guard() -> std::sync::MutexGuard<'static, ()> {
-        CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
     #[test]
     fn test_scaffold_package_creates_valid_manifest() {
         let dir = std::env::temp_dir().join(format!("nulang_nula_new_test_{}", std::process::id()));
@@ -1568,7 +1538,6 @@ mod tests {
 
     #[test]
     fn test_cmd_init_creates_in_current_dir() {
-        let _cwd = cwd_guard();
         let dir = std::env::temp_dir().join(format!("nulang_init_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1600,7 +1569,6 @@ mod tests {
     #[test]
     fn test_cmd_test_fails_in_non_package_dir() {
         // Use a temp dir with no Nulang.toml so prepare_package fails.
-        let _cwd = cwd_guard();
         let dir = std::env::temp_dir().join(format!("nulang_no_pkg_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1612,28 +1580,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Helper: temporarily change the current directory, restoring it on drop.
+    /// Helper: point `package_root()` at `dir` for this thread only, restoring
+    /// the previous override on drop. Uses the thread-local override instead
+    /// of `std::env::set_current_dir`, which is process-global and raced with
+    /// unrelated parallel tests resolving `stdlib::*`/example files relative
+    /// to `current_dir()` (random failures that passed in isolation).
     struct ChangeDir {
-        original: PathBuf,
+        original: Option<PathBuf>,
     }
 
     impl ChangeDir {
         fn new(dir: &Path) -> Self {
-            let original = std::env::current_dir().unwrap();
-            std::env::set_current_dir(dir).unwrap();
+            let original = PACKAGE_ROOT_OVERRIDE.with(|c| c.borrow_mut().replace(dir.to_path_buf()));
             ChangeDir { original }
         }
     }
 
     impl Drop for ChangeDir {
         fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
+            PACKAGE_ROOT_OVERRIDE.with(|c| *c.borrow_mut() = self.original.take());
         }
     }
 
     #[test]
     fn test_cmd_add_and_remove_dependency() {
-        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_add_remove_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1677,7 +1647,6 @@ mod tests {
     #[test]
     fn test_manifest_add_dependency_direct() {
         // Test manifest-level mutation directly (avoiding resolver for git/version deps)
-        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_manifest_dep_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1739,7 +1708,6 @@ mod tests {
 
     #[test]
     fn test_cmd_add_rejects_invalid_name() {
-        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_add_invalid_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1757,7 +1725,6 @@ mod tests {
 
     #[test]
     fn test_cmd_add_missing_name() {
-        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_add_no_name_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1774,7 +1741,6 @@ mod tests {
 
     #[test]
     fn test_cmd_doc_generates_api_md() {
-        let _cwd = cwd_guard();
         let dir = std::env::temp_dir().join(format!("nulang_doc_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1823,7 +1789,6 @@ mod tests {
 
     #[test]
     fn test_cmd_doc_fails_outside_package() {
-        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_doc_no_pkg_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1837,7 +1802,6 @@ mod tests {
     }
     #[test]
     fn test_cmd_deploy_missing_token() {
-        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_deploy_token_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1861,7 +1825,6 @@ mod tests {
 
     #[test]
     fn test_cmd_deploy_no_manifest() {
-        let _cwd = cwd_guard();
         let dir = std::env::temp_dir().join(format!(
             "nulang_deploy_nomanifest_test_{}",
             std::process::id()
