@@ -492,8 +492,8 @@ fn compile_for_diff(source: &str) -> Option<CompiledMutant> {
     let mut type_checker = TypeChecker::new();
     type_checker.check_module(&ast).ok()?;
     let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
-    let mir_module = crate::mir_lower::lower_module(&hir).ok()?;
-    let code_module = crate::mir_codegen::compile_mir(&mir_module, "fuzz-diff").ok()?;
+    let mut mir_module = crate::mir_lower::lower_module(&hir).ok()?;
+    let code_module = crate::mir_codegen::compile_mir(&mut mir_module, "fuzz-diff").ok()?;
     Some(CompiledMutant {
         code_module,
         mir_module,

@@ -192,7 +192,7 @@ impl TraceContext {
         &self,
         actor_id: u64,
         behavior_idx: usize,
-    ) -> Option<tracing::span::Entered<'_>> {
+    ) -> Option<tracing::span::EnteredSpan> {
         if !tracing::enabled!(tracing::Level::TRACE) {
             return None;
         }

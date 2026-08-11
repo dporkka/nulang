@@ -1564,8 +1564,14 @@ fn fold_rvalue(
                     Some(rv) => rv,
                     None => RValue::Binary(bop, a, b),
                 },
-                (Some(ca), None) => fold_one_const(bop, ca, b, b_is_float, true),
-                (None, Some(cb)) => fold_one_const(bop, cb, a, a_is_float, false),
+                (Some(ca), None) => match fold_one_const(bop, ca, b, b_is_float, true) {
+                    Some(rv) => rv,
+                    None => RValue::Binary(bop, a, b),
+                },
+                (None, Some(cb)) => match fold_one_const(bop, cb, a, a_is_float, false) {
+                    Some(rv) => rv,
+                    None => RValue::Binary(bop, a, b),
+                },
                 (None, None) => {
                     // x == x is always true and x != x always false — for
                     // every value except a NaN float (the VM's epsilon
@@ -1656,13 +1662,15 @@ fn fold_binary_consts(bop: crate::ast::BinOp, a: &Constant, b: &Constant) -> Opt
 /// Identity / zero-one-propagation rules for `Const op Local` /
 /// `Local op Const`. `const_on_left` selects the mirror rule set (Sub/Div/
 /// Shl/Shr have no left-const identities: `0 - x` and `1 / x` are not x).
+/// Returns `None` when no rule applies — the caller keeps the original
+/// RValue (a substituted const cannot be inlined: `Binary` holds LocalIds).
 fn fold_one_const(
     bop: crate::ast::BinOp,
     c: &Constant,
     other: mir::LocalId,
     other_is_float: bool,
     const_on_left: bool,
-) -> mir::RValue {
+) -> Option<mir::RValue> {
     use crate::ast::BinOp;
     use mir::RValue;
     use Constant::{Bool, Int, Nil};
@@ -1670,32 +1678,32 @@ fn fold_one_const(
     // Skip when the live operand may hold a float: the VM's F* handlers
     // coerce the int constant, and IEEE semantics differ at ±0.0/NaN.
     let guard = !other_is_float;
-    let no_rule = |rv: mir::RValue| rv;
     match (const_on_left, bop, c) {
-        (true, BinOp::Add | BinOp::BitOr | BinOp::BitXor, Int(0)) if guard => RValue::Load(other),
-        (true, BinOp::Mul, Int(1)) if guard => RValue::Load(other),
-        (true, BinOp::Mul, Int(0)) if guard => RValue::Const(Int(0)),
-        (true, BinOp::And, Bool(true)) if guard => RValue::Load(other),
-        (true, BinOp::And, Bool(false)) if guard => RValue::Const(Bool(false)),
-        (true, BinOp::And, Nil) if guard => RValue::Const(Bool(false)),
-        (true, BinOp::Or, Bool(true)) if guard => RValue::Const(Bool(true)),
-        (true, BinOp::Or, Bool(false)) if guard => RValue::Load(other),
-        (true, BinOp::Or, Nil) if guard => RValue::Load(other),
+        (true, BinOp::Add | BinOp::BitOr | BinOp::BitXor, Int(0)) if guard => {
+            Some(RValue::Load(other))
+        }
+        (true, BinOp::Mul, Int(1)) if guard => Some(RValue::Load(other)),
+        (true, BinOp::Mul, Int(0)) if guard => Some(RValue::Const(Int(0))),
+        (true, BinOp::And, Bool(true)) if guard => Some(RValue::Load(other)),
+        (true, BinOp::And, Bool(false)) if guard => Some(RValue::Const(Bool(false))),
+        (true, BinOp::And, Nil) if guard => Some(RValue::Const(Bool(false))),
+        (true, BinOp::Or, Bool(true)) if guard => Some(RValue::Const(Bool(true))),
+        (true, BinOp::Or, Bool(false)) if guard => Some(RValue::Load(other)),
+        (true, BinOp::Or, Nil) if guard => Some(RValue::Load(other)),
         (
             false,
             BinOp::Add | BinOp::Sub | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
             Int(0),
-        ) if guard => RValue::Load(other),
-        (false, BinOp::Mul | BinOp::Div, Int(1)) if guard => RValue::Load(other),
-        (false, BinOp::Mul, Int(0)) if guard => RValue::Const(Int(0)),
-        (false, BinOp::And, Bool(true)) if guard => RValue::Load(other),
-        (false, BinOp::And, Bool(false)) if guard => RValue::Const(Bool(false)),
-        (false, BinOp::And, Nil) if guard => RValue::Const(Bool(false)),
-        (false, BinOp::Or, Bool(true)) if guard => RValue::Const(Bool(true)),
-        (false, BinOp::Or, Bool(false)) if guard => RValue::Load(other),
-        (false, BinOp::Or, Nil) if guard => RValue::Load(other),
-        (true, _, _) => no_rule(RValue::Binary(bop, RValue::Const(c.clone()), other)),
-        (false, _, _) => no_rule(RValue::Binary(bop, other, RValue::Const(c.clone()))),
+        ) if guard => Some(RValue::Load(other)),
+        (false, BinOp::Mul | BinOp::Div, Int(1)) if guard => Some(RValue::Load(other)),
+        (false, BinOp::Mul, Int(0)) if guard => Some(RValue::Const(Int(0))),
+        (false, BinOp::And, Bool(true)) if guard => Some(RValue::Load(other)),
+        (false, BinOp::And, Bool(false)) if guard => Some(RValue::Const(Bool(false))),
+        (false, BinOp::And, Nil) if guard => Some(RValue::Const(Bool(false))),
+        (false, BinOp::Or, Bool(true)) if guard => Some(RValue::Const(Bool(true))),
+        (false, BinOp::Or, Bool(false)) if guard => Some(RValue::Load(other)),
+        (false, BinOp::Or, Nil) if guard => Some(RValue::Load(other)),
+        _ => None,
     }
 }
 
@@ -1824,8 +1832,20 @@ fn dead_store_elim(func: &mut mir::Function) -> bool {
             let removable = match &stmt {
                 mir::Stmt::Assign { dst, op } => {
                     let self_move = matches!(op, mir::RValue::Load(src) if src == dst);
+                    // Named locals stay visible to the debugger at
+                    // breakpoints: constant propagation can make their
+                    // definition look dead (the folded RValue no longer
+                    // references them), but removing the store would make
+                    // the paused frame report nil. Only anonymous temps
+                    // are safe to drop.
+                    let named = func
+                        .locals
+                        .get(dst.0 as usize)
+                        .map(|l| l.name.is_some())
+                        .unwrap_or(false);
                     self_move
-                        || (!func.captures.contains(dst)
+                        || (!named
+                            && !func.captures.contains(dst)
                             && !reads.contains(dst)
                             && !rvalue_side_effecting(op))
                 }
@@ -2484,8 +2504,8 @@ mod tests {
         type_checker.check_module(&ast)?;
 
         let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
-        let mir = crate::mir_lower::lower_module(&hir)?;
-        compile_mir(&mir, "test")
+        let mut mir = crate::mir_lower::lower_module(&hir)?;
+        compile_mir(&mut mir, "test")
     }
 
     fn run_mir_source(source: &str) -> NuResult<crate::vm::Value> {
@@ -2983,8 +3003,8 @@ mod tests {
                 crate::hir::Decl::Function(main_fn),
             ],
         };
-        let mir = crate::mir_lower::lower_module(&hir).unwrap();
-        let module = crate::mir_codegen::compile_mir(&mir, "t").unwrap();
+        let mut mir = crate::mir_lower::lower_module(&hir).unwrap();
+        let module = crate::mir_codegen::compile_mir(&mut mir, "t").unwrap();
         let mut vm = VM::new();
         vm.load_module(module);
         let value = vm.run().unwrap();
@@ -3119,5 +3139,222 @@ mod tests {
         // semantics (last expression wins).
         let value = run_mir_source("par { 1 + 2; 3 * 4 }").unwrap();
         assert_eq!(value.as_int(), Some(12));
+    }
+}
+
+// ===========================================================================
+// MIR optimization pass tests
+// ===========================================================================
+
+#[cfg(test)]
+mod optimize_tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::typechecker::TypeChecker;
+    use crate::vm::VM;
+
+    fn compile_source(source: &str) -> NuResult<CodeModule> {
+        let tokens = Lexer::new(source).lex()?;
+        let ast = Parser::new(tokens).parse_module()?;
+        let mut type_checker = TypeChecker::new();
+        type_checker.check_module(&ast)?;
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+        let mut mir = crate::mir_lower::lower_module(&hir)?;
+        compile_mir(&mut mir, "test")
+    }
+
+    fn run_source(source: &str) -> NuResult<crate::vm::Value> {
+        let module = compile_source(source)?;
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.run()
+    }
+
+    fn has_opcode(module: &CodeModule, op: OpCode) -> bool {
+        module.instructions.iter().any(|i| i.opcode == op)
+    }
+
+    #[test]
+    fn test_fold_const_add() {
+        // `1 + 2` folds to a single constant; no IAdd survives.
+        let value = run_source("1 + 2").unwrap();
+        assert_eq!(value.as_int(), Some(3));
+        let module = compile_source("1 + 2").unwrap();
+        assert!(
+            !has_opcode(&module, OpCode::IAdd),
+            "constant addition must not emit IAdd"
+        );
+    }
+
+    #[test]
+    fn test_fold_const_mul_add() {
+        // `1 + 2 * 3` folds to 7; neither opcode survives.
+        let value = run_source("1 + 2 * 3").unwrap();
+        assert_eq!(value.as_int(), Some(7));
+        let module = compile_source("1 + 2 * 3").unwrap();
+        assert!(!has_opcode(&module, OpCode::IAdd), "no IAdd after folding");
+        assert!(!has_opcode(&module, OpCode::IMul), "no IMul after folding");
+    }
+
+    #[test]
+    fn test_fold_identity_add_zero() {
+        // `x + 0` is a no-op move, not an IAdd.
+        let value = run_source("let f = fn(x) { x + 0 } in f(5)").unwrap();
+        assert_eq!(value.as_int(), Some(5));
+        let module = compile_source("let f = fn(x) { x + 0 } in f(5)").unwrap();
+        assert!(
+            !has_opcode(&module, OpCode::IAdd),
+            "x + 0 must fold to a plain load, not IAdd"
+        );
+    }
+
+    #[test]
+    fn test_fold_zero_propagates() {
+        // `x * 0` collapses to 0 — even with a constant x.
+        let value = run_source("let x = 42 in x * 0").unwrap();
+        assert_eq!(value.as_int(), Some(0));
+        let module = compile_source("let x = 42 in x * 0").unwrap();
+        assert!(
+            !has_opcode(&module, OpCode::IMul),
+            "x * 0 must fold away the multiply"
+        );
+    }
+
+    #[test]
+    fn test_fold_double_neg() {
+        // `--5` folds through two Unary(Neg) applications to Const(5).
+        let value = run_source("--5").unwrap();
+        assert_eq!(value.as_int(), Some(5));
+        let module = compile_source("--5").unwrap();
+        assert!(
+            !has_opcode(&module, OpCode::INeg),
+            "double negation must fold, not emit INeg"
+        );
+    }
+
+    #[test]
+    fn test_dce_dead_store() {
+        // `let x = 1 + 2` folds to `x = Const(3)`, then DCE drops the dead
+        // store (x is never read). The block's value is 42.
+        let value = run_source("let x = 1 + 2 in 42").unwrap();
+        assert_eq!(value.as_int(), Some(42));
+        let module = compile_source("let x = 1 + 2 in 42").unwrap();
+        assert!(
+            !has_opcode(&module, OpCode::IAdd),
+            "dead folded store must not emit IAdd"
+        );
+    }
+
+    #[test]
+    fn test_no_dce_side_effect() {
+        // `let _ = perform IO.print(...)` must keep the perform even though
+        // its result local is never read: Perform is side-effecting.
+        let module = compile_source(
+            r#"handle let _ = perform IO.print("hi") in 42 { | IO.print(msg) => 0 }"#,
+        )
+        .unwrap();
+        assert!(
+            module
+                .instructions
+                .iter()
+                .any(|i| matches!(i.opcode, OpCode::Perform | OpCode::PerformDirect)),
+            "the perform must survive dead-store elimination"
+        );
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let value = vm.run().unwrap();
+        // The abortive handler `=> 0` replaces the body's value: 0 is the
+        // result only because the perform executed and jumped into the
+        // handler. If DCE had dropped the perform, the body would have
+        // yielded 42 instead.
+        assert_eq!(value.as_int(), Some(0));
+    }
+
+    #[test]
+    fn test_fold_string_concat() {
+        // `"hello" + " " + "world"` folds to a single string constant.
+        let module = compile_source(r#""hello" + " " + "world""#).unwrap();
+        eprintln!("DEBUG constants: {:?}", module.constants);
+        assert!(
+            module
+                .constants
+                .iter()
+                .any(|c| matches!(c, Constant::String(s) if s == "hello world")),
+            "constant pool must contain the folded string, got {:?}",
+            module.constants
+        );
+        assert!(
+            !module
+                .constants
+                .iter()
+                .any(|c| matches!(c, Constant::String(s) if s == "hello ")),
+            "intermediate concat constant must not survive"
+        );
+    }
+
+    #[test]
+    fn test_jump_thread() {
+        // Manually build block0: Jump(1), block1: Jump(2), block2:
+        // Const(42); Return. After threading, block0 jumps straight to
+        // block2 and the trampoline block1 becomes an unreachable Return.
+        let mut b = mir::FunctionBuilder::new("t", Some(crate::types::Type::int()));
+        let b0 = b.current_block();
+        let b1 = b.create_block();
+        let b2 = b.create_block();
+        b.terminate(mir::Terminator::Jump(b1));
+        b.switch_to(b1);
+        b.terminate(mir::Terminator::Jump(b2));
+        b.switch_to(b2);
+        let tmp = b.add_temp(crate::types::Type::int());
+        b.assign(tmp, mir::RValue::Const(Constant::Int(42)));
+        b.terminate(mir::Terminator::Return(Some(tmp)));
+        let mut func = b.build();
+        let mut consts = Vec::new();
+        optimize_function(&mut func, &mut consts);
+        assert_eq!(
+            func.blocks[0].terminator,
+            mir::Terminator::Jump(b2),
+            "entry must jump directly to the real target"
+        );
+        assert_eq!(
+            func.blocks[1].terminator,
+            mir::Terminator::Return(None),
+            "trampoline block must be marked unreachable"
+        );
+        assert_eq!(
+            func.blocks[2].terminator,
+            mir::Terminator::Return(Some(tmp)),
+            "real block must be untouched"
+        );
+    }
+
+    #[test]
+    fn test_self_move_eliminated() {
+        // `x = Load(x)` is a no-op and must be removed even though x is
+        // live (the surrounding load/store remain).
+        let mut b = mir::FunctionBuilder::new("t", Some(crate::types::Type::int()));
+        let a = b.add_temp(crate::types::Type::int());
+        let x = b.add_temp(crate::types::Type::int());
+        b.assign(x, mir::RValue::Load(a));
+        b.assign(x, mir::RValue::Load(x)); // self-move
+        b.terminate(mir::Terminator::Return(Some(x)));
+        let mut func = b.build();
+        let mut consts = Vec::new();
+        optimize_function(&mut func, &mut consts);
+        let stmts = &func.blocks[0].stmts;
+        assert_eq!(
+            stmts.len(),
+            1,
+            "the self-move must be removed, leaving one store, got {:?}",
+            stmts
+        );
+        assert_eq!(
+            stmts[0],
+            mir::Stmt::Assign {
+                dst: x,
+                op: mir::RValue::Load(a)
+            }
+        );
     }
 }

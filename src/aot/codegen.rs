@@ -3857,10 +3857,10 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile should succeed");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -3936,9 +3936,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4026,9 +4026,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4095,9 +4095,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4664,9 +4664,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4723,9 +4723,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4781,9 +4781,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4837,9 +4837,9 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
+        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);

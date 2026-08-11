@@ -779,12 +779,14 @@ pub fn send_distributed(
             // hash; the receiving node resolves the name and MAY verify the
             // hash against its own behavior table on delivery.
             let content_hash = try_lookup_content_hash(runtime, behavior);
-            // Carry the current handler's trace context across the wire so the
-            // remote side continues the same causal chain.
+            // Carry the current handler's trace span across the wire so the
+            // remote side continues the same causal chain. The current span
+            // (not a synthetic child) crosses because `traceparent` has no
+            // parent field — the receiver creates its own child span.
             let trace_id = runtime
                 .current_trace
                 .as_ref()
-                .map(|t| t.child().to_traceparent());
+                .map(|t| t.to_traceparent());
             let packet = resolver.build_packet(
                 actor_id,
                 behavior,

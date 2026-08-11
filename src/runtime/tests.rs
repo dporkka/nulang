@@ -52,6 +52,58 @@ fn test_mailbox_push_pop() {
 }
 
 #[test]
+fn test_send_carries_current_trace_span() {
+    let mut rt = Runtime::new();
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    let root = TraceContext::root();
+    rt.current_trace = Some(root);
+    rt.send_message_by_id(b, 0, &[]);
+    let actor = rt.actors.get_mut(&b).unwrap();
+    let msg = actor.receive().expect("message delivered");
+    let tp = msg.trace_id.expect("outgoing message carries a traceparent");
+    let parsed = TraceContext::from_traceparent(&tp).expect("valid traceparent");
+    // `traceparent` carries the current span (trace-id + span-id), so the
+    // outgoing message exposes the handler's span for the receiver to child.
+    assert_eq!(parsed.trace_id(), root.trace_id());
+    assert_eq!(parsed.span_id(), root.span_id());
+}
+
+#[test]
+fn test_delivery_establishes_child_context_and_inherits() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    // Deliver a message carrying a known W3C traceparent (the W3C spec example).
+    let incoming = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    {
+        let actor = rt.actors.get_mut(&a).unwrap();
+        actor
+            .mailbox
+            .push(Message {
+                behavior_id: 0,
+                payload: Arc::new(vec![]),
+                sender: 0,
+                priority: MessagePriority::Normal,
+                trace_id: Some(incoming.to_string()),
+            })
+            .unwrap();
+    }
+    rt.step_actor(a);
+    let ctx = rt.current_trace.expect("delivery establishes a trace context");
+    assert_eq!(ctx.trace_id(), 0x4bf9_2f35_77b3_4da6_a3ce_929d_0e0e_4736);
+    assert_eq!(ctx.parent_span_id(), 0x00f0_67aa_0ba9_02b7);
+
+    // A send performed after delivery inherits the same trace.
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.send_message_by_id(b, 0, &[]);
+    let msg = rt.actors.get_mut(&b).unwrap().receive().expect("delivered");
+    let child = TraceContext::from_traceparent(&msg.trace_id.expect("stamped")).unwrap();
+    // The send carries `ctx`'s span (traceparent has no parent field); a
+    // receiver would child off it, continuing the same trace.
+    assert_eq!(child.trace_id(), ctx.trace_id());
+    assert_eq!(child.span_id(), ctx.span_id());
+}
+
+#[test]
 fn test_scheduler_enqueue_steal() {
     let sched = Scheduler::new(4);
     assert!(sched.steal_one().is_none());
@@ -1536,7 +1588,7 @@ fn test_persistent_string_state_survives_checkpoint_and_recovery() {
     rt.recover_actor(actor_id).unwrap();
 
     // After recovery, the string value should be restored on the actor heap.
-    let actor = rt.actors.get(&actor_id).unwrap();
+    let actor = rt.actors.get_mut(&actor_id).unwrap();
     let restored = actor.get_state_field("greeting").unwrap();
     assert!(!restored.is_nil(), "restored string must not be nil");
 }

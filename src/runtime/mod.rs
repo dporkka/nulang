@@ -1662,11 +1662,14 @@ impl Runtime {
     }
     #[tracing::instrument(level = "trace", skip(self, args))]
     pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
-        // Stamp the outgoing message as a child of the current handler's trace
-        // context (if any), so causal chains continue across actor, shard, and
-        // node boundaries. When no message is being handled, the outgoing
-        // message starts a fresh trace on its own.
-        let out_trace = self.current_trace.as_ref().map(|t| t.child().to_traceparent());
+        // Stamp the outgoing message with the current handler's trace span (if
+        // any), so the receiver's child span links directly to it and causal
+        // chains continue across actor, shard, and node boundaries. The W3C
+        // `traceparent` format carries only trace-id + span-id (no parent), so
+        // the current span — not a synthetic child — must cross the wire; the
+        // receiving side derives its own child. When no message is being
+        // handled, the outgoing message starts a fresh trace on its own.
+        let out_trace = self.current_trace.as_ref().map(|t| t.to_traceparent());
         // Forwarding for migrated actors: if this actor has been relocated
         // to another node, route the message there instead of bouncing it.
         if let Some(&(target_node, _migrated_at)) = self.migrated_actors.get(&target_id) {
