@@ -435,17 +435,18 @@ fn compute_live_ins(func: &mir::Function, local_base: u32) -> HashMap<mir::Block
                 _ => {}
             }
         }
-        // Terminator uses (after all defs).
+        // Terminator uses (after all defs). A terminator operand that was
+        // defined earlier in this block is NOT a live-in (gen) — it is killed.
+        let term_uses = |g: &mut HashSet<u32>, k: &HashSet<u32>, id: mir::LocalId| {
+            let reg = local_base + id.0;
+            if !k.contains(&reg) {
+                g.insert(reg);
+            }
+        };
         match &block.terminator {
-            mir::Terminator::Return(Some(l)) => {
-                g.insert(local_base + l.0);
-            }
-            mir::Terminator::Branch { cond, .. } => {
-                g.insert(local_base + cond.0);
-            }
-            mir::Terminator::Resume(id) => {
-                g.insert(local_base + id.0);
-            }
+            mir::Terminator::Return(Some(l)) => term_uses(&mut g, &k, *l),
+            mir::Terminator::Branch { cond, .. } => term_uses(&mut g, &k, *cond),
+            mir::Terminator::Resume(id) => term_uses(&mut g, &k, *id),
             _ => {}
         }
         gen.insert(block.id, g);
@@ -603,7 +604,11 @@ fn compute_liveins(
         block_defs.insert(block.id, defs);
     }
 
-    // For each block with >1 predecessor, compute locals defined in ALL predecessors.
+    // Live-in sets (proper gen/kill liveness) for phi placement.
+    let live_ins = compute_live_ins(func, local_base);
+
+    // For each block with >1 predecessor, compute locals that need a CLIF block
+    // param so the merge can read the right SSA value on every incoming path.
     let mut liveins: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
     for block in &func.blocks {
         if handler_body_params.contains_key(&block.id) {
@@ -613,7 +618,8 @@ fn compute_liveins(
             Some(p) if p.len() > 1 => p,
             _ => continue,
         };
-        // Start with definitions from first predecessor.
+        // (1) Locals defined in ALL predecessors (the historical heuristic;
+        //     kept as a safe superset — dead members are harmless).
         let mut merged: HashSet<u32> = block_defs.get(&pids[0]).cloned().unwrap_or_default();
         for pid in &pids[1..] {
             if let Some(defs) = block_defs.get(pid) {
@@ -621,6 +627,22 @@ fn compute_liveins(
             } else {
                 merged.clear();
                 break;
+            }
+        }
+        // (2) Locals live into the merge AND defined in at least one predecessor
+        //     get DIFFERENT reaching definitions from different paths (a branch
+        //     assigns the variable on one path, another path carries the prior
+        //     value), so they must be merged as a block param. Without this, a
+        //     value assigned in one branch and read after the join is referenced
+        //     from a non-dominating block → CLIF verifier error.
+        if let Some(li) = live_ins.get(&block.id) {
+            for &v in li {
+                let defined_in_pred = pids
+                    .iter()
+                    .any(|pid| block_defs.get(pid).map(|d| d.contains(&v)).unwrap_or(false));
+                if defined_in_pred {
+                    merged.insert(v);
+                }
             }
         }
         if !merged.is_empty() {
@@ -4317,6 +4339,32 @@ mod tests {
             crate::vm::Value::from_raw(raw).as_int(),
             Some(24),
             "f(true)=2+10=12, f(false)=2+10=12, sum=24"
+        );
+    }
+
+    #[test]
+    fn test_aot_mutable_var_assigned_in_branch_read_after_join() {
+        // A `var` assigned in ONE branch and read after the merge point is a
+        // general SSA/phi-placement case: it gets a different value on each
+        // incoming path (branch def vs. the flowed-through prior value), so the
+        // join needs a block param. Previously the intersection-of-predecessor-
+        // defs heuristic missed it → the value was referenced from a non-
+        // dominating block → CLIF verifier error. `f(true)=6, f(false)=5`.
+        let aot = aot_compile_source(
+            r#"
+            fn f(cond: Bool) -> Int {
+                var acc = 0
+                if cond then { acc = 1 }
+                acc + 5
+            }
+            fn main() { f(true) + f(false) }
+            "#,
+        );
+        let raw = aot.run().expect("native run");
+        assert_eq!(
+            crate::vm::Value::from_raw(raw).as_int(),
+            Some(11),
+            "f(true)=1+5=6, f(false)=0+5=5, sum=11"
         );
     }
 
