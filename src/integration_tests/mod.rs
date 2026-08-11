@@ -8671,6 +8671,21 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_io_read() {
+            // IO.read previously returned nil in WASM; it must read a line from
+            // the input source (stdin by default, overridable via set_input).
+            let wasm = compile_source_to_wasm(r#"perform IO.read()"#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            rt.set_input("hello world\n");
+            let val = rt.run().expect("run");
+            assert_eq!(
+                rt.string_value(&val).as_deref(),
+                Some("hello world\n"),
+                "IO.read must return the input line"
+            );
+        }
+
+        #[test]
         fn test_wasm_run_pow() {
             // Integer exponentiation `a ** b` (previously returned nil in WASM).
             let val = run_source_to_value(r#"fn f() -> Int { 10 - 3 ** 2 } f()"#).expect("run");

@@ -47,12 +47,24 @@ pub fn default_wasm_config() -> Config {
 
 // ── Host state ───────────────────────────────────────────────────────
 
-#[derive(Default)]
 struct HostState {
     /// Next allocation offset in WASM linear memory (bump allocator).
     alloc_offset: u32,
     /// Reference to the linear memory, stored for access from host functions.
     memory: Option<Memory>,
+    /// Testable input source for `IO.read`. When non-empty, `host_read` reads
+    /// lines from here instead of stdin.
+    input: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        HostState {
+            alloc_offset: 0,
+            memory: None,
+            input: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+        }
+    }
 }
 
 // ── WASM Runtime ─────────────────────────────────────────────────────
@@ -137,6 +149,13 @@ impl WasmRuntime {
     }
 
     /// Execute the module's `nulang_init` function, returning the tagged result.
+    /// Set the input source for `IO.read` (used by tests; `IO.read` reads from
+    /// stdin when no input is set).
+    pub fn set_input(&mut self, input: &str) {
+        let input_arc = self.store.data().input.clone();
+        *input_arc.lock() = input.as_bytes().to_vec();
+    }
+
     pub fn run(&mut self) -> NuResult<crate::vm::Value> {
         self.init_func
             .call(&mut self.store, ())
@@ -182,9 +201,51 @@ fn host_print(mut caller: Caller<'_, HostState>, offset: i32, len: i32) -> Resul
 }
 
 /// `env.io_read() -> i64`
-fn host_read(_caller: Caller<'_, HostState>) -> Result<i64, Error> {
-    // Stub: read is not yet wired to the actor mailbox.
-    Ok(value_layout::TAG_NIL as i64)
+fn host_read(mut caller: Caller<'_, HostState>) -> Result<i64, Error> {
+    // Read one line (mirrors the interpreter's IO.read), copy it into a
+    // freshly bump-allocated WASM-memory buffer, and return it as a tagged
+    // string. Nil on read error. Prefers the test input buffer over stdin.
+    let bytes = {
+        let input = caller.data().input.clone();
+        let mut guard = input.lock();
+        if guard.is_empty() {
+            drop(guard);
+            let mut s = String::new();
+            if std::io::stdin().read_line(&mut s).is_err() {
+                return Ok(value_layout::TAG_NIL as i64);
+            }
+            s.into_bytes()
+        } else {
+            let mut line = Vec::new();
+            for &c in guard.iter() {
+                line.push(c);
+                if c == b'\n' {
+                    break;
+                }
+            }
+            guard.drain(..line.len());
+            line
+        }
+    };
+    let size = ((bytes.len() + 1) as u32 + 7) & !7u32; // align to 8
+    let new_off = caller.data().alloc_offset;
+    let required = new_off
+        .checked_add(size)
+        .ok_or_else(|| Error::msg("alloc overflow"))?;
+    let mem = get_memory(&mut caller)?;
+    if required > mem.data_size(&caller) as u32 {
+        let pages_needed = ((required - mem.data_size(&caller) as u32) + 65535) / 65536;
+        mem.grow(&mut caller, pages_needed as u64)
+            .map_err(|e| Error::msg(format!("memory grow: {}", e)))?;
+    }
+    caller.data_mut().alloc_offset = required;
+
+    let mem = get_memory(&mut caller)?;
+    let data = mem.data_mut(&mut caller);
+    let dst = new_off as usize;
+    data[dst..dst + bytes.len()].copy_from_slice(&bytes);
+    data[dst + bytes.len()] = 0;
+    Ok(value_layout::TAG_STRING as i64 | new_off as i64)
 }
 
 /// `env.log(offset: i32, len: i32) -> i64`
@@ -497,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_read_returns_nil() {
+    fn test_host_read_reads_input() {
         let wasm = br#"(module
             (import "env" "memory" (memory 1))
             (import "env" "nulang_alloc" (func $alloc (param i32) (result i32)))
@@ -511,7 +572,13 @@ mod tests {
             (export "nulang_init" (func $start))
         )"#;
         let mut runtime = WasmRuntime::new(wasm, None).unwrap();
+        runtime.set_input("hello from input\n");
         let result = runtime.run().unwrap();
-        assert!(result.is_nil(), "io_read stub should return nil");
+        let s = runtime.string_value(&result);
+        assert_eq!(
+            s.as_deref(),
+            Some("hello from input\n"),
+            "io_read must read from the input source"
+        );
     }
 }
