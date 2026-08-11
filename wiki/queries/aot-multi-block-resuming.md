@@ -1,7 +1,8 @@
 # AOT native backend — multi-block resuming effect handlers (scoping)
 
-**Status:** Phase 1 IMPLEMENTED (`758ce4d`, 2026-08-11). Phase 2 (cross-block
-prior-result reads) still open.
+**Status:** Phase 1 IMPLEMENTED (`758ce4d`, 2026-08-11). General SSA phi fix
+(prerequisite) IMPLEMENTED (`8d0c286`, 2026-08-11). Phase 2 (cross-block
+prior-result reads) still open — narrowed to *continuation live-in threading*.
 **Symptom (before fix):** `Error: AOT unsupported: multi-perform resuming handler with perform sites across multiple blocks is not yet supported by the native backend`
 **Source of truth:** `src/aot/codegen.rs` (compile_mir_function_body + helpers).
 
@@ -165,6 +166,53 @@ common enough to justify the live-in machinery work.
   CLIF verifier rather than mis-computing.
 - Tests: exclusive-branch if/else, discarded-first-result (sequential sites
   that must compile), cross-block prior-read rejection.
+
+### Phase 2 investigation — the general SSA phi bug (`8d0c286`)
+
+Attempting Phase 2 (the `if c { acc = perform E(1) }; perform E(2); acc + b`
+pattern) exposed that the representative case hits a GENERAL AOT bug, not an
+effect-specific one: **a `var` assigned in ONE branch and read after a merge
+fails even with no effects** (`var acc = 0; if cond { acc = 1 }; acc + 5`
+→ CLIF verifier error; interp=11). Root cause: `compute_liveins` used only
+the intersection of predecessor def-sets, so a local defined in a subset of
+predecessors (with others carrying the flowed-through prior value) got no
+block param.
+
+Fixed in `8d0c286`:
+- `compute_liveins` now also adds a block param for every local live into a
+  >1-predecessor block AND defined in at least one predecessor (a value live
+  into the merge is automatically live-out of every predecessor, so all preds
+  supply it).
+- `compute_live_ins` (gen/kill liveness) terminator operands were added to
+  `gen` unconditionally even when defined earlier in the same block — wrongly
+  marking a block's own branch-cond live into a loop back-edge predecessor.
+  Terminator uses are now filtered by the block's kill set.
+- Test: `test_aot_mutable_var_assigned_in_branch_read_after_join`.
+
+This makes the NON-effect variant of the Phase 2 pattern work. The REMAINING
+Phase 2 work is the effect-continuation half: even with `acc` a proper block
+param of the later perform's block, the perform's continuation block (a
+successor of the handler body) is NOT dominated by that block, so it still
+can't read `acc` unless the value is threaded through the handler's Resume
+dispatch into the continuation's params.
+
+**Narrowed Phase 2 design (continuation live-in threading):**
+1. At each resuming perform site, extend the uniform threaded slot set to also
+   carry the perform block's live-in registers that the continuation reads
+   (the post-perform code's operands that aren't recomputed in it).
+2. The handler body's threaded width becomes max over sites of (same-block
+   priors + continuation live-ins); each site supplies its own set padded to
+   that width.
+3. `Resume` forwards the full threaded set (as it already does post-Phase-1);
+   the continuation binds the live-in slots to their local registers.
+4. Remove `cross_block_perform_read` for the now-supported patterns (keep it
+   only where a value is live into a later site's block but not available at
+   that site — the genuinely inexpressible remainder).
+
+Still not done — deferred. The pattern is rare (a resuming perform result
+stored to a mutable var, then a SECOND perform of the same handler reads it),
+and the change risks destabilizing the now-correct Phase 1 continuations.
+Anything the current guard misses still fails loudly in the CLIF verifier.
 
 ## Files / functions to touch
 

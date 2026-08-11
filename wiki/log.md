@@ -11,6 +11,20 @@ Operations:
 
 ---
 
+## [2026-08-11] refresh | AOT multi-block resuming — general SSA phi fix
+
+While scoping Phase 2 (cross-block prior-result reads) found the
+representative pattern hits a GENERAL AOT bug: a `var` assigned in one branch
+and read after a merge failed with no effects involved. Fixed `compute_liveins`
+to phi values live into a merge that are defined in a predecessor, plus fixed
+the gen/kill terminator liveness (branch-cond wrongly live into a loop
+back-edge). Commit `8d0c286`. Narrowed Phase 2 to *continuation live-in
+threading* (still open, rare pattern).
+
+Touched: [[queries/aot-multi-block-resuming]], `src/aot/codegen.rs`
+
+---
+
 ## [2026-08-11] refresh | AOT multi-block resuming handler — Phase 1 landed
 
 Implemented Phase 1 of the AOT multi-block resuming handler design: a
