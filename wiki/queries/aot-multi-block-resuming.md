@@ -1,7 +1,8 @@
 # AOT native backend — multi-block resuming effect handlers (scoping)
 
-**Status:** Scoping / design note. Problem confirmed, implementation not started.
-**Symptom:** `Error: AOT unsupported: multi-perform resuming handler with perform sites across multiple blocks is not yet supported by the native backend`
+**Status:** Phase 1 IMPLEMENTED (`758ce4d`, 2026-08-11). Phase 2 (cross-block
+prior-result reads) still open.
+**Symptom (before fix):** `Error: AOT unsupported: multi-perform resuming handler with perform sites across multiple blocks is not yet supported by the native backend`
 **Source of truth:** `src/aot/codegen.rs` (compile_mir_function_body + helpers).
 
 ## Problem statement
@@ -140,6 +141,30 @@ Approach:
 perform cases, is a contained change to the threading bookkeeping), verify
 with the fuzzer + targeted tests, then assess whether Phase 2 patterns are
 common enough to justify the live-in machinery work.
+
+### Implementation notes (Phase 1 landed, `758ce4d`)
+
+- `handler_threaded_dsts` (flat per-body global list) replaced by
+  `handler_threaded_width` — a per-body usize = max over blocks of
+  (sites-in-block − 1). Each site supplies that many threaded values (real
+  same-block priors, then dummies).
+- Continuation blocks and the `Resume` dispatch now carry the FULL uniform
+  threaded set to every continuation; each continuation binds only its
+  same-block prior slots (excess params unused).
+- `compute_liveins` excludes effect-handler body blocks entirely: they are
+  reached by `perform` jumps (not normal merges), read only effect params
+  (already block params) + dominance-scoped outer locals, and must not
+  inherit a perform block's post-perform locals — most importantly the
+  perform result dst, which flows BACK through the continuation, not into
+  the handler.
+- Cross-block prior READ (e.g. `if c { acc = perform E(1) } ; perform
+  E(2); acc + ...`) is rejected by a new liveness guard
+  (`cross_block_perform_read`, proper gen/kill backward dataflow): fires
+  when a site's block is live-in with a value defined in another site block
+  of the same body. Anything the guard misses still fails loudly in the
+  CLIF verifier rather than mis-computing.
+- Tests: exclusive-branch if/else, discarded-first-result (sequential sites
+  that must compile), cross-block prior-read rejection.
 
 ## Files / functions to touch
 

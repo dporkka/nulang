@@ -11,6 +11,19 @@ Operations:
 
 ---
 
+## [2026-08-11] refresh | AOT multi-block resuming handler — Phase 1 landed
+
+Implemented Phase 1 of the AOT multi-block resuming handler design: a
+resuming effect handler performed from different MIR blocks now compiles
+(was rejected). Uniform per-body threaded-slot width + `compute_liveins`
+exclusion of handler-body blocks + a gen/kill liveness guard that rejects
+genuine cross-block prior-result reads. Commit `758ce4d`. Tests:
+exclusive-branch if/else, discarded-first-result, cross-read rejection.
+
+Touched: [[queries/aot-multi-block-resuming]], `src/aot/codegen.rs`
+
+---
+
 ## [2026-08-11] query | AOT multi-block resuming handler — scoping
 
 Scoped the last reachable correctness gap in the AOT native backend: a
