@@ -116,10 +116,17 @@ def verify_files():
         return False
 
     # 5. Check distributed.rs for check-then-unwrap
+    # The anti-pattern is `contains_key(k)` guarding a `map.get(k).unwrap()`
+    # within the same statement. `contains_key` inside retain-filter closures
+    # is legitimate, so match the guard->lookup->unwrap shape rather than any
+    # substring co-occurrence.
     if os.path.exists("src/runtime/distributed.rs"):
         with open("src/runtime/distributed.rs", "r", encoding="utf-8") as f:
             content = f.read()
-            if "contains_key" in content and "unwrap()" in content:
+            if re.search(
+                r"contains_key\s*\([^)]*\)[\s\S]{0,200}?\.get\([\s\S]{0,200}?unwrap\s*\(",
+                content,
+            ):
                 print("Error: src/runtime/distributed.rs still performs check-then-unwrap lookup in get().")
                 return False
     else:

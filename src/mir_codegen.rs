@@ -1832,16 +1832,18 @@ fn dead_store_elim(func: &mut mir::Function) -> bool {
             let removable = match &stmt {
                 mir::Stmt::Assign { dst, op } => {
                     let self_move = matches!(op, mir::RValue::Load(src) if src == dst);
-                    // Named locals stay visible to the debugger at
+                    // Source-named locals stay visible to the debugger at
                     // breakpoints: constant propagation can make their
                     // definition look dead (the folded RValue no longer
                     // references them), but removing the store would make
-                    // the paused frame report nil. Only anonymous temps
-                    // are safe to drop.
+                    // the paused frame report nil. Only anonymous temps and
+                    // compiler-generated names (hir_lower's `__tmpN`) are
+                    // safe to drop.
                     let named = func
                         .locals
                         .get(dst.0 as usize)
-                        .map(|l| l.name.is_some())
+                        .and_then(|l| l.name.as_deref())
+                        .map(|n| !n.starts_with("__"))
                         .unwrap_or(false);
                     self_move
                         || (!named
