@@ -12,8 +12,61 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 // is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).
 
+/// Coerce a raw Nulang value to its string representation: the string content
+/// if it IS a string (constant-pool or heap), otherwise `Value::to_string_repr`
+/// (matching the interpreter's IAdd string fallback, so `"n=" + 42 == "n=42"`).
+fn coerce_string(raw: u64) -> String {
+    match resolve_string_coerce(raw) {
+        Some(s) => s,
+        None => Value::from_raw(raw).to_string_repr(),
+    }
+}
+
+/// Is the value ACTUALLY a string (a TAG_STRING constant or a TAG_PTR heap
+/// string), as opposed to merely coercible to one? `resolve_string_coerce`
+/// returns Some for ints/floats/bools too, so it can't gate the concat path.
+fn raw_is_string(raw: u64) -> bool {
+    let val = Value::from_raw(raw);
+    if val.is_string() {
+        return true;
+    }
+    if (raw & TAG_MASK) == TAG_PTR {
+        let ptr = (raw & PAYLOAD_MASK) as *mut u8;
+        if ptr.is_null() {
+            return false;
+        }
+        unsafe {
+            let header = &*ActorHeap::header_of(ptr);
+            header.type_tag == HeapTypeTag::String
+        }
+    } else {
+        false
+    }
+}
+
+/// Allocate a heap string holding `s` and return its tagged pointer value.
+fn alloc_string_value(s: String) -> u64 {
+    let bytes = s.into_bytes();
+    unsafe {
+        if let Some(ptr) = alloc_obj(bytes.len() + 1, HeapTypeTag::String) {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            *ptr.add(bytes.len()) = 0;
+            Value::ptr(ptr).as_raw()
+        } else {
+            Value::nil().as_raw()
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {
+    // String concatenation fallback (mirrors the interpreter's IAdd): when the
+    // compiler couldn't determine operand types at compile time (e.g. a string
+    // added to an int), coerce both operands to strings and concatenate.
+    if raw_is_string(a) || raw_is_string(b) {
+        let result = format!("{}{}", coerce_string(a), coerce_string(b));
+        return alloc_string_value(result);
+    }
     if is_float_raw(a) && is_float_raw(b) {
         Value::float(f64::from_bits(a) + f64::from_bits(b)).as_raw()
     } else {
@@ -815,22 +868,8 @@ pub fn resolve_string_coerce(raw: u64) -> Option<String> {
 
 #[no_mangle]
 pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
-    let sa = resolve_string_coerce(a);
-    let sb = resolve_string_coerce(b);
-    let result = match (sa, sb) {
-        (Some(sa), Some(sb)) => format!("{}{}", sa, sb),
-        (Some(s), None) => s,
-        (None, Some(s)) => s,
-        _ => return Value::nil().as_raw(),
-    };
-    let bytes = result.into_bytes();
-    if let Some(ptr) = alloc_obj(bytes.len() + 1, HeapTypeTag::String) {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-        *ptr.add(bytes.len()) = 0;
-        Value::ptr(ptr).as_raw()
-    } else {
-        Value::nil().as_raw()
-    }
+    let result = format!("{}{}", coerce_string(a), coerce_string(b));
+    alloc_string_value(result)
 }
 
 /// Power operation: a^b for tagged integers.
@@ -1570,5 +1609,38 @@ mod tests {
         let _ = super::nulang_aot_emit_1 as unsafe extern "C" fn(u64, u64);
         let _ = super::nulang_aot_emit_8
             as unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64);
+    }
+
+    #[test]
+    fn test_str_concat_and_iadd_string_coercion() {
+        // Set up the standalone AOT heap + constant pool so the helpers can
+        // resolve a TAG_STRING constant and allocate into the heap.
+        let mut heap = crate::runtime::heap::ActorHeap::new(1024 * 1024);
+        heap.set_actor_id(0);
+        super::aot_set_heap(heap);
+        unsafe {
+            super::aot_set_constants(&[crate::bytecode::Constant::String("hello".into())]);
+        }
+        let hello = crate::vm::Value::string(0).as_raw();
+
+        // nulang_str_concat must coerce a non-string operand: "hello" + 2 = "hello2".
+        let r1 = unsafe { super::nulang_str_concat(hello, crate::vm::Value::int(2).as_raw()) };
+        assert_eq!(super::resolve_string_coerce(r1).as_deref(), Some("hello2"));
+
+        // nulang_iadd must also handle string operands (unknown-type add):
+        // "hello" + 2 + 3 = "hello23".
+        let r2 = super::nulang_iadd(
+            hello,
+            crate::vm::Value::int(2).as_raw(),
+        );
+        let r3 = super::nulang_iadd(r2, crate::vm::Value::int(3).as_raw());
+        assert_eq!(super::resolve_string_coerce(r3).as_deref(), Some("hello23"));
+
+        // Pure int add is unaffected.
+        let ri = super::nulang_iadd(crate::vm::Value::int(5).as_raw(), crate::vm::Value::int(7).as_raw());
+        assert_eq!(crate::vm::Value::from_raw(ri).as_int(), Some(12));
+
+        super::aot_clear_constants();
+        let _ = super::aot_take_heap();
     }
 }

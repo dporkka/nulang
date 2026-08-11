@@ -1321,3 +1321,40 @@ fn collect_rvalue_field_and_consts(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// End-to-end: `"hello" + 2 + 3` must concatenate with coercion ("hello23"),
+    /// not fall through to integer arithmetic on the string's tag bits. Replicates
+    /// `AotModule::run`'s heap + constants setup but keeps the heap alive so the
+    /// result (a heap string) can be resolved back to its content.
+    #[test]
+    fn test_aot_str_concat_coercion_end_to_end() {
+        let source = r#"
+            fn f() -> String { "hello" + 2 + 3 }
+            fn main() { f() }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).lex().unwrap();
+        let ast = crate::parser::Parser::new(tokens).parse_module().unwrap();
+        let mut tc = crate::typechecker::TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir).unwrap();
+        let aot = super::AotModule::compile(&mir).expect("AOT compile");
+        let idx = aot.entry_idx.unwrap_or(0);
+        let ptr = aot.compiled_funcs[idx];
+
+        let mut heap = crate::runtime::heap::ActorHeap::new(1024 * 1024);
+        heap.set_actor_id(0);
+        crate::jit::runtime::aot_set_heap(heap);
+        unsafe {
+            crate::jit::runtime::aot_set_constants(&aot.constants);
+        }
+        let func: extern "C" fn() -> u64 = unsafe { std::mem::transmute(ptr) };
+        let raw = func();
+        let s = crate::jit::runtime::resolve_string_coerce(raw);
+        crate::jit::runtime::aot_clear_constants();
+        let _ = crate::jit::runtime::aot_take_heap();
+        assert_eq!(s.as_deref(), Some("hello23"));
+    }
+}
