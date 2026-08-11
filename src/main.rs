@@ -58,6 +58,23 @@ fn main() {
     // Initialize structured tracing (RUST_LOG env var controls verbosity).
     // Default level: warn (silent for normal runs). Users opt in with
     // RUST_LOG=nulang=debug or RUST_LOG=info.
+    #[cfg(feature = "otel")]
+    {
+        // Forward spans to both the terminal and OTLP (when a tracer
+        // provider has been configured). Fall back to terminal-only logging
+        // if the subscriber cannot be installed.
+        match nulang::observability::init_tracing("nulang-runtime") {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("OTLP tracing init failed ({e}); terminal logging only");
+                use tracing_subscriber::{fmt, EnvFilter};
+                let env_filter = EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("warn"));
+                fmt().with_env_filter(env_filter).with_target(false).init();
+            }
+        }
+    }
+    #[cfg(not(feature = "otel"))]
     {
         use tracing_subscriber::{fmt, EnvFilter};
         let env_filter =
