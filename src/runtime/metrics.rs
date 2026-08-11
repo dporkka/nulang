@@ -186,6 +186,36 @@ impl MetricsSnapshot {
             r.cache_misses
         );
 
+        // Supervision topology: total supervisors + per-supervisor child count.
+        out.push_str("# HELP nulang_supervisors_total Number of supervisors\n");
+        out.push_str("# TYPE nulang_supervisors_total gauge\n");
+        out.push_str(&format!("nulang_supervisors_total {}\n", self.supervisors.len()));
+        out.push_str("# HELP nulang_supervisor_children Supervisor child actor count\n");
+        out.push_str("# TYPE nulang_supervisor_children gauge\n");
+        for sup in &self.supervisors {
+            out.push_str(&format!(
+                "nulang_supervisor_children{{supervisor_id=\"{}\"}} {}\n",
+                sup.id,
+                sup.children.len()
+            ));
+        }
+
+        // CRDT replication state.
+        out.push_str("# HELP nulang_crdt_entries Number of live CRDT entries\n");
+        out.push_str("# TYPE nulang_crdt_entries gauge\n");
+        out.push_str(&format!("nulang_crdt_entries {}\n", self.crdt.entries));
+        out.push_str("# HELP nulang_crdt_ops_synced Total CRDT ops shipped\n");
+        out.push_str("# TYPE nulang_crdt_ops_synced counter\n");
+        out.push_str(&format!("nulang_crdt_ops_synced {}\n", self.crdt.ops_synced));
+        out.push_str(
+            "# HELP nulang_crdt_unsynced_deltas CRDT entries with unsynced changes\n",
+        );
+        out.push_str("# TYPE nulang_crdt_unsynced_deltas gauge\n");
+        out.push_str(&format!(
+            "nulang_crdt_unsynced_deltas {}\n",
+            self.crdt.unsynced_deltas
+        ));
+
         out
     }
 }

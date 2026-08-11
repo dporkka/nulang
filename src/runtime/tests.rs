@@ -104,6 +104,49 @@ fn test_delivery_establishes_child_context_and_inherits() {
 }
 
 #[test]
+fn test_metrics_snapshot_topology_and_crdt() {
+    let mut rt = Runtime::new();
+
+    // Supervision tree: root supervisor with one child.
+    let sup_id = rt.create_supervisor("root", RestartStrategy::OneForOne);
+    let child_id = rt.spawn_actor(Box::new(|| vec![]));
+    let spec = ChildSpec::new("child1", RestartPolicy::Permanent);
+    rt.supervise_child(sup_id, spec, child_id);
+
+    // CRDT replica with a change that hasn't been synced.
+    rt.crdt_manager = Some(crate::runtime::crdt_manager::CrdtManager::new(42));
+    let (_, mut counter) = rt
+        .crdt_manager
+        .as_mut()
+        .unwrap()
+        .create_gcounter();
+    counter.increment();
+
+    let snap = rt.metrics_snapshot();
+
+    // Supervision topology.
+    assert_eq!(snap.supervisors.len(), 1);
+    let sup = &snap.supervisors[0];
+    assert_eq!(sup.id, sup_id);
+    assert_eq!(sup.name, "root");
+    assert_eq!(sup.strategy, "OneForOne");
+    assert_eq!(sup.parent, None);
+    assert_eq!(sup.children.len(), 1);
+    assert_eq!(sup.children[0].actor_id, child_id);
+    assert_eq!(sup.children[0].spec_id, "child1");
+
+    // CRDT replication state.
+    assert_eq!(snap.crdt.node_id, 42);
+    assert_eq!(snap.crdt.entries, 1);
+    assert_eq!(snap.crdt.ops_synced, 0);
+    assert!(
+        snap.crdt.unsynced_deltas >= 1,
+        "created-but-unsynced entry must count as an unsynced delta, got {}",
+        snap.crdt.unsynced_deltas
+    );
+}
+
+#[test]
 fn test_scheduler_enqueue_steal() {
     let sched = Scheduler::new(4);
     assert!(sched.steal_one().is_none());

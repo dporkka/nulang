@@ -4771,6 +4771,53 @@ impl Runtime {
             })
             .collect();
 
+        // Supervision tree topology.
+        let supervisors = self
+            .supervisors
+            .iter()
+            .map(|(id, sup)| SupervisorMetric {
+                id: *id,
+                name: sup.name.clone(),
+                strategy: format!("{:?}", sup.strategy),
+                parent: sup.parent,
+                children: sup
+                    .children
+                    .iter()
+                    .map(|(spec, actor_id)| SupervisorChildMetric {
+                        actor_id: *actor_id,
+                        spec_id: spec.id.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        // CRDT replication state. `CrdtEntry` is not PartialEq, so an entry
+        // counts as an unsynced delta when its serialized state differs from
+        // the sync base (i.e. changes generated since the last delta sync).
+        let crdt = match &self.crdt_manager {
+            Some(m) => {
+                let unsynced_deltas = m
+                    .entries
+                    .iter()
+                    .filter(|(id, e)| {
+                        m.sync_base.get(id).map(|b| b.payload_bytes()) != Some(e.payload_bytes())
+                    })
+                    .count();
+                CrdtMetric {
+                    node_id: m.node_id,
+                    entries: m.entries.len(),
+                    ops_synced: m.ops_synced,
+                    unsynced_deltas,
+                }
+            }
+            None => CrdtMetric {
+                node_id: 0,
+                entries: 0,
+                ops_synced: 0,
+                unsynced_deltas: 0,
+            },
+        };
+
         MetricsSnapshot {
             actors_live: self.actor_count() as u64,
             actors_mailboxes: mailboxes,
@@ -4778,6 +4825,8 @@ impl Runtime {
             scheduler,
             gc,
             resolver,
+            supervisors,
+            crdt,
         }
     }
 
@@ -4956,6 +5005,11 @@ pub struct MetricsSnapshot {
     pub scheduler: SchedulerStats,
     pub gc: GcStats,
     pub resolver: ResolverStats,
+    /// Supervision tree topology: one entry per supervisor, with its parent
+    /// link and children. Parent links reconstruct the tree.
+    pub supervisors: Vec<SupervisorMetric>,
+    /// CRDT replication state.
+    pub crdt: CrdtMetric,
 }
 
 /// Per-actor mailbox depth for the metrics snapshot.
@@ -4963,6 +5017,41 @@ pub struct MetricsSnapshot {
 pub struct ActorMailboxMetric {
     pub actor_id: u64,
     pub depth: usize,
+}
+
+/// One supervisor in the topology snapshot.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SupervisorMetric {
+    pub id: u64,
+    pub name: String,
+    /// `RestartStrategy` variant name (OneForOne, OneForAll, RestForOne,
+    /// SimpleOneForOne).
+    pub strategy: String,
+    /// Parent supervisor actor id, if this supervisor is itself supervised.
+    pub parent: Option<u64>,
+    pub children: Vec<SupervisorChildMetric>,
+}
+
+/// A supervised child actor.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SupervisorChildMetric {
+    pub actor_id: u64,
+    /// `ChildSpec.id` — stable across restarts (the actor id changes).
+    pub spec_id: String,
+}
+
+/// CRDT replication state.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CrdtMetric {
+    pub node_id: u64,
+    /// Number of live CRDT entries (replicas).
+    pub entries: usize,
+    /// Total CRDT ops shipped.
+    pub ops_synced: u64,
+    /// Entries whose state differs from the last-synced base — changes not
+    /// yet replicated. Computed by serializing and comparing (CrdtEntry is
+    /// not PartialEq).
+    pub unsynced_deltas: usize,
 }
 
 /// True when the given 1-based sync round should ship full state.
