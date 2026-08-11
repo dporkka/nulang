@@ -697,9 +697,14 @@ macro_rules! define_aot_perform {
                     .map(|cm| cm as *const crate::bytecode::CodeModule)
                     .unwrap_or(std::ptr::null())
             });
+            let constants = if module.is_null() {
+                crate::aot::aot_module_constants()
+            } else {
+                unsafe { &(*module).constants }
+            };
             crate::jit::runtime::try_with_callbacks(|cb| {
                 if module.is_null() {
-                    cb.perform_builtin_effect(&effect, Some(&op), &[], &regs)
+                    cb.perform_builtin_effect(&effect, Some(&op), constants, &regs)
                 } else {
                     cb.perform_builtin_effect_in_module(
                         &effect,
