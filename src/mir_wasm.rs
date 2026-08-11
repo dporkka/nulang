@@ -43,8 +43,14 @@ const IMPORT_ARITH_CMP: u32 = 13;
 const IMPORT_ARITH_NEG: u32 = 14;
 /// Function index of `env.arr_load` — bounds-checked array load (i64, i64) -> i64.
 const IMPORT_ARR_LOAD: u32 = 15;
+/// Function index of `env.ffi_call_0` — foreign call (lib, sym, sig) -> i64.
+const IMPORT_FFI_CALL_0: u32 = 16;
+const IMPORT_FFI_CALL_1: u32 = 17;
+const IMPORT_FFI_CALL_2: u32 = 18;
+const IMPORT_FFI_CALL_3: u32 = 19;
+const IMPORT_FFI_CALL_4: u32 = 20;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 16;
+const FUNC_IMPORT_COUNT: u32 = 21;
 
 const TY_VOID_TO_I64: u32 = 0;
 
@@ -79,6 +85,8 @@ pub struct WasmBackend {
     /// the MIR; used so `Record` literals and `LoadFieldNamed` agree on slot
     /// positions.
     field_map: HashMap<String, u8>,
+    /// Foreign function declarations, indexed by `RValue::FFICall.idx`.
+    foreign_functions: Vec<mir::ForeignFunction>,
 }
 
 impl WasmBackend {
@@ -136,6 +144,7 @@ impl WasmBackend {
             func_types: HashMap::new(),
             next_type_idx: TY_FIXED_COUNT,
             field_map: HashMap::new(),
+            foreign_functions: Vec::new(),
         }
     }
 
@@ -160,6 +169,7 @@ impl WasmBackend {
     // ── Compile ───────────────────────────────────────────────────
 
     pub fn compile(&mut self, mir: &mir::Module, _module_name: &str) -> NuResult<Vec<u8>> {
+        self.foreign_functions = mir.foreign_functions.clone();
         // Pre-scan: build the module-wide record field name → slot index map
         // (mirrors the AOT backend) so Record literals and LoadFieldNamed agree.
         let mut field_map: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
@@ -194,6 +204,12 @@ impl WasmBackend {
                     }
                 }
             }
+        }
+        // Pre-intern FFI library/symbol strings so compile_rvalue (which has
+        // only `&self`) can look them up by content.
+        for ff in &mir.foreign_functions {
+            self.intern_string(&ff.library);
+            self.intern_string(&ff.symbol);
         }
 
         // Register function types.
@@ -297,6 +313,17 @@ impl WasmBackend {
         imports.import("env", "arith_cmp", EntityType::Function(TY_I64I64I64_TO_I64));
         imports.import("env", "arith_neg", EntityType::Function(TY_I64_TO_I64));
         imports.import("env", "arr_load", EntityType::Function(TY_I64I64_TO_I64));
+        // ffi_call_N(lib, sym, sig, arg0..argN-1) -> i64.
+        let ffi0 = self.ensure_type(vec![ValType::I64; 3], vec![ValType::I64]);
+        let ffi1 = self.ensure_type(vec![ValType::I64; 4], vec![ValType::I64]);
+        let ffi2 = self.ensure_type(vec![ValType::I64; 5], vec![ValType::I64]);
+        let ffi3 = self.ensure_type(vec![ValType::I64; 6], vec![ValType::I64]);
+        let ffi4 = self.ensure_type(vec![ValType::I64; 7], vec![ValType::I64]);
+        imports.import("env", "ffi_call_0", EntityType::Function(ffi0));
+        imports.import("env", "ffi_call_1", EntityType::Function(ffi1));
+        imports.import("env", "ffi_call_2", EntityType::Function(ffi2));
+        imports.import("env", "ffi_call_3", EntityType::Function(ffi3));
+        imports.import("env", "ffi_call_4", EntityType::Function(ffi4));
         self.imports = imports;
     }
 
@@ -1002,6 +1029,63 @@ impl WasmBackend {
                 body.instruction(&Instruction::I64Const(
                     value_layout::tag_bool(true) as i64
                 ));
+            }
+            RValue::FFICall { idx, args } => {
+                // Foreign function call: intern the library/symbol as string
+                // constants, bit-pack the CType signature, push the args, and
+                // call the arity-matched host `ffi_call_N`.
+                let def = self.foreign_functions.get(*idx).cloned().unwrap_or_else(|| {
+                    mir::ForeignFunction {
+                        library: String::new(),
+                        symbol: String::new(),
+                        params: vec![],
+                        ret: crate::types::Type::unit(),
+                    }
+                });
+                let ctype_tag = |c: crate::ffi::marshal::CType| -> u64 {
+                    match c {
+                        crate::ffi::marshal::CType::I64 => 0,
+                        crate::ffi::marshal::CType::F64 => 1,
+                        crate::ffi::marshal::CType::Bool => 2,
+                        crate::ffi::marshal::CType::CStr => 3,
+                        crate::ffi::marshal::CType::VoidPtr => 4,
+                        crate::ffi::marshal::CType::Unit => 5,
+                    }
+                };
+                let mut params: Vec<crate::ffi::marshal::CType> = Vec::with_capacity(def.params.len());
+                for p in &def.params {
+                    let ffi_ty = crate::ffi::marshal::nulang_type_to_ffi_type(p)
+                        .unwrap_or(crate::bytecode::FfiType::Int);
+                    let ctype = crate::ffi::marshal::ffi_type_to_ctype(&ffi_ty)
+                        .unwrap_or(crate::ffi::marshal::CType::I64);
+                    params.push(ctype);
+                }
+                let ret = crate::ffi::marshal::ffi_type_to_ctype(
+                    &crate::ffi::marshal::nulang_type_to_ffi_type(&def.ret)
+                        .unwrap_or(crate::bytecode::FfiType::Int),
+                )
+                .unwrap_or(crate::ffi::marshal::CType::I64);
+                let mut sig: u64 = ctype_tag(ret);
+                for (i, c) in params.iter().enumerate() {
+                    sig |= ctype_tag(*c) << (3 + 3 * i);
+                }
+                let import = match args.len() {
+                    0 => IMPORT_FFI_CALL_0,
+                    1 => IMPORT_FFI_CALL_1,
+                    2 => IMPORT_FFI_CALL_2,
+                    3 => IMPORT_FFI_CALL_3,
+                    _ => IMPORT_FFI_CALL_4,
+                };
+                // Library + symbol were pre-interned into the data segment.
+                let (lib_off, _) = self.interned.get(&def.library).copied().unwrap_or((0, 0));
+                let (sym_off, _) = self.interned.get(&def.symbol).copied().unwrap_or((0, 0));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_STRING as i64 | lib_off as i64));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_STRING as i64 | sym_off as i64));
+                body.instruction(&Instruction::I64Const(sig as i64));
+                for a in args {
+                    body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+                }
+                body.instruction(&Instruction::Call(import));
             }
             _ => {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));

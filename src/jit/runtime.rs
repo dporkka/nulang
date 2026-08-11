@@ -1139,7 +1139,7 @@ define_aot_ask!(nulang_aot_ask_8, a0, a1, a2, a3, a4, a5, a6, a7);
 // AOT backend has no module pool to intern the result string into) and the
 // sandbox allow-list is not applied because AOT native code is trusted.
 
-fn aot_ctype_from_tag(tag: u64) -> crate::ffi::marshal::CType {
+pub(crate) fn aot_ctype_from_tag(tag: u64) -> crate::ffi::marshal::CType {
     match tag {
         0 => crate::ffi::marshal::CType::I64,
         1 => crate::ffi::marshal::CType::F64,

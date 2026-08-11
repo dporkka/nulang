@@ -8727,6 +8727,110 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_ffi_call() {
+            // A pre-registered native function invoked via RValue::FFICall
+            // from WASM must resolve + call (was previously silent nil).
+            extern "C" fn wasm_double(x: i64) -> i64 {
+                x * 2
+            }
+            let sig = crate::ffi::marshal::Signature::new(
+                vec![crate::ffi::marshal::CType::I64],
+                crate::ffi::marshal::CType::I64,
+            );
+            unsafe {
+                crate::ffi::native::register_native_function(
+                    "wasm_double",
+                    wasm_double as *const core::ffi::c_void,
+                    sig,
+                )
+                .expect("register");
+            }
+            let mut builder =
+                crate::mir::FunctionBuilder::new("main", Some(crate::types::Type::int()));
+            let arg = builder.add_temp(crate::types::Type::int());
+            let out = builder.add_temp(crate::types::Type::int());
+            builder.assign(
+                arg,
+                crate::mir::RValue::Const(crate::bytecode::Constant::Int(21)),
+            );
+            builder.assign(out, crate::mir::RValue::FFICall { idx: 0, args: vec![arg] });
+            builder.terminate(crate::mir::Terminator::Return(Some(out)));
+            let func = builder.build();
+            let module = crate::mir::Module {
+                name: "ffi".into(),
+                functions: vec![func],
+                behaviors: vec![],
+                actor_metadata: vec![],
+                compensation_of: vec![],
+                parallel_branches_of: vec![],
+                foreign_functions: vec![crate::mir::ForeignFunction {
+                    library: String::new(),
+                    symbol: "wasm_double".into(),
+                    params: vec![crate::types::Type::Primitive(crate::types::PrimitiveType::Int)],
+                    ret: crate::types::Type::Primitive(crate::types::PrimitiveType::Int),
+                }],
+            };
+            let mut backend = WasmBackend::new();
+            let wasm = backend.compile(&module, "main").expect("wasm compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(val.as_int(), Some(42), "wasm_double(21) must be 42");
+
+            // CStr parameter: a function reading a null-terminated string.
+            extern "C" fn wasm_strlen(s: *const core::ffi::c_char) -> i64 {
+                if s.is_null() {
+                    0
+                } else {
+                    unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes().len() as i64
+                }
+            }
+            let sig = crate::ffi::marshal::Signature::new(
+                vec![crate::ffi::marshal::CType::CStr],
+                crate::ffi::marshal::CType::I64,
+            );
+            unsafe {
+                crate::ffi::native::register_native_function(
+                    "wasm_strlen",
+                    wasm_strlen as *const core::ffi::c_void,
+                    sig,
+                )
+                .expect("register");
+            }
+            let mut builder = crate::mir::FunctionBuilder::new(
+                "main",
+                Some(crate::types::Type::Primitive(crate::types::PrimitiveType::Int)),
+            );
+            let s = builder.add_temp(crate::types::Type::string());
+            let out = builder.add_temp(crate::types::Type::int());
+            builder.assign(
+                s,
+                crate::mir::RValue::Const(crate::bytecode::Constant::String("nulang".into())),
+            );
+            builder.assign(out, crate::mir::RValue::FFICall { idx: 0, args: vec![s] });
+            builder.terminate(crate::mir::Terminator::Return(Some(out)));
+            let func = builder.build();
+            let module = crate::mir::Module {
+                name: "ffi2".into(),
+                functions: vec![func],
+                behaviors: vec![],
+                actor_metadata: vec![],
+                compensation_of: vec![],
+                parallel_branches_of: vec![],
+                foreign_functions: vec![crate::mir::ForeignFunction {
+                    library: String::new(),
+                    symbol: "wasm_strlen".into(),
+                    params: vec![crate::types::Type::string()],
+                    ret: crate::types::Type::Primitive(crate::types::PrimitiveType::Int),
+                }],
+            };
+            let mut backend = WasmBackend::new();
+            let wasm = backend.compile(&module, "main").expect("wasm compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(val.as_int(), Some(6), "wasm_strlen(\"nulang\") must be 6");
+        }
+
+        #[test]
         fn test_wasm_run_array_oob() {
             // Out-of-range and negative array indices must yield nil, not
             // garbage. In-range access still works.

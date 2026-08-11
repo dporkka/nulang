@@ -142,6 +142,21 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "arr_load", host_arr_load)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "ffi_call_0", host_ffi_call_0)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "ffi_call_1", host_ffi_call_1)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "ffi_call_2", host_ffi_call_2)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "ffi_call_3", host_ffi_call_3)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "ffi_call_4", host_ffi_call_4)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -483,6 +498,89 @@ fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
         Ok(value_layout::tag_int(-value_layout::sext48(a & value_layout::PAYLOAD_MASK)) as i64)
     }
 }
+
+/// Read a TAG_STRING value's null-terminated bytes from WASM linear memory.
+fn read_wasm_string(mut caller: &mut Caller<'_, HostState>, v: i64) -> String {
+    let v = v as u64;
+    if (v & value_layout::TAG_MASK) != value_layout::TAG_STRING {
+        return String::new();
+    }
+    let off = (v & value_layout::PAYLOAD_MASK) as usize;
+    let data = match get_memory(&mut caller) {
+        Ok(m) => m.data(&caller).to_vec(),
+        Err(_) => return String::new(),
+    };
+    let bytes: Vec<u8> = data
+        .get(off..)
+        .map(|s| s.iter().take_while(|&&c| c != 0).copied().collect())
+        .unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `env.ffi_call_N(lib, sym, sig, arg0..argN-1) -> i64`
+///
+/// Invoke a foreign C function from WASM. `lib`/`sym` are TAG_STRING constants
+/// interned into the WASM data segment; `sig` is the bit-packed CType signature
+/// (low 3 bits = return tag, then 3 bits per param, matching the AOT backend).
+/// CStr params are read from WASM memory. Reuses the AOT FFI registry + marshalling.
+fn host_ffi_call_impl(
+    mut caller: &mut Caller<'_, HostState>,
+    lib: i64,
+    sym: i64,
+    sig: i64,
+    args: &[i64],
+) -> Result<i64, Error> {
+    let lib_s = read_wasm_string(&mut caller, lib);
+    let sym_s = read_wasm_string(&mut caller, sym);
+    let sig = sig as u64;
+    let ret_tag = sig & 0b111;
+    let mut params: Vec<crate::ffi::marshal::CType> = Vec::with_capacity(args.len());
+    for i in 0..args.len() {
+        let tag = (sig >> (3 + 3 * i as u32)) & 0b111;
+        params.push(crate::jit::runtime::aot_ctype_from_tag(tag));
+    }
+    let ret = crate::jit::runtime::aot_ctype_from_tag(ret_tag);
+    let signature = crate::ffi::marshal::Signature::new(params.clone(), ret);
+    let func = {
+        let registry = crate::ffi::native::FFI_REGISTRY
+            .get_or_init(|| std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new()));
+        let mut reg = registry.lock().map_err(|_| Error::msg("ffi registry lock"))?;
+        unsafe { reg.resolve_or_load(&lib_s, &sym_s, signature) }.map_err(|_| Error::msg("ffi resolve"))?
+    };
+    // Marshal CStr params from WASM memory into CStrings valid for the call.
+    let mut cstrings: Vec<std::ffi::CString> = Vec::new();
+    let mut cargs: Vec<crate::vm::Value> = Vec::with_capacity(args.len());
+    for (i, p) in params.iter().enumerate() {
+        if *p == crate::ffi::marshal::CType::CStr {
+            let s = read_wasm_string(&mut caller, args[i]);
+            let c = std::ffi::CString::new(s).map_err(|_| Error::msg("bad cstr"))?;
+            cargs.push(crate::vm::Value::ptr(c.as_ptr() as *mut u8));
+            cstrings.push(c);
+        } else {
+            cargs.push(crate::vm::Value::from_bits(args[i] as u64));
+        }
+    }
+    // SAFETY: func.ptr points to a function whose ABI matches the signature.
+    match unsafe { crate::ffi::marshal::call_native(&func, &cargs) } {
+        Ok(v) => Ok(v.as_raw() as i64),
+        Err(_) => Ok(value_layout::TAG_NIL as i64),
+    }
+}
+
+macro_rules! define_wasm_ffi_call {
+    ($name:ident, $($arg:ident),*) => {
+        fn $name(mut caller: Caller<'_, HostState>, lib: i64, sym: i64, sig: i64 $(, $arg: i64)*) -> Result<i64, Error> {
+            let args = [$($arg),*];
+            host_ffi_call_impl(&mut caller, lib, sym, sig, &args)
+        }
+    };
+}
+
+define_wasm_ffi_call!(host_ffi_call_0,);
+define_wasm_ffi_call!(host_ffi_call_1, a0);
+define_wasm_ffi_call!(host_ffi_call_2, a0, a1);
+define_wasm_ffi_call!(host_ffi_call_3, a0, a1, a2);
+define_wasm_ffi_call!(host_ffi_call_4, a0, a1, a2, a3);
 
 /// `env.arr_load(arr: i64, idx: i64) -> i64`
 ///
