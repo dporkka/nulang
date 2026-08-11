@@ -3301,7 +3301,6 @@ mod optimize_tests {
         // Const(42); Return. After threading, block0 jumps straight to
         // block2 and the trampoline block1 becomes an unreachable Return.
         let mut b = mir::FunctionBuilder::new("t", Some(crate::types::Type::int()));
-        let b0 = b.current_block();
         let b1 = b.create_block();
         let b2 = b.create_block();
         b.terminate(mir::Terminator::Jump(b1));
