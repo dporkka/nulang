@@ -455,6 +455,71 @@ fn test_simd_tiering_array_loop() {
     let result = vm.run().expect("array loop should run");
     assert_eq!(result.as_int(), Some(3 * (N / 2)));
 }
+
+/// Build a module computing `sum = Σ i**2` for `i in 0..limit` in a hot loop.
+/// The loop body (IPow, IAdd, IInc, ICmpLt, JmpT) previously fragmented at
+/// IPow (not in the compilable set); it must now JIT-compile as one region.
+fn build_pow_module(limit: i64) -> CodeModule {
+    let mut m = CodeModule::new("pow_loop");
+    let c_limit = m.add_constant(Constant::Int(limit));
+    let c_two = m.add_constant(Constant::Int(2));
+    let emit_c = |m: &mut CodeModule, idx: usize, dst: u8| {
+        m.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((idx >> 8) & 0xFF) as u8,
+            (idx & 0xFF) as u8,
+            dst,
+        ));
+    };
+    emit_c(&mut m, c_limit, 1); //  0: r1 = limit
+    m.emit(Instruction::new1(OpCode::Const0, 0)); //  1: r0 = 0 (i)
+    emit_c(&mut m, c_two, 2); //  2: r2 = 2
+    m.emit(Instruction::new1(OpCode::Const0, 3)); //  3: r3 = 0 (sum)
+    // loop body (pc 4..=8)
+    m.emit(Instruction::new3(OpCode::IPow, 0, 2, 4)); //  4: r4 = i ** 2
+    m.emit(Instruction::new3(OpCode::IAdd, 3, 4, 3)); //  5: r3 += r4
+    m.emit(Instruction::new1(OpCode::IInc, 0)); //  6: i++
+    m.emit(Instruction::new3(OpCode::ICmpLt, 0, 1, 5)); //  7: r5 = i < limit
+    let back: i16 = -4; // back to pc 4
+    m.emit(Instruction::new3(
+        OpCode::JmpT,
+        5,
+        ((back as u16) >> 8) as u8,
+        (back as u16 & 0xFF) as u8,
+    )); //  8: JmpT
+    m.emit(Instruction::new2(OpCode::Move, 3, 0)); //  9: r0 = sum
+    m.emit(Instruction::new0(OpCode::Halt)); // 10
+    m.entry_point = Some(0);
+    m
+}
+
+/// A hot `sum += i ** 2` loop must tier up and JIT-compile the region
+/// containing IPow, producing the same result as the interpreter.
+#[test]
+fn test_jit_pow_loop_tiers_up() {
+    use crate::vm::VM;
+    const N: i64 = 1500; // > HOT_THRESHOLD → JIT tier-up
+    let module = build_pow_module(N);
+
+    let mut interp = VM::new_without_jit();
+    interp.load_module(module.clone());
+    let expected = interp.run().expect("interp pow loop should run");
+
+    let mut jit_vm = VM::new();
+    jit_vm.load_module(module);
+    let result = jit_vm.run().expect("jit pow loop should run");
+    assert_eq!(
+        result.as_int(),
+        expected.as_int(),
+        "JIT-compiled IPow loop must match the interpreter"
+    );
+    // Sanity: Σ i² for i in 0..N == (N-1)*N*(2N-1)/6.
+    assert_eq!(
+        expected.as_int(),
+        Some((N - 1) * N * (2 * N - 1) / 6),
+        "pow-loop sum is wrong"
+    );
+}
 // ---------------------------------------------------------------------------
 // Extended opcode coverage: Load/Store, bitwise int ops, FNeg
 // ---------------------------------------------------------------------------
@@ -483,6 +548,19 @@ fn test_jit_compile_fneg() {
     ];
     let ptr = unsafe { jit.compile_region(0, 0, 2, &instructions) };
     assert!(ptr.is_some());
+}
+
+#[test]
+fn test_jit_compile_pow() {
+    // Both IPow and FPow must JIT-compile (routed through nulang_pow).
+    let mut jit = make_jit();
+    let instructions = vec![
+        Instruction::new3(OpCode::IPow, 0, 1, 2),
+        Instruction::new3(OpCode::FPow, 3, 4, 5),
+        Instruction::new0(OpCode::Halt),
+    ];
+    let ptr = unsafe { jit.compile_region(0, 0, 3, &instructions) };
+    assert!(ptr.is_some(), "IPow/FPow region must JIT-compile");
 }
 
 #[test]

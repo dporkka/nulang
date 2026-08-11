@@ -62,6 +62,8 @@ pub fn is_opcode_compilable(op: OpCode) -> bool {
             | OpCode::INeg
             | OpCode::IInc
             | OpCode::IDec
+            | OpCode::IPow
+            | OpCode::FPow
             | OpCode::Xor
             | OpCode::Shl
             | OpCode::Shr
@@ -374,6 +376,18 @@ pub fn compile_bytecode_region(
                 instr.op1 as usize,
                 instr.op2 as usize,
                 RuntimeHelper::INeg,
+            ),
+            // Both IPow and FPow route through nulang_pow, which dispatches on
+            // the tagged operands (powf when both floats, wrapping int pow
+            // otherwise) — matching the interpreter's step_ipow exactly.
+            OpCode::IPow | OpCode::FPow => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::Pow,
             ),
             OpCode::IInc => emit_self_unary(
                 &mut builder,
@@ -978,6 +992,9 @@ mod tests {
         // Register copies.
         assert!(is_opcode_compilable(OpCode::Load));
         assert!(is_opcode_compilable(OpCode::Store));
+        // Exponentiation (routes through nulang_pow).
+        assert!(is_opcode_compilable(OpCode::IPow));
+        assert!(is_opcode_compilable(OpCode::FPow));
         // Bitwise integer ops.
         assert!(is_opcode_compilable(OpCode::Xor));
         assert!(is_opcode_compilable(OpCode::Shl));
@@ -987,7 +1004,7 @@ mod tests {
         // Float negate.
         assert!(is_opcode_compilable(OpCode::FNeg));
         // Opcodes the interpreter itself does not implement stay unsupported.
-        assert!(!is_opcode_compilable(OpCode::IPow));
+        // (IPow/FPow ARE implemented and now JIT-compilable.)
         assert!(!is_opcode_compilable(OpCode::FMod));
         assert!(!is_opcode_compilable(OpCode::ConstL));
     }
