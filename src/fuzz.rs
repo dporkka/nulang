@@ -585,19 +585,38 @@ fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
         return Ok(DiffOutcome::NothingToCompile);
     };
 
-    let mut vm = crate::vm::VM::new();
-    vm.load_module(mutant.code_module.clone());
     const MODULE_IDX: usize = 0; // the fuzzer always loads exactly one module
 
-    let cold = run_once(&mut vm);
+    // Cold: JIT DISABLED so the interpreter's step limit bounds any
+    // infinite-loop mutant. A JIT-enabled cold run would tier up the loop to
+    // native code (which doesn't count steps per iteration) and hang the
+    // fuzzer forever. `new_without_jit` keeps the interpreter's step limit
+    // authoritative, so a pathological loop errors instead of hanging.
+    let mut cold_vm = crate::vm::VM::new_without_jit();
+    cold_vm.load_module(mutant.code_module.clone());
+    let cold = run_once(&mut cold_vm);
+    // If the cold run blew the step limit, the mutant is (effectively)
+    // infinite — a JIT/AOT/WASM run would tier it up and hang too. Skip the
+    // mutant rather than hang the fuzzer.
+    if let Err(e) = &cold {
+        if e.contains("Step limit exceeded") {
+            return Ok(DiffOutcome::Uncomparable);
+        }
+    }
+
+    // Warm: JIT enabled, on a SEPARATE VM (a cold infinite loop never reaches
+    // the JIT). The warmup loop tiers up hot regions before the timed warm
+    // run, so the cold/warm comparison still exercises the JIT.
+    let mut warm_vm = crate::vm::VM::new();
+    warm_vm.load_module(mutant.code_module.clone());
     let warmup_deadline = std::time::Instant::now() + WARMUP_BUDGET;
     for _ in 0..HOT_ITERATIONS {
         if std::time::Instant::now() >= warmup_deadline {
             break;
         }
-        let _ = run_once(&mut vm);
+        let _ = run_once(&mut warm_vm);
     }
-    let warm = run_once(&mut vm);
+    let warm = run_once(&mut warm_vm);
 
     // Resolve each side to a comparison key. Numeric/bool/nil/unit compare
     // by `to_string_repr()` directly. String/heap-pointer values resolve
@@ -626,7 +645,8 @@ fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
         }
     };
 
-    let (Some(cold_key), Some(warm_key)) = (resolve_key(&vm, &cold), resolve_key(&vm, &warm))
+    let (Some(cold_key), Some(warm_key)) =
+        (resolve_key(&cold_vm, &cold), resolve_key(&warm_vm, &warm))
     else {
         return Ok(DiffOutcome::Uncomparable);
     };
