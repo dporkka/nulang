@@ -25,10 +25,15 @@ const IMPORT_ALLOC_IDX: u32 = 0; // function index of nulang_alloc
 const IMPORT_IO_PRINT: u32 = 3;
 /// Function index of `env.io_read` — used in `Call` instructions.
 const IMPORT_IO_READ: u32 = 4;
+/// Function index of `env.str_concat` — string concatenation (i64, i64) -> i64.
+const IMPORT_STR_CONCAT: u32 = 5;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 5;
+const FUNC_IMPORT_COUNT: u32 = 6;
 
 const TY_VOID_TO_I64: u32 = 0;
+
+/// (i64, i64) -> i64 — used by `env.str_concat`.
+const TY_I64I64_TO_I64: u32 = 2;
 
 const TY_I32I32_TO_I64: u32 = 3;
 const TY_FIXED_COUNT: u32 = 4;
@@ -116,6 +121,10 @@ impl WasmBackend {
         let offset = self.string_data.len() as u32;
         let len = s.len() as u32;
         self.string_data.extend_from_slice(s.as_bytes());
+        // Null-terminate so the host `str_concat` helper can recover each
+        // string's length with a `strlen` scan. The value's offset and the
+        // explicit `len` reported to `io_print` are unchanged by the byte.
+        self.string_data.push(0);
         self.interned.insert(s.to_string(), (offset, len));
         (offset, len)
     }
@@ -167,7 +176,16 @@ impl WasmBackend {
         }
 
         if !mir.functions.is_empty() {
-            let main_idx = FUNC_IMPORT_COUNT + mir.functions.len() as u32 - 1;
+            // Export the actual entry function as `nulang_init`, not the last
+            // one. Lifted closure functions are appended after `__main`, so
+            // `len()-1` can point at a closure carrying parameters, which the
+            // host rejects when it looks for a `() -> i64` export.
+            let main_in_module = mir
+                .functions
+                .iter()
+                .position(|f| f.name == "__main")
+                .unwrap_or(mir.functions.len() - 1);
+            let main_idx = FUNC_IMPORT_COUNT + main_in_module as u32;
             self.exports
                 .export("nulang_init", ExportKind::Func, main_idx);
         }
@@ -219,6 +237,7 @@ impl WasmBackend {
         imports.import("env", "log", EntityType::Function(TY_I32I32_TO_I64));
         imports.import("env", "io_print", EntityType::Function(TY_I32I32_TO_I64));
         imports.import("env", "io_read", EntityType::Function(TY_VOID_TO_I64));
+        imports.import("env", "str_concat", EntityType::Function(TY_I64I64_TO_I64));
         self.imports = imports;
     }
 
@@ -638,6 +657,15 @@ impl WasmBackend {
             }
             RValue::Unary(op, a) => {
                 self.compile_unary(body, *op, a, func);
+            }
+            RValue::StrConcat(a, b) => {
+                // String concatenation (`s1 + s2`): pass both tagged string
+                // values to the host helper, which reads the (null-terminated)
+                // bytes from memory, concatenates them into a fresh buffer, and
+                // returns the new tagged string value.
+                body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+                body.instruction(&Instruction::LocalGet(self.mir_local(b, func)));
+                body.instruction(&Instruction::Call(IMPORT_STR_CONCAT));
             }
             RValue::Call { func: fr, args } => {
                 self.compile_call(body, fr, args, func);

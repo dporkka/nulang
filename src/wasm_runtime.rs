@@ -97,6 +97,9 @@ impl WasmRuntime {
         linker
             .func_wrap("env", "io_read", host_read)
             .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "str_concat", host_str_concat)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
@@ -133,6 +136,29 @@ impl WasmRuntime {
             .call(&mut self.store, ())
             .map(|raw| crate::vm::Value::from_raw(raw as u64))
             .map_err(map_wasmtime_err)
+    }
+
+    /// Resolve a tagged string `Value` (`TAG_STRING | offset`) to its text by
+    /// reading the null-terminated bytes at that offset from linear memory.
+    /// Returns `None` when the value is not a string or the offset is out of
+    /// bounds. Used by tests and consumers that need concat/string content
+    /// back out of a WASM execution.
+    pub fn string_value(&self, val: &crate::vm::Value) -> Option<String> {
+        use crate::value_layout::{PAYLOAD_MASK, TAG_MASK, TAG_STRING};
+        let raw = val.as_raw();
+        if (raw & TAG_MASK) != TAG_STRING {
+            return None;
+        }
+        let offset = (raw & PAYLOAD_MASK) as usize;
+        let mem = self.store.data().memory.as_ref()?;
+        let data = mem.data(&self.store);
+        let bytes: Vec<u8> = data
+            .get(offset..)?
+            .iter()
+            .take_while(|&&b| b != 0)
+            .copied()
+            .collect();
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -184,6 +210,63 @@ fn host_alloc(mut caller: Caller<'_, HostState>, size: i32) -> Result<i32, Error
     }
     caller.data_mut().alloc_offset = required;
     Ok(offset as i32)
+}
+
+/// `env.str_concat(a: i64, b: i64) -> i64`
+///
+/// Concatenate two tagged string values. Each value is `TAG_STRING | offset`
+/// into linear memory pointing at a null-terminated byte string (the data
+/// segment is emitted with a trailing NUL per string, and prior concat
+/// results are null-terminated here too). Reads both, writes `a ++ b\0` into
+/// a fresh bump-allocated buffer, and returns the new tagged string value.
+fn host_str_concat(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
+    // Resolve each operand to its text, mirroring the interpreter's IAdd
+    // string fallback (src/vm.rs): a tagged string reads its null-terminated
+    // bytes from memory; anything else coerces through `to_string_repr()`, so
+    // `"n=" + 42` concatenates the text "42".
+    let (text_a, text_b) = {
+        let mem = get_memory(&mut caller)?;
+        let data = mem.data(&caller);
+        let read = |v: i64| -> String {
+            if (v as u64 & value_layout::TAG_MASK) == value_layout::TAG_STRING {
+                let off = (v as u64 & value_layout::PAYLOAD_MASK) as usize;
+                let bytes: Vec<u8> = data
+                    .get(off..)
+                    .map(|s| s.iter().take_while(|&&c| c != 0).copied().collect())
+                    .unwrap_or_default();
+                String::from_utf8_lossy(&bytes).into_owned()
+            } else {
+                crate::vm::Value::from_raw(v as u64).to_string_repr()
+            }
+        };
+        (read(a), read(b))
+    };
+    let total = text_a.len() + text_b.len() + 1;
+    // Bump-allocate (mirrors host_alloc) so the copy below can use `caller`.
+    let size = (total as u32 + 7) & !7u32; // align to 8
+    let new_off = caller.data().alloc_offset;
+    let required = new_off
+        .checked_add(size)
+        .ok_or_else(|| Error::msg("alloc overflow"))?;
+    let mem = get_memory(&mut caller)?;
+    if required > mem.data_size(&caller) as u32 {
+        let pages_needed = ((required - mem.data_size(&caller) as u32) + 65535) / 65536;
+        mem.grow(&mut caller, pages_needed as u64)
+            .map_err(|e| Error::msg(format!("memory grow: {}", e)))?;
+    }
+    caller.data_mut().alloc_offset = required;
+
+    // Copy both texts into the freshly-allocated region, then null-terminate.
+    let mem = get_memory(&mut caller)?;
+    {
+        let data = mem.data_mut(&mut caller);
+        let dst = new_off as usize;
+        data[dst..dst + text_a.len()].copy_from_slice(text_a.as_bytes());
+        data[dst + text_a.len()..dst + text_a.len() + text_b.len()]
+            .copy_from_slice(text_b.as_bytes());
+        data[dst + text_a.len() + text_b.len()] = 0;
+    }
+    Ok(value_layout::TAG_STRING as i64 | new_off as i64)
 }
 
 /// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)`

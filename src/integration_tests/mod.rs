@@ -8538,6 +8538,57 @@ match { a: 2, b: 9 } with {
             let wasm = compile_source_to_wasm("10 - 3").expect("compile");
             assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
         }
+
+        /// Compile + run through the host runtime, returning the result value.
+        fn run_source_to_value(source: &str) -> NuResult<crate::vm::Value> {
+            let wasm = compile_source_to_wasm(source)?;
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None)?;
+            rt.run()
+        }
+
+        #[test]
+        fn test_wasm_run_string_concat() {
+            // `s1 + s2` lowers to RValue::StrConcat; the host str_concat helper
+            // must concatenate the null-terminated strings in memory. This
+            // asserts the actual concat content, not just that a string came
+            // back.
+            let val = run_source_to_value(r#""hello " + "world""#).expect("run");
+            assert!(val.is_string(), "expected a string, got {:?}", val);
+            let wasm = compile_source_to_wasm(r#""hello " + "world""#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(
+                rt.string_value(&val).as_deref(),
+                Some("hello world"),
+                "concat result must equal the concatenated text"
+            );
+        }
+
+        #[test]
+        fn test_wasm_run_string_concat_int() {
+            // String + Int is also concatenation (interpreter: "hello" + 2 ==
+            // "hello2"); the WASM backend must agree.
+            let wasm = compile_source_to_wasm(r#""n=" + 42"#).expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(
+                rt.string_value(&val).as_deref(),
+                Some("n=42"),
+                "String + Int must concatenate as text"
+            );
+        }
+
+        #[test]
+        fn test_wasm_run_iife_closure() {
+            // An immediately-invoked closure appends a lifted `__lambda_N`
+            // function after `__main`. nulang_init must export `__main` (the
+            // zero-param entry), not the closure — otherwise the host's
+            // `() -> i64` typed call fails to convert.
+            let wasm = compile_source_to_wasm("(fn(x) { x + 1 })(41)").expect("compile");
+            let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
+            let val = rt.run().expect("run");
+            assert_eq!(val.as_int(), Some(42), "IIFE must run its closure body");
+        }
     }
 
     /// Entity declarations (with events and apply blocks) must pass through
