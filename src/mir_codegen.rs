@@ -225,7 +225,18 @@ impl MirCodegen {
         idx
     }
 
-    pub fn compile_module(&mut self, mir: &mir::Module) -> NuResult<&CodeModule> {
+    pub fn compile_module(&mut self, mir: &mut mir::Module) -> NuResult<&CodeModule> {
+        // MIR optimization pass: constant folding, identity simplification,
+        // jump threading, and dead-store elimination. Runs on every
+        // function and behavior before codegen.
+        let mut module_consts = Vec::new();
+        for func in &mut mir.functions {
+            optimize_function(func, &mut module_consts);
+        }
+        for func in &mut mir.behaviors {
+            optimize_function(func, &mut module_consts);
+        }
+
         // Register foreign functions first so FFICall indices line up.
         for ff in &mir.foreign_functions {
             let params = ff
@@ -1401,7 +1412,605 @@ fn float_locals(func: &mir::Function) -> Vec<bool> {
     is_float
 }
 
-pub fn compile_mir(mir: &mir::Module, module_name: impl Into<String>) -> NuResult<CodeModule> {
+// ===========================================================================
+// MIR optimization pass
+// ===========================================================================
+//
+// A lightweight, conservative MIR→MIR optimizer that runs on every function
+// and behavior before bytecode emission. Four transforms in one fixpoint
+// loop (capped at MAX_OPT_ITERATIONS rounds):
+//
+//   1. constant folding     — arithmetic/comparison on Const operands
+//                             (int, float, bool, string concat) and Unary;
+//   2. identity folding     — x+0, x*1, x|0, x&&true, x*0, ... collapses;
+//   3. jump threading       — trampoline blocks (0 stmts + Jump) are
+//                             bypassed and marked unreachable;
+//   4. dead-store elimination — stores whose dst is never read anywhere in
+//                             the function are dropped (function-wide read
+//                             set — block-local liveness alone would be
+//                             unsound across loop back-edges and joins).
+//
+// Everything here is semantics-preserving with respect to the bytecode VM.
+// Notable VM quirks the folding accounts for:
+//   - float Eq/Ne is NOT folded: the VM's ICmpEq/FCmpEq use epsilon
+//     equality (|a-b| < f64::EPSILON), not exact ==;
+//   - identity/zero-propagation rules are skipped when the non-const
+//     operand is a float local: the VM's F* handlers coerce the int
+//     constant to a float, and IEEE semantics differ at ±0.0/NaN
+//     (e.g. x * 0.0 is NaN for infinite x, and -0.0 + 0.0 = +0.0);
+//   - int arithmetic folds with i64 wrapping ops — the VM computes in i64
+//     and truncates to the 48-bit payload on `Value::int`, so a folded
+//     `Const::Int` reloaded through the constant pool truncates to the
+//     identical 48-bit result;
+//   - And/Or/Not fold only for Bool constants: the typechecker requires
+//     Bool operands, and the VM's as_bool().unwrap_or(false) would
+//     disagree with any truthiness interpretation of non-bool values.
+
+const MAX_OPT_ITERATIONS: usize = 10;
+
+/// Optimize one MIR function in place. `_module_consts` reserves space for
+/// module-level constant pooling; unused by the current transforms.
+fn optimize_function(func: &mut mir::Function, _module_consts: &mut Vec<mir::RValue>) {
+    for _ in 0..MAX_OPT_ITERATIONS {
+        let const_locals = collect_const_locals(func);
+        let is_float = float_locals(func);
+        let folded = fold_function(func, &const_locals, &is_float);
+        let threaded = thread_jumps(func);
+        let dce = dead_store_elim(func);
+        if !folded && !threaded && !dce {
+            break;
+        }
+    }
+}
+
+/// Collect locals that hold a single, never-reassigned constant value.
+/// Params and closure captures never qualify (their initial values come
+/// from outside the function). Only single-definition, single-constant
+/// locals are recorded — a local assigned different constants in different
+/// blocks is disqualified even though both are const.
+fn collect_const_locals(func: &mir::Function) -> std::collections::HashMap<mir::LocalId, Constant> {
+    let mut assign_count: std::collections::HashMap<mir::LocalId, usize> =
+        std::collections::HashMap::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign { dst, .. } = stmt {
+                *assign_count.entry(*dst).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut disallowed: HashSet<mir::LocalId> = HashSet::new();
+    disallowed.extend(func.params.iter().copied());
+    disallowed.extend(func.captures.iter().copied());
+
+    let mut const_locals: std::collections::HashMap<mir::LocalId, Constant> =
+        std::collections::HashMap::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign {
+                dst,
+                op: mir::RValue::Const(c),
+            } = stmt
+            {
+                if !disallowed.contains(dst) && assign_count.get(dst) == Some(&1) {
+                    const_locals.insert(*dst, c.clone());
+                }
+            }
+        }
+    }
+    const_locals
+}
+
+/// Fold and simplify every `Stmt::Assign` RValue. Returns true if anything
+/// changed.
+fn fold_function(
+    func: &mut mir::Function,
+    const_locals: &std::collections::HashMap<mir::LocalId, Constant>,
+    is_float: &[bool],
+) -> bool {
+    let mut changed = false;
+    for block in &mut func.blocks {
+        for stmt in &mut block.stmts {
+            if let mir::Stmt::Assign { op, .. } = stmt {
+                let mut original = mir::RValue::Const(Constant::Nil);
+                std::mem::swap(op, &mut original);
+                let folded = fold_rvalue(original, const_locals, is_float);
+                if folded != *op {
+                    *op = folded;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn fold_rvalue(
+    op: mir::RValue,
+    const_locals: &std::collections::HashMap<mir::LocalId, Constant>,
+    is_float: &[bool],
+) -> mir::RValue {
+    use crate::ast::{BinOp, UnOp};
+    use mir::RValue;
+    use Constant::{Bool, Float, Int, Nil, String as CString};
+
+    match op {
+        RValue::Load(local) => match const_locals.get(&local) {
+            Some(c) => RValue::Const(c.clone()),
+            None => RValue::Load(local),
+        },
+        RValue::Unary(uop, local) => match const_locals.get(&local) {
+            Some(c) => match (uop, c) {
+                (UnOp::Neg, Int(n)) => RValue::Const(Int(n.wrapping_neg())),
+                (UnOp::Neg, Float(f)) => RValue::Const(Float(-f)),
+                (UnOp::Not, Bool(b)) => RValue::Const(Bool(!b)),
+                // The remaining Not rules never fire on well-typed MIR
+                // (the typechecker requires Bool operands), but they mirror
+                // the VM's as_bool().unwrap_or(false) semantics for the
+                // falsy values nil and 0.
+                (UnOp::Not, Nil) => RValue::Const(Bool(true)),
+                (UnOp::Not, Int(0)) => RValue::Const(Bool(true)),
+                (UnOp::Not, Int(_)) => RValue::Const(Bool(false)),
+                _ => RValue::Unary(uop, local),
+            },
+            None => RValue::Unary(uop, local),
+        },
+        RValue::Binary(bop, a, b) => {
+            let a_is_float = is_float.get(a.0 as usize).copied().unwrap_or(false);
+            let b_is_float = is_float.get(b.0 as usize).copied().unwrap_or(false);
+            let a_const = const_locals.get(&a);
+            let b_const = const_locals.get(&b);
+            match (a_const, b_const) {
+                (Some(ca), Some(cb)) => match fold_binary_consts(bop, ca, cb) {
+                    Some(rv) => rv,
+                    None => RValue::Binary(bop, a, b),
+                },
+                (Some(ca), None) => fold_one_const(bop, ca, b, b_is_float, true),
+                (None, Some(cb)) => fold_one_const(bop, cb, a, a_is_float, false),
+                (None, None) => {
+                    // x == x is always true and x != x always false — for
+                    // every value except a NaN float (the VM's epsilon
+                    // equality gives NaN == NaN = false), so skip floats.
+                    if a == b && !a_is_float {
+                        match bop {
+                            BinOp::Eq => RValue::Const(Bool(true)),
+                            BinOp::Ne => RValue::Const(Bool(false)),
+                            _ => RValue::Binary(bop, a, b),
+                        }
+                    } else {
+                        RValue::Binary(bop, a, b)
+                    }
+                }
+            }
+        }
+        RValue::StrConcat(a, b) => match (const_locals.get(&a), const_locals.get(&b)) {
+            (Some(CString(sa)), Some(CString(sb))) => {
+                RValue::Const(CString(sa.clone() + sb))
+            }
+            _ => RValue::StrConcat(a, b),
+        },
+        other => other,
+    }
+}
+
+/// Constant-fold `Const op Const` per the VM's integer/float handler
+/// semantics. Returns None when no rule applies (mixed int/float, float
+/// Eq/Ne — the VM uses epsilon equality there — nil comparisons, ...).
+fn fold_binary_consts(bop: crate::ast::BinOp, a: &Constant, b: &Constant) -> Option<mir::RValue> {
+    use crate::ast::BinOp;
+    use mir::RValue;
+    use Constant::{Bool, Float, Int, Nil, String as CString};
+
+    Some(match (bop, a, b) {
+        // -- Int arithmetic (i64 wrapping; the constant pool truncates to
+        //    the same 48-bit payload the VM's Value::int produces) --
+        (BinOp::Add, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_add(*y))),
+        (BinOp::Sub, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_sub(*y))),
+        (BinOp::Mul, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_mul(*y))),
+        (BinOp::Div, Int(_), Int(0)) => RValue::Const(Nil),
+        (BinOp::Div, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_div(*y))),
+        (BinOp::Mod, Int(_), Int(0)) => RValue::Const(Nil),
+        (BinOp::Mod, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_rem(*y))),
+        // -- Float arithmetic (standard f64 ops; div/mod by 0.0 → nil,
+        //    matching step_idiv/step_imod's `bf != 0.0` check) --
+        (BinOp::Add, Float(x), Float(y)) => RValue::Const(Float(x + y)),
+        (BinOp::Sub, Float(x), Float(y)) => RValue::Const(Float(x - y)),
+        (BinOp::Mul, Float(x), Float(y)) => RValue::Const(Float(x * y)),
+        (BinOp::Div, Float(_), Float(y)) if *y == 0.0 => RValue::Const(Nil),
+        (BinOp::Div, Float(x), Float(y)) => RValue::Const(Float(x / y)),
+        (BinOp::Mod, Float(_), Float(y)) if *y == 0.0 => RValue::Const(Nil),
+        (BinOp::Mod, Float(x), Float(y)) => RValue::Const(Float(x % y)),
+        // -- Int comparisons (VM ICmp* int-int paths are exact) --
+        (BinOp::Eq, Int(x), Int(y)) => RValue::Const(Bool(x == y)),
+        (BinOp::Ne, Int(x), Int(y)) => RValue::Const(Bool(x != y)),
+        (BinOp::Lt, Int(x), Int(y)) => RValue::Const(Bool(x < y)),
+        (BinOp::Le, Int(x), Int(y)) => RValue::Const(Bool(x <= y)),
+        (BinOp::Gt, Int(x), Int(y)) => RValue::Const(Bool(x > y)),
+        (BinOp::Ge, Int(x), Int(y)) => RValue::Const(Bool(x >= y)),
+        // -- Float comparisons: Lt/Le/Gt/Ge are standard in both the
+        //    ICmp*/FCmp* handlers and the caller's Le/Ge expansion.
+        //    Eq/Ne are deliberately excluded (epsilon equality) —
+        //    the plan's contingency for a semantic mismatch. --
+        (BinOp::Lt, Float(x), Float(y)) => RValue::Const(Bool(x < y)),
+        (BinOp::Le, Float(x), Float(y)) => RValue::Const(Bool(x <= y)),
+        (BinOp::Gt, Float(x), Float(y)) => RValue::Const(Bool(x > y)),
+        (BinOp::Ge, Float(x), Float(y)) => RValue::Const(Bool(x >= y)),
+        // -- Bool comparisons (VM ICmpEq falls through to raw ==) --
+        (BinOp::Eq, Bool(x), Bool(y)) => RValue::Const(Bool(x == y)),
+        (BinOp::Ne, Bool(x), Bool(y)) => RValue::Const(Bool(x != y)),
+        // -- String comparisons (VM ICmpEq string path: content) --
+        (BinOp::Eq, CString(x), CString(y)) => RValue::Const(Bool(x == y)),
+        (BinOp::Ne, CString(x), CString(y)) => RValue::Const(Bool(x != y)),
+        // -- Logical (Bool operands are guaranteed by the typechecker) --
+        (BinOp::And, Bool(x), Bool(y)) => RValue::Const(Bool(*x && *y)),
+        (BinOp::Or, Bool(x), Bool(y)) => RValue::Const(Bool(*x || *y)),
+        // -- Bitwise / shifts (VM masks shift counts to 6 bits) --
+        (BinOp::BitAnd, Int(x), Int(y)) => RValue::Const(Int(x & y)),
+        (BinOp::BitOr, Int(x), Int(y)) => RValue::Const(Int(x | y)),
+        (BinOp::BitXor, Int(x), Int(y)) => RValue::Const(Int(x ^ y)),
+        (BinOp::Shl, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_shl((*y & 0x3f) as u32))),
+        (BinOp::Shr, Int(x), Int(y)) => RValue::Const(Int(x.wrapping_shr((*y & 0x3f) as u32))),
+        _ => return None,
+    })
+}
+
+/// Identity / zero-one-propagation rules for `Const op Local` /
+/// `Local op Const`. `const_on_left` selects the mirror rule set (Sub/Div/
+/// Shl/Shr have no left-const identities: `0 - x` and `1 / x` are not x).
+fn fold_one_const(
+    bop: crate::ast::BinOp,
+    c: &Constant,
+    other: mir::LocalId,
+    other_is_float: bool,
+    const_on_left: bool,
+) -> mir::RValue {
+    use crate::ast::BinOp;
+    use mir::RValue;
+    use Constant::{Bool, Int, Nil};
+
+    // Skip when the live operand may hold a float: the VM's F* handlers
+    // coerce the int constant, and IEEE semantics differ at ±0.0/NaN.
+    let guard = !other_is_float;
+    let no_rule = |rv: mir::RValue| rv;
+    match (const_on_left, bop, c) {
+        (true, BinOp::Add | BinOp::BitOr | BinOp::BitXor, Int(0)) if guard => RValue::Load(other),
+        (true, BinOp::Mul, Int(1)) if guard => RValue::Load(other),
+        (true, BinOp::Mul, Int(0)) if guard => RValue::Const(Int(0)),
+        (true, BinOp::And, Bool(true)) if guard => RValue::Load(other),
+        (true, BinOp::And, Bool(false)) if guard => RValue::Const(Bool(false)),
+        (true, BinOp::And, Nil) if guard => RValue::Const(Bool(false)),
+        (true, BinOp::Or, Bool(true)) if guard => RValue::Const(Bool(true)),
+        (true, BinOp::Or, Bool(false)) if guard => RValue::Load(other),
+        (true, BinOp::Or, Nil) if guard => RValue::Load(other),
+        (
+            false,
+            BinOp::Add | BinOp::Sub | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
+            Int(0),
+        ) if guard => RValue::Load(other),
+        (false, BinOp::Mul | BinOp::Div, Int(1)) if guard => RValue::Load(other),
+        (false, BinOp::Mul, Int(0)) if guard => RValue::Const(Int(0)),
+        (false, BinOp::And, Bool(true)) if guard => RValue::Load(other),
+        (false, BinOp::And, Bool(false)) if guard => RValue::Const(Bool(false)),
+        (false, BinOp::And, Nil) if guard => RValue::Const(Bool(false)),
+        (false, BinOp::Or, Bool(true)) if guard => RValue::Const(Bool(true)),
+        (false, BinOp::Or, Bool(false)) if guard => RValue::Load(other),
+        (false, BinOp::Or, Nil) if guard => RValue::Load(other),
+        (true, _, _) => no_rule(RValue::Binary(bop, RValue::Const(c.clone()), other)),
+        (false, _, _) => no_rule(RValue::Binary(bop, other, RValue::Const(c.clone()))),
+    }
+}
+
+/// Thread jumps through trampoline blocks: a block with zero statements and
+/// a `Jump` terminator (that isn't the function entry) is bypassed by
+/// rewriting every reference to it (terminator targets and handler-table
+/// `body` fields) to its final non-trampoline target, then marked
+/// unreachable (`Return`). The dead block stays in `func.blocks` (a single
+/// `Ret` instruction) so BlockId→index alignment in `compile_function` is
+/// preserved. Returns true if anything changed.
+fn thread_jumps(func: &mut mir::Function) -> bool {
+    let is_trampoline: Vec<bool> = func
+        .blocks
+        .iter()
+        .map(|b| {
+            b.stmts.is_empty()
+                && b.id != func.entry
+                && matches!(b.terminator, mir::Terminator::Jump(t) if t != b.id)
+        })
+        .collect();
+    let is_tramp = |id: mir::BlockId| -> bool {
+        is_trampoline.get(id.0 as usize).copied().unwrap_or(false)
+    };
+
+    // Follow each trampoline's Jump chain to its final non-trampoline
+    // target. A cycle (or a chain into the entry block) yields no entry —
+    // those trampolines are left untouched.
+    let mut final_target: std::collections::HashMap<mir::BlockId, mir::BlockId> =
+        std::collections::HashMap::new();
+    for (bi, block) in func.blocks.iter().enumerate() {
+        if !is_trampoline[bi] {
+            continue;
+        }
+        let mut cur = block.id;
+        let mut seen: HashSet<mir::BlockId> = HashSet::new();
+        let mut target = None;
+        while let Some(t) = match &func.blocks[cur.0 as usize].terminator {
+            mir::Terminator::Jump(t) => Some(*t),
+            _ => None,
+        } {
+            if !seen.insert(cur) {
+                target = None;
+                break;
+            }
+            if is_tramp(t) {
+                cur = t;
+            } else {
+                target = Some(t);
+                break;
+            }
+        }
+        if let Some(t) = target {
+            final_target.insert(block.id, t);
+        }
+    }
+    if final_target.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+    for block in &mut func.blocks {
+        match &mut block.terminator {
+            mir::Terminator::Jump(t) => {
+                if let Some(&ft) = final_target.get(t) {
+                    *t = ft;
+                    changed = true;
+                }
+            }
+            mir::Terminator::Branch { then_, else_, .. } => {
+                if let Some(&ft) = final_target.get(then_) {
+                    *then_ = ft;
+                    changed = true;
+                }
+                if let Some(&ft) = final_target.get(else_) {
+                    *else_ = ft;
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    for table in &mut func.handler_tables {
+        for binding in &mut table.bindings {
+            if let Some(&ft) = final_target.get(&binding.body) {
+                binding.body = ft;
+                changed = true;
+            }
+        }
+    }
+    for block in &mut func.blocks {
+        if is_tramp(block.id) && final_target.contains_key(&block.id) {
+            block.terminator = mir::Terminator::Return(None);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Drop stores whose destination is never read anywhere in the function.
+///
+/// Block-local liveness alone would be unsound: a "dead" store can feed a
+/// loop back-edge or a join point in a different block (e.g. a
+/// loop-carried variable whose next-iteration read sits earlier in the same
+/// block). The conservative condition is a function-wide read set: the
+/// store is removable only when its dst is read nowhere at all. Captured
+/// locals are excluded too — a closure reads them through `CapLoad` outside
+/// this function's MIR.
+///
+/// Self-moves (`x = Load(x)`) are removed unconditionally: the register
+/// already holds the value, so the statement is a no-op.
+fn dead_store_elim(func: &mut mir::Function) -> bool {
+    let mut reads: HashSet<mir::LocalId> = HashSet::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            stmt_reads(stmt, &mut reads);
+        }
+        terminator_reads(&block.terminator, &mut reads);
+    }
+
+    let mut changed = false;
+    for block in &mut func.blocks {
+        let block_id = block.id;
+        let mut removed: Vec<usize> = Vec::new();
+        let mut kept: Vec<mir::Stmt> = Vec::with_capacity(block.stmts.len());
+        for (si, stmt) in std::mem::take(&mut block.stmts).into_iter().enumerate() {
+            let removable = match &stmt {
+                mir::Stmt::Assign { dst, op } => {
+                    let self_move = matches!(op, mir::RValue::Load(src) if src == dst);
+                    self_move
+                        || (!func.captures.contains(dst)
+                            && !reads.contains(dst)
+                            && !rvalue_side_effecting(op))
+                }
+                _ => false,
+            };
+            if removable {
+                removed.push(si);
+                changed = true;
+            } else {
+                kept.push(stmt);
+            }
+        }
+        // Fix up source-line indices for surviving statements: entries for
+        // removed statements are dropped, entries after them shift down.
+        if !removed.is_empty() {
+            let mut new_line_table = Vec::with_capacity(func.line_table.len());
+            for &((b, si), line) in &func.line_table {
+                if b == block_id {
+                    if removed.contains(&si) {
+                        continue;
+                    }
+                    let shifted = removed.iter().filter(|&&r| r < si).count();
+                    new_line_table.push(((b, si - shifted), line));
+                } else {
+                    new_line_table.push(((b, si), line));
+                }
+            }
+            func.line_table = new_line_table;
+        }
+        block.stmts = kept;
+    }
+    changed
+}
+
+/// Whether evaluating `rv` has an observable side effect. Only
+/// side-effect-free RValues may be dropped by dead-store elimination.
+fn rvalue_side_effecting(rv: &mir::RValue) -> bool {
+    matches!(
+        rv,
+        mir::RValue::Call { .. }
+            | mir::RValue::Perform { .. }
+            | mir::RValue::PerformAsync { .. }
+            | mir::RValue::SignalWait { .. }
+            | mir::RValue::Receive
+            | mir::RValue::ReceiveMatch { .. }
+            | mir::RValue::ReceiveWait { .. }
+            | mir::RValue::ReceiveCommit
+            | mir::RValue::FFICall { .. }
+            | mir::RValue::Migrate { .. }
+            | mir::RValue::Spawn { .. }
+            | mir::RValue::Send { .. }
+            | mir::RValue::Resume(..)
+            | mir::RValue::Ask { .. }
+    )
+}
+
+/// Collect every local read by a statement.
+fn stmt_reads(stmt: &mir::Stmt, out: &mut HashSet<mir::LocalId>) {
+    use mir::Stmt;
+    match stmt {
+        Stmt::Assign { op, .. } => rvalue_reads(op, out),
+        Stmt::StoreFieldNamed { obj, src, .. } => {
+            out.insert(*obj);
+            out.insert(*src);
+        }
+        Stmt::ArrayStore { arr, idx, src } => {
+            out.insert(*arr);
+            out.insert(*idx);
+            out.insert(*src);
+        }
+        Stmt::Emit { args, .. } => {
+            for a in args {
+                out.insert(*a);
+            }
+        }
+        Stmt::StateSet { src, .. } => {
+            out.insert(*src);
+        }
+        Stmt::EnterHandle { .. } | Stmt::PopHandler => {}
+    }
+}
+
+/// Collect every local read by a terminator.
+fn terminator_reads(term: &mir::Terminator, out: &mut HashSet<mir::LocalId>) {
+    use mir::Terminator;
+    match term {
+        Terminator::Return(Some(x)) | Terminator::Resume(x) => {
+            out.insert(*x);
+        }
+        Terminator::Branch { cond, .. } => {
+            out.insert(*cond);
+        }
+        Terminator::Return(None) | Terminator::Jump(_) | Terminator::Unterminated => {}
+    }
+}
+
+/// Collect every local read by an RValue.
+fn rvalue_reads(rv: &mir::RValue, out: &mut HashSet<mir::LocalId>) {
+    use mir::RValue;
+    match rv {
+        RValue::Const(_)
+        | RValue::SignalWait { .. }
+        | RValue::Receive
+        | RValue::ReceiveMatch { .. }
+        | RValue::ReceiveCommit
+        | RValue::SelfRef
+        | RValue::StateGet { .. } => {}
+        RValue::Load(x)
+        | RValue::ArrayLen(x)
+        | RValue::Unary(_, x)
+        | RValue::Resume(x)
+        | RValue::CapabilityCheck { val: x } => {
+            out.insert(*x);
+        }
+        RValue::LoadFieldNamed { obj, .. } | RValue::LoadFieldPos { obj, .. } => {
+            out.insert(*obj);
+        }
+        RValue::ArrayLoad { arr, idx }
+        | RValue::Binary(_, arr, idx)
+        | RValue::StringEq(arr, idx)
+        | RValue::StrConcat(arr, idx)
+        | RValue::Migrate { actor: arr, node: idx } => {
+            out.insert(*arr);
+            out.insert(*idx);
+        }
+        RValue::ArrayLit(xs) | RValue::Tuple(xs) => {
+            for x in xs {
+                out.insert(*x);
+            }
+        }
+        RValue::Closure { captures, .. } => {
+            for x in captures {
+                out.insert(*x);
+            }
+        }
+        RValue::Call { func, args, .. } => {
+            if let mir::FuncRef::Local(x) = func {
+                out.insert(*x);
+            }
+            for x in args {
+                out.insert(*x);
+            }
+        }
+        RValue::FFICall { args, .. } => {
+            for x in args {
+                out.insert(*x);
+            }
+        }
+        RValue::Perform { args, .. } | RValue::PerformAsync { args, .. } => {
+            for x in args {
+                out.insert(*x);
+            }
+        }
+        RValue::Record(pairs) => {
+            for (_, x) in pairs {
+                out.insert(*x);
+            }
+        }
+        RValue::RecordUpdate { base, overrides } => {
+            out.insert(*base);
+            for (_, x) in overrides {
+                out.insert(*x);
+            }
+        }
+        RValue::ReceiveWait { timeout, .. } => {
+            out.insert(*timeout);
+        }
+        RValue::Spawn { init, target_node, .. } => {
+            if let Some(n) = target_node {
+                out.insert(*n);
+            }
+            for (_, init_rv) in init {
+                rvalue_reads(init_rv, out);
+            }
+        }
+        RValue::Send { actor, args, .. } | RValue::Ask { actor, args, .. } => {
+            out.insert(*actor);
+            for x in args {
+                out.insert(*x);
+            }
+        }
+    }
+}
+
+pub fn compile_mir(mir: &mut mir::Module, module_name: impl Into<String>) -> NuResult<CodeModule> {
     let mut codegen = MirCodegen::new(module_name);
     codegen.compile_module(mir)?;
     Ok(codegen.finish())
@@ -1874,7 +2483,7 @@ mod tests {
         let mut type_checker = TypeChecker::new();
         type_checker.check_module(&ast)?;
 
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         compile_mir(&mir, "test")
     }

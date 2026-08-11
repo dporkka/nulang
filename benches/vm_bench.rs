@@ -34,7 +34,7 @@ fn compile(source: &str) -> CodeModule {
             _ => {}
         }
     }
-    let hir = nulang::hir_lower::lower_module(&ast);
+    let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
     let mir = nulang::mir_lower::lower_module(&hir).expect("mir lower failed");
     nulang::mir_codegen::compile_mir(&mir, "bench").expect("codegen failed")
 }

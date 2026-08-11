@@ -20,7 +20,10 @@ use crate::types::{Capability, EffectRow, Span, Type, TypeVar};
 type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
-pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
+pub fn lower_module(
+    ast: &ast::AstModule,
+    inferred_decl_types: &FxHashMap<String, Type>,
+) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
 
@@ -59,6 +62,9 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     CURRENT_CLASS_TABLES.with(|cell| {
         *cell.borrow_mut() = Some(class_tables);
     });
+    CURRENT_INFERRED_DECL_TYPES.with(|cell| {
+        *cell.borrow_mut() = Some(inferred_decl_types.clone());
+    });
 
     for decl in &ast.decls {
         if matches!(decl, Decl::NamedHandler { .. } | Decl::Class { .. }) {
@@ -68,6 +74,9 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     }
 
     CURRENT_CLASS_TABLES.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    CURRENT_INFERRED_DECL_TYPES.with(|cell| {
         *cell.borrow_mut() = None;
     });
 
@@ -1333,7 +1342,22 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             for d in &extra_dict_args {
                 aops.push(lower_expr(d, body));
             }
-            let ty = Type::unit();
+            // Look up inferred return type for direct function calls
+            let ty = CURRENT_INFERRED_DECL_TYPES.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|map| {
+                        if let hir::Operand::Var(fn_name, _) = &fop {
+                            map.get(fn_name).and_then(|t| match t {
+                                Type::Function { ret, .. } => Some((**ret).clone()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(Type::unit)
+            });
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -2443,6 +2467,12 @@ thread_local! {
     static CURRENT_FN_PARAMS: RefCell<FxHashMap<String, Type>> = RefCell::new(FxHashMap::default());
 }
 
+// Thread-local: inferred function return types from type checker.
+thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
+    static CURRENT_INFERRED_DECL_TYPES: RefCell<Option<FxHashMap<String, Type>>> = RefCell::new(None);
+}
+
 /// Push a new defer scope (called when entering a block).
 fn push_defer_scope() {
     DEFER_SCOPES.with(|s| s.borrow_mut().push(Vec::new()));
@@ -2527,7 +2557,7 @@ mod tests {
                 span: Span::default(),
             }],
         };
-        let hir = lower_module(&ast);
+        let hir = lower_module(&ast, &FxHashMap::default());
         assert_eq!(hir.decls.len(), 1);
     }
 
@@ -2761,7 +2791,7 @@ mod tests {
                 span: sp,
             }],
         };
-        let hir = lower_module(&ast);
+        let hir = lower_module(&ast, &FxHashMap::default());
         assert_eq!(hir.decls.len(), 1);
         match &hir.decls[0] {
             hir::Decl::Actor(def) => {

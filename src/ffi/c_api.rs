@@ -134,9 +134,9 @@ fn compile_source(source: &str) -> Result<crate::bytecode::CodeModule, NuError> 
         }
     }
 
-    let hir = crate::hir_lower::lower_module(&ast);
-    let mir = crate::mir_lower::lower_module(&hir)?;
-    let code_module = crate::mir_codegen::compile_mir(&mir, "main")?;
+    let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+    let mut mir = crate::mir_lower::lower_module(&hir)?;
+    let code_module = crate::mir_codegen::compile_mir(&mut mir, "main")?;
     Ok(code_module)
 }
 

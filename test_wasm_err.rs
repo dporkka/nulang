@@ -1,7 +1,9 @@
 fn main() {
     let source = "let x = 42; match x { 00 => false, _ => true }";
+    let mut type_checker = nulang::typechecker::TypeChecker::new();
     let ast = nulang::parser::Parser::new(nulang::lexer::Lexer::new(source).lex().unwrap()).parse_module().unwrap();
-    let hir = nulang::hir_lower::lower_module(&ast);
+    type_checker.check_module(&ast).unwrap();
+    let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
     let mir = nulang::mir_lower::lower_module(&hir).unwrap();
     let mut backend = nulang::backends::DefaultWasmBackend;
     let bytes = nulang::backends::WasmBackend::compile(&mut backend, &mir, "main").unwrap();

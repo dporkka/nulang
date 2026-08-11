@@ -44,7 +44,9 @@ mod process_groups;
 mod registry;
 mod spawn;
 mod timer;
+mod trace;
 mod workflow;
+pub use trace::TraceContext;
 
 #[cfg(test)]
 mod cluster_sim;
@@ -211,6 +213,11 @@ pub struct Runtime {
     pub supervisors: HashMap<u64, Supervisor>,
     pub scheduler: Scheduler,
     pub current_actor: Option<u64>,
+    /// W3C trace context of the message currently being handled on this
+    /// shard's scheduler thread. Sends performed while handling a message
+    /// stamp their outgoing `traceparent` as a child of this context, so
+    /// causal chains span actor, shard, and node boundaries.
+    pub current_trace: Option<TraceContext>,
     // Fallback heap/GC for allocation performed OUTSIDE any actor's
     // behavior (e.g. `main()`'s own top-level bytecode: string
     // concatenation, `Int.to_string`, and similar). See
@@ -431,6 +438,7 @@ impl Runtime {
             supervisors: HashMap::new(),
             scheduler: Scheduler::new(4),
             current_actor: None,
+            current_trace: None,
             main_heap: {
                 let mut heap = ActorHeap::new(64 * 1024);
                 heap.set_actor_id(MAIN_HEAP_ACTOR_ID);
@@ -1355,7 +1363,14 @@ impl Runtime {
         // suspend. Force suspension off for the whole body.
         let saved_suspend = self.suspend_enabled;
         self.suspend_enabled = false;
+        // Run the asked behavior under a child of the caller's current trace
+        // context so sends it performs continue the chain. The call is fully
+        // synchronous (LLM suspension forced off), so the transient context
+        // cannot leak into a concurrent resume path.
+        let saved_trace = self.current_trace;
+        self.current_trace = saved_trace.as_ref().map(|t| t.child());
         let result = self.ask_actor_sync_inner(actor_id, behavior_id, args);
+        self.current_trace = saved_trace;
         self.suspend_enabled = saved_suspend;
         result
     }
@@ -1647,6 +1662,11 @@ impl Runtime {
     }
     #[tracing::instrument(level = "trace", skip(self, args))]
     pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
+        // Stamp the outgoing message as a child of the current handler's trace
+        // context (if any), so causal chains continue across actor, shard, and
+        // node boundaries. When no message is being handled, the outgoing
+        // message starts a fresh trace on its own.
+        let out_trace = self.current_trace.as_ref().map(|t| t.child().to_traceparent());
         // Forwarding for migrated actors: if this actor has been relocated
         // to another node, route the message there instead of bouncing it.
         if let Some(&(target_node, _migrated_at)) = self.migrated_actors.get(&target_id) {
@@ -1690,7 +1710,7 @@ impl Runtime {
                     behavior_id,
                     payload: args.to_vec(),
                     sender: self.current_actor.unwrap_or(0),
-                    trace_id: None,
+                    trace_id: out_trace.clone(),
                 });
                 return;
             }
@@ -1700,7 +1720,7 @@ impl Runtime {
             payload: Arc::new(args.to_vec()),
             sender: self.current_actor.unwrap_or(0),
             priority: MessagePriority::Normal,
-            trace_id: None,
+            trace_id: out_trace.clone(),
         };
         if let Some(actor) = self.actors.get_mut(&target_id) {
             actor
@@ -1714,7 +1734,7 @@ impl Runtime {
                         payload: Arc::new(args.to_vec()),
                         sender: self.current_actor.unwrap_or(0),
                         priority: MessagePriority::System,
-                        trace_id: None,
+                        trace_id: out_trace.clone(),
                     },
                     "mailbox full",
                 );
@@ -1726,7 +1746,7 @@ impl Runtime {
                     payload: Arc::new(args.to_vec()),
                     sender: self.current_actor.unwrap_or(0),
                     priority: MessagePriority::System,
-                    trace_id: None,
+                    trace_id: out_trace.clone(),
                 },
                 "target actor not found",
             );
@@ -2340,6 +2360,22 @@ impl Runtime {
             // received payload so the owning objects (and any retired
             // owner heap) stay alive until this actor exits.
             self.hold_payload_refs(actor_id, &msg.payload);
+
+            // Establish the W3C trace context for this message: a child of
+            // the sender's span when the message carries a traceparent (so
+            // causal chains continue), otherwise a fresh root. The context is
+            // recorded on the runtime so sends performed by the handler below
+            // stamp their outgoing traceparent as children of it. `_span_guard`
+            // keeps the `tracing` span alive for the rest of this dispatch.
+            let trace_ctx = match &msg.trace_id {
+                Some(tp) => match TraceContext::from_traceparent(tp) {
+                    Some(incoming) => incoming.child(),
+                    None => TraceContext::root(),
+                },
+                None => TraceContext::root(),
+            };
+            self.current_trace = Some(trace_ctx);
+            let _span_guard = trace_ctx.enter_dispatch_span(actor_id, behavior_idx);
 
             // Intercept semantic-memory behaviors generated by compile_agent.
             // They are bytecode behaviors but are implemented directly by the

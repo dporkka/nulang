@@ -55,9 +55,9 @@ mod tests {
         let ast = crate::parser::Parser::new(tokens).parse_module()?;
         let mut tc = crate::typechecker::TypeChecker::new();
         tc.check_module(&ast)?;
-        let hir = crate::hir_lower::lower_module(&ast);
-        let mir = crate::mir_lower::lower_module(&hir)?;
-        let module = crate::mir_codegen::compile_mir(&mir, "test")?;
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
+        let mut mir = crate::mir_lower::lower_module(&hir)?;
+        let module = crate::mir_codegen::compile_mir(&mut mir, "test")?;
         let mut vm = VM::new();
         vm.load_module(module);
         vm.run()

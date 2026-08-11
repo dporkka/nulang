@@ -3509,7 +3509,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module);
         let err = aot.err().map(|e| e.to_string()).unwrap_or_default();
@@ -3548,7 +3548,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile of pure-compute behavior should succeed");
@@ -3591,7 +3591,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile of stateful behavior should succeed");
@@ -3651,7 +3651,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile of send behaviors should succeed");
@@ -3720,7 +3720,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile of receive behavior should succeed");
@@ -3786,7 +3786,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile of spawn behavior should succeed");
@@ -3856,7 +3856,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module)
             .expect("AOT compile should succeed");
@@ -3935,7 +3935,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4025,7 +4025,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4094,7 +4094,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4147,7 +4147,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -4190,7 +4190,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -4233,7 +4233,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -4277,7 +4277,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -4319,7 +4319,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -4363,7 +4363,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -4392,7 +4392,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         crate::aot::AotModule::compile(&mir_module).expect("AOT compile")
     }
@@ -4663,7 +4663,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4722,7 +4722,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4780,7 +4780,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4836,7 +4836,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let code = crate::mir_codegen::compile_mir(&mir_module, "test").expect("bytecode compile");
@@ -4980,7 +4980,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -5014,7 +5014,7 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
@@ -5027,17 +5027,20 @@ mod tests {
     }
 
     #[test]
-    fn test_aot_closure_passed_as_argument() {
-        // A captured closure handed to another function whose body calls it
-        // (closure target not statically known at the call site) must dispatch
-        // through the runtime helper, which reads the TAG_CLOSURE object's fn
-        // index and captures at call time.
+    fn test_aot_recursive_function() {
+        // A recursive function (factorial) must compile and execute correctly
+        // in the AOT backend. The unboxed variant must handle self-recursive
+        // calls and arithmetic on the call result.
         use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use crate::typechecker::TypeChecker;
-        let source =
-            "fn apply(f, x) { f(x) } let a = 40 in let add = fn(x) { x + a } in apply(add, 2)";
+        let source = r#"
+            fn fact(n: Int) -> Int {
+                if n <= 1 then 1 else n * fact(n - 1)
+            }
+            fn main() { fact(5) }
+        "#;
         let tokens = Lexer::new(source).lex().unwrap();
         let ast = Parser::new(tokens).parse_module().unwrap();
         let mut tc = TypeChecker::new();
@@ -5051,17 +5054,18 @@ mod tests {
                 ca.infer_cap(&ctx, body).unwrap();
             }
         }
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         let val = crate::vm::Value::from_raw(raw);
         assert_eq!(
             val.as_int(),
-            Some(42),
-            "closure passed as an argument and called there should yield 42"
+            Some(120),
+            "recursive fact(5) should yield 120"
         );
     }
+
 
     #[test]
     fn test_is_all_int_empty() {

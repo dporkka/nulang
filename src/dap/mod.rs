@@ -322,9 +322,9 @@ fn compile_source(source: &str, file_path: Option<&str>, name: &str) -> NuResult
     }
 
     // 6. Lower and compile.
-    let hir = crate::hir_lower::lower_module(&ast);
-    let mir = crate::mir_lower::lower_module(&hir)?;
-    crate::mir_codegen::compile_mir(&mir, name)
+    let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+    let mut mir = crate::mir_lower::lower_module(&hir)?;
+    crate::mir_codegen::compile_mir(&mut mir, name)
 }
 
 // ---------------------------------------------------------------------------

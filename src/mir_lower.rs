@@ -2849,7 +2849,7 @@ mod tests {
         let tokens = lexer.lex()?;
         let mut parser = crate::parser::Parser::new(tokens);
         let ast = parser.parse_module()?;
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &std::collections::HashMap::default());
         lower_module(&hir)
     }
 

@@ -1273,7 +1273,7 @@ fn run_frontend(
     source: &str,
     file_path: Option<&str>,
     verbose: bool,
-) -> NuResult<nulang::ast::AstModule> {
+) -> NuResult<(nulang::ast::AstModule, nulang::typechecker::TypeChecker)> {
     let ps = nulang::prelude_source::PRELUDE_SOURCE;
     let mut pl = Lexer::new(ps);
     nulang::types::set_source_map_with_file(ps, Some("<prelude>"));
@@ -1392,7 +1392,7 @@ fn run_frontend(
         }
     }
 
-    Ok(ast)
+    Ok((ast, type_checker))
 }
 
 #[cfg_attr(not(feature = "wasm-backend"), allow(unused_variables))]
@@ -1405,12 +1405,12 @@ fn run_source(
     metrics_port: Option<u16>,
     target: &str,
 ) -> NuResult<()> {
-    let ast = run_frontend(source, file_path, verbose)?;
+    let (ast, type_checker) = run_frontend(source, file_path, verbose)?;
     match backend {
         #[cfg(feature = "wasm-backend")]
         "wasm" => {
             let wasm_file = out_file.unwrap_or("out.wasm");
-            let hir = nulang::hir_lower::lower_module(&ast);
+            let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             use nulang::backends::WasmBackend;
             let mut wasm_backend = nulang::backends::DefaultWasmBackend;
@@ -1430,7 +1430,7 @@ fn run_source(
         #[cfg(feature = "wasm-backend")]
         "wasm-run" => {
             let wasm_file = out_file.unwrap_or("out.wasm");
-            let hir = nulang::hir_lower::lower_module(&ast);
+            let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             use nulang::backends::WasmBackend;
             let mut wasm_backend = nulang::backends::DefaultWasmBackend;
@@ -1456,7 +1456,7 @@ fn run_source(
             } else {
                 cwasm_file
             };
-            let hir = nulang::hir_lower::lower_module(&ast);
+            let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             use nulang::backends::WasmBackend;
             let mut wasm_backend = nulang::backends::DefaultWasmBackend;
@@ -1478,7 +1478,7 @@ fn run_source(
         #[cfg(feature = "wasmfx-backend")]
         "wasmfx" => {
             let wasm_file = out_file.unwrap_or("out.wasm");
-            let hir = nulang::hir_lower::lower_module(&ast);
+            let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             let mut wasmfx_backend = nulang::wasmfx_backend::WasmFxBackend::new();
             let wasm_bytes = wasmfx_backend.compile(&mir, "main")?;
@@ -1497,7 +1497,7 @@ fn run_source(
         #[cfg(feature = "wasmfx-backend")]
         "wasmfx-run" => {
             let wasm_file = out_file.unwrap_or("out.wasm");
-            let hir = nulang::hir_lower::lower_module(&ast);
+            let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             let mut wasmfx_backend = nulang::wasmfx_backend::WasmFxBackend::new();
             let wasm_bytes = wasmfx_backend.compile(&mir, "main")?;
@@ -1532,7 +1532,7 @@ fn run_source(
             span: Span::default(),
         }),
         "native" => {
-            let hir = nulang::hir_lower::lower_module(&ast);
+            let hir = nulang::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             if verbose {
                 println!("=== AOT native compilation (target: {}) ===", target);
@@ -1570,7 +1570,7 @@ fn run_source(
         }
         "bytecode" => {
             // Bytecode backend (default).
-            let m = compile_with_new_pipeline(&ast, "main")?;
+            let m = compile_with_new_pipeline(&ast, "main", &type_checker)?;
             let constants = m.constants.clone();
             if verbose {
                 println!("=== Bytecode (HIR/MIR pipeline) ===");
@@ -1612,7 +1612,7 @@ fn run_source(
         }
         "core-vm" => {
             // Core VM backend: compile to bytecode, then run through minimal interpreter.
-            let m = compile_with_new_pipeline(&ast, "main")?;
+            let m = compile_with_new_pipeline(&ast, "main", &type_checker)?;
             if verbose {
                 println!("=== Core VM (Stage 3) ===");
                 println!("{}", disassemble(&m));
@@ -1741,7 +1741,7 @@ fn check_source(
     verbose: bool,
     _all_errors: bool,
 ) -> NuResult<()> {
-    run_frontend(source, file_path, verbose)?;
+    let (_ast, _tc) = run_frontend(source, file_path, verbose)?;
 
     if verbose {
         println!("Effect check passed.");
@@ -1810,24 +1810,24 @@ fn parse_frontend(
 fn compile_with_new_pipeline(
     ast: &nulang::ast::AstModule,
     name: &str,
+    type_checker: &nulang::typechecker::TypeChecker,
 ) -> NuResult<nulang::bytecode::CodeModule> {
     // Anything this pipeline can't yet lower faithfully (see hir_lower.rs
     // and mir_lower.rs module docs) returns an honest NotYetImplemented
     // error, which the caller turns into a loud fallback to the stable
     // compiler.
-    let hir = nulang::hir_lower::lower_module(ast);
-    let mir = nulang::mir_lower::lower_module(&hir)?;
-    nulang::mir_codegen::compile_mir(&mir, name)
+    let hir = nulang::hir_lower::lower_module(ast, &type_checker.inferred_decl_types);
+    let mut mir = nulang::mir_lower::lower_module(&hir)?;
+    nulang::mir_codegen::compile_mir(&mut mir, name)
 }
-
 /// Compile a source string to a `.nbc` artifact and write it to `out_path`.
 ///
 /// The BLAKE3 hash of the source is recorded in the artifact header so a later
 /// `--verify` run can confirm the artifact came from this exact source
 /// (supply-chain integrity). Does not execute the module.
 fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
-    let ast = run_frontend(source, None, false)?;
-    let m = compile_with_new_pipeline(&ast, "main")?;
+    let (ast, type_checker) = run_frontend(source, None, false)?;
+    let m = compile_with_new_pipeline(&ast, "main", &type_checker)?;
     let source_hash = blake3::hash(source.as_bytes());
     let bytes =
         m.to_nbc(Some(*source_hash.as_bytes()))
@@ -2054,9 +2054,8 @@ mod tests {
                 c
             }
         "#;
-        let ast =
-            run_frontend(source, None, false).expect("frontend should accept the actor program");
-        let module = compile_with_new_pipeline(&ast, "test").expect("actor program should compile");
+        let (ast, type_checker) = run_frontend(source, None, false).expect("frontend should accept the actor program");
+        let module = compile_with_new_pipeline(&ast, "test", &type_checker).expect("actor program should compile");
         let (_value, runtime) = run_with_runtime(module, None).expect("actor program should run");
         let rt = runtime.borrow();
         let actor = rt.actors.values().next().expect("one actor should exist");

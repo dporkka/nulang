@@ -283,8 +283,11 @@ impl AotModule {
             .collect();
 
         // Best-effort bytecode companion so native spawn can route through
-        // `Runtime::spawn_from_module`.
-        let code_module = crate::mir_codegen::compile_mir(mir_module, &mir_module.name).ok();
+        // `Runtime::spawn_from_module`. The AOT JIT path borrows the MIR
+        // immutably throughout, so the companion compiles an optimized
+        // clone rather than mutating the shared module.
+        let mut optimized = mir_module.clone();
+        let code_module = crate::mir_codegen::compile_mir(&mut optimized, &mir_module.name).ok();
 
         Ok(AotModule {
             jit_module,
@@ -1345,7 +1348,7 @@ mod tests {
         let ast = crate::parser::Parser::new(tokens).parse_module().unwrap();
         let mut tc = crate::typechecker::TypeChecker::new();
         tc.check_module(&ast).unwrap();
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = super::AotModule::compile(&mir).expect("AOT compile");
         let idx = aot.entry_idx.unwrap_or(0);

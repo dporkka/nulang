@@ -1693,7 +1693,7 @@ mod tests {
         let ast = crate::parser::Parser::new(tokens).parse_module()?;
         let mut tc = crate::typechecker::TypeChecker::new();
         tc.check_module(&ast)?;
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         let mut backend = WasmBackend::new();
         backend.compile(&mir, "test")

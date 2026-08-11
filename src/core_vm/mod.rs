@@ -623,9 +623,9 @@ mod tests {
         let ast = parser.parse_module().map_err(|e| e.to_string())?;
         let mut tc = TypeChecker::new();
         tc.check_module(&ast).map_err(|e| e.to_string())?;
-        let hir = hir_lower::lower_module(&ast);
-        let mir = mir_lower::lower_module(&hir).map_err(|e| e.to_string())?;
-        let module = mir_codegen::compile_mir(&mir, "test").map_err(|e| e.to_string())?;
+        let hir = hir_lower::lower_module(&ast, &tc.inferred_decl_types);
+        let mut mir = mir_lower::lower_module(&hir).map_err(|e| e.to_string())?;
+        let module = mir_codegen::compile_mir(&mut mir, "test").map_err(|e| e.to_string())?;
         let mut vm = CoreVM::new();
         let idx = vm.load_module_from_code(&module)?;
         let entry = module.entry_point.unwrap_or(0);

@@ -436,9 +436,9 @@ fn run_full_pipeline_safe(source: &str) -> Result<(), String> {
         };
         let mut type_checker = TypeChecker::new();
         if type_checker.check_module(&ast).is_ok() {
-            let hir = crate::hir_lower::lower_module(&ast);
-            if let Ok(mir) = crate::mir_lower::lower_module(&hir) {
-                let _ = crate::mir_codegen::compile_mir(&mir, "fuzz");
+            let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+            if let Ok(mut mir) = crate::mir_lower::lower_module(&hir) {
+                let _ = crate::mir_codegen::compile_mir(&mut mir, "fuzz");
             }
         }
     }))
@@ -491,7 +491,7 @@ fn compile_for_diff(source: &str) -> Option<CompiledMutant> {
     let ast = parser.parse_module().ok()?;
     let mut type_checker = TypeChecker::new();
     type_checker.check_module(&ast).ok()?;
-    let hir = crate::hir_lower::lower_module(&ast);
+    let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
     let mir_module = crate::mir_lower::lower_module(&hir).ok()?;
     let code_module = crate::mir_codegen::compile_mir(&mir_module, "fuzz-diff").ok()?;
     Some(CompiledMutant {

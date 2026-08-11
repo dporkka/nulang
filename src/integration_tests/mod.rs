@@ -114,7 +114,7 @@ mod tests {
         // (placeholder: effect checker would go here)
 
         // 4. Compile via HIR/MIR pipeline
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
 
         match backend() {
@@ -221,7 +221,7 @@ mod tests {
         let mut type_checker = TypeChecker::new();
         let module_type = type_checker.check_module(&ast)?;
 
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         let module = crate::mir_codegen::compile_mir(&mir, "test")?;
         Ok((module, module_type))
@@ -985,7 +985,7 @@ mod tests {
         let ast = parser.parse_module().unwrap();
         let mut type_checker = TypeChecker::new();
         type_checker.check_module(&ast).unwrap();
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir).unwrap();
         let main = mir
             .functions
@@ -4499,7 +4499,7 @@ match { a: 2, b: 9 } with {
         let _ = type_checker.check_module(&ast)?;
 
         // New HIR -> MIR -> bytecode pipeline
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         let module = crate::mir_codegen::compile_mir(&mir, "test")?;
 
@@ -4527,7 +4527,7 @@ match { a: 2, b: 9 } with {
         let ast = parser.parse_module()?;
         let mut type_checker = TypeChecker::new();
         let _ = type_checker.check_module(&ast)?;
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         crate::mir_codegen::compile_mir(&mir, "test")
     }
@@ -4547,7 +4547,7 @@ match { a: 2, b: 9 } with {
         let mut type_checker = TypeChecker::new();
         let _ = type_checker.check_module(&ast)?;
 
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         let module = crate::mir_codegen::compile_mir(&mir, "test")?;
 
@@ -8468,7 +8468,7 @@ match { a: 2, b: 9 } with {
             let ast = Parser::new(tokens).parse_module()?;
             let mut tc = TypeChecker::new();
             tc.check_module(&ast)?;
-            let hir = crate::hir_lower::lower_module(&ast);
+            let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
             let mir = crate::mir_lower::lower_module(&hir)?;
             let mut backend = WasmBackend::new();
             backend.compile(&mir, "test")
@@ -10286,7 +10286,7 @@ match { a: 2, b: 9 } with {
         effect_checker.check_module(&ast.decls)?;
 
         // 7. HIR → MIR → bytecode
-        let hir = crate::hir_lower::lower_module(&ast);
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
         let mir = crate::mir_lower::lower_module(&hir)?;
         let module = crate::mir_codegen::compile_mir(&mir, "test")?;
 

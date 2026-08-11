@@ -6304,12 +6304,13 @@ mod vm_tests {
             }
             sqrt(4.0)
         "#;
+        let mut type_checker = TypeChecker::new();
         let tokens = Lexer::new(source).lex().expect("lex");
         let ast = Parser::new(tokens).parse_module().expect("parse");
-        let _ = TypeChecker::new().check_module(&ast).expect("typecheck");
-        let hir = crate::hir_lower::lower_module(&ast);
-        let mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
-        let module = crate::mir_codegen::compile_mir(&mir, "test").expect("compile");
+        type_checker.check_module(&ast).expect("typecheck");
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+        let mut mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
+        let module = crate::mir_codegen::compile_mir(&mut mir, "test").expect("compile");
 
         let mut vm = VM::new();
         vm.load_module(module);
@@ -6345,12 +6346,13 @@ mod vm_tests {
             }
             sqrt(4.0)
         "#;
+        let mut type_checker = TypeChecker::new();
         let tokens = Lexer::new(source).lex().expect("lex");
         let ast = Parser::new(tokens).parse_module().expect("parse");
-        let _ = TypeChecker::new().check_module(&ast).expect("typecheck");
-        let hir = crate::hir_lower::lower_module(&ast);
-        let mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
-        let module = crate::mir_codegen::compile_mir(&mir, "test_sandbox").expect("compile");
+        type_checker.check_module(&ast).expect("typecheck");
+        let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+        let mut mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
+        let module = crate::mir_codegen::compile_mir(&mut mir, "test_sandbox").expect("compile");
 
         // Test 1: sandbox enabled, empty allow-list → blocked.
         let mut vm = VM::new();

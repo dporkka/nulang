@@ -57,9 +57,9 @@ fn compile_and_run_nula(source: &str) -> Result<Value, crate::types::NuError> {
     let ast = parser.parse_module()?;
     let mut type_checker = TypeChecker::new();
     type_checker.check_module(&ast)?;
-    let hir = crate::hir_lower::lower_module(&ast);
-    let mir = crate::mir_lower::lower_module(&hir)?;
-    let module = crate::mir_codegen::compile_mir(&mir, "stress")?;
+    let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
+    let mut mir = crate::mir_lower::lower_module(&hir)?;
+    let module = crate::mir_codegen::compile_mir(&mut mir, "stress")?;
     let mut vm = VM::new();
     vm.load_module(module);
     vm.run()

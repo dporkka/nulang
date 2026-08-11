@@ -602,7 +602,7 @@ impl Repl {
         }
 
         // Compile the combined module via the HIR/MIR pipeline.
-        let code_module = compile_with_new_pipeline(&combined_module, "repl")?;
+        let code_module = compile_with_new_pipeline(&combined_module, "repl", &self.type_checker)?;
         self.last_bytecode = Some(disassemble_module(&code_module));
         // from scratch (see `combined_module` above), so no closure created
         // by a previous evaluation can still be reachable — safe to reclaim
@@ -1079,10 +1079,14 @@ fn run_basic_repl() {
 // ---------------------------------------------------------------------------
 
 /// Compile via the HIR/MIR pipeline.
-fn compile_with_new_pipeline(ast: &AstModule, name: &str) -> NuResult<crate::bytecode::CodeModule> {
-    let hir = crate::hir_lower::lower_module(ast);
-    let mir = crate::mir_lower::lower_module(&hir)?;
-    crate::mir_codegen::compile_mir(&mir, name)
+fn compile_with_new_pipeline(
+    ast: &AstModule,
+    name: &str,
+    type_checker: &TypeChecker,
+) -> NuResult<crate::bytecode::CodeModule> {
+    let hir = crate::hir_lower::lower_module(ast, &type_checker.inferred_decl_types);
+    let mut mir = crate::mir_lower::lower_module(&hir)?;
+    crate::mir_codegen::compile_mir(&mut mir, name)
 }
 
 /// Parse source code into an AST module.

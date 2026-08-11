@@ -489,6 +489,7 @@ impl AddressResolver {
         priority: MessagePriority,
         string_table: Vec<String>,
         content_hash: Option<[u8; 32]>,
+        trace_id: Option<String>,
     ) -> Packet {
         Packet::ActorMessage {
             target_actor,
@@ -499,7 +500,7 @@ impl AddressResolver {
             sender_actor,
             sender_node: NodeId(self.local_node.0),
             priority,
-            trace_id: None,
+            trace_id,
         }
     }
     /// Parse a received network packet into a message for local delivery.
@@ -778,6 +779,12 @@ pub fn send_distributed(
             // hash; the receiving node resolves the name and MAY verify the
             // hash against its own behavior table on delivery.
             let content_hash = try_lookup_content_hash(runtime, behavior);
+            // Carry the current handler's trace context across the wire so the
+            // remote side continues the same causal chain.
+            let trace_id = runtime
+                .current_trace
+                .as_ref()
+                .map(|t| t.child().to_traceparent());
             let packet = resolver.build_packet(
                 actor_id,
                 behavior,
@@ -786,6 +793,7 @@ pub fn send_distributed(
                 MessagePriority::Normal,
                 string_table,
                 content_hash,
+                trace_id,
             );
 
             if let Some(node_info) = cluster.get_node(node_id) {
@@ -1914,6 +1922,7 @@ mod tests {
         let local_node = NodeId::new(&local_addr);
         let resolver = AddressResolver::new(local_node);
 
+        let trace = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         let packet = resolver.build_packet(
             42, // target_actor
             "handle_msg",
@@ -1922,6 +1931,7 @@ mod tests {
             MessagePriority::Normal,
             vec!["hello".to_string()],
             None, // content_hash
+            Some(trace.to_string()),
         );
         match packet {
             Packet::ActorMessage {
@@ -1933,6 +1943,7 @@ mod tests {
                 sender_actor,
                 sender_node,
                 priority,
+                trace_id,
                 ..
             } => {
                 assert_eq!(target_actor, 42);
@@ -1943,6 +1954,7 @@ mod tests {
                 assert_eq!(priority, MessagePriority::Normal);
                 assert_eq!(payload.len(), 2);
                 assert_eq!(string_table, vec!["hello".to_string()]);
+                assert_eq!(trace_id.as_deref(), Some(trace));
             }
             other => panic!("expected ActorMessage packet, got {:?}", other),
         }
