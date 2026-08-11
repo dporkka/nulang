@@ -1388,6 +1388,19 @@ define_aot_perform_async!(nulang_aot_perform_async_8, a0, a1, a2, a3, a4, a5, a6
 // received degrades to nil — the native backend has no VM suspension to park
 // the actor mid-behavior.
 
+// ---------------------------------------------------------------------------
+// AOT actor migration
+// ---------------------------------------------------------------------------
+// `migrate actor to node` lowers to a `nulang_aot_migrate` call. The native
+// backend has no distribution layer, so the request is a no-op that delivers
+// unit — the same contract as the bytecode VM without distributed callbacks
+// armed (which records the request but cannot act on it).
+
+#[no_mangle]
+pub unsafe extern "C" fn nulang_aot_migrate(_actor_raw: u64, _node_raw: u64) -> u64 {
+    Value::unit().as_raw()
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn nulang_aot_signal_wait(name_raw: u64) -> u64 {
     let name = resolve_string_coerce(name_raw).unwrap_or_default();
