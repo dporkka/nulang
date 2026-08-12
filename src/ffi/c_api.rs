@@ -128,9 +128,19 @@ fn compile_source(source: &str) -> Result<crate::bytecode::CodeModule, NuError> 
 
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
-    for decl in &ast.decls {
-        if let crate::ast::Decl::Function { body, .. } = decl {
-            cap_analyzer.infer_cap(&cap_ctx, body)?;
+    for decl in crate::effect_checker::flatten_decls(&ast.decls) {
+        match decl {
+            crate::ast::Decl::Function { body, params, .. } => {
+                let ctx = cap_ctx.with_params(params);
+                cap_analyzer.infer_cap(&ctx, body)?;
+            }
+            crate::ast::Decl::Actor { behaviors, .. } => {
+                for behavior in behaviors {
+                    let ctx = cap_ctx.with_params(&behavior.params);
+                    cap_analyzer.infer_cap(&ctx, &behavior.body)?;
+                }
+            }
+            _ => {}
         }
     }
 

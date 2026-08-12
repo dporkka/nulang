@@ -1178,6 +1178,17 @@ impl CapContext {
         }
         ctx
     }
+
+    /// Bind explicitly annotated capabilities of function-like parameters.
+    pub fn with_params(&self, params: &[Param]) -> Self {
+        let mut ctx = self.clone();
+        for param in params {
+            if let Some(cap) = param.cap {
+                ctx.bindings.push((param.name.clone(), cap));
+            }
+        }
+        ctx
+    }
 }
 
 impl Default for CapContext {
@@ -2892,6 +2903,17 @@ mod tests {
         let ctx2 = ctx.with_binding("y", Capability::Ref);
         assert_eq!(ctx2.lookup("y"), Capability::Ref);
         assert_eq!(ctx2.lookup("x"), Capability::Iso);
+    }
+
+    #[test]
+    fn test_cap_context_with_params_preserves_only_annotations() {
+        let params = vec![
+            Param::new("plain", None),
+            Param::new("owned", None).with_cap(Capability::LinearIso),
+        ];
+        let ctx = CapContext::new().with_params(&params);
+        assert_eq!(ctx.lookup("plain"), Capability::Val);
+        assert_eq!(ctx.lookup("owned"), Capability::LinearIso);
     }
 
     #[test]
