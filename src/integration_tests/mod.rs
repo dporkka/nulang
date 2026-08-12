@@ -8702,6 +8702,18 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_run_record_field_store() {
+            // Named record stores must mutate the existing heap object, just
+            // like the interpreter's RecS opcode; silently dropping this
+            // statement previously left the old field value in WASM.
+            let val = run_source_to_value(
+                r#"fn f() -> Int { let r = {x: 1, y: 2} in { r.x = 99 r.x + r.y } } f()"#,
+            )
+            .expect("run");
+            assert_eq!(val.as_int(), Some(101), "r.x = 99 must persist in WASM");
+        }
+
+        #[test]
         fn test_wasm_run_tuple() {
             // Tuple literals + positional field access (LoadFieldPos).
             let val =

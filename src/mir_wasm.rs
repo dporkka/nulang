@@ -775,8 +775,13 @@ impl WasmBackend {
             Stmt::ArrayStore { arr, idx, src } => {
                 self.compile_array_store(body, arr, idx, src, func);
             }
-            Stmt::StoreFieldNamed { .. } | Stmt::Emit { .. } | Stmt::StateSet { .. } => {
-                // records/effects/actor state are unsupported in the WASM backend
+            Stmt::StoreFieldNamed { obj, field, src } => {
+                self.compile_field_store(body, obj, field, src, func);
+            }
+            Stmt::Emit { .. } | Stmt::StateSet { .. } => {
+                // Effects and actor state are unsupported in the standalone
+                // WASM backend. These statements remain no-ops until the
+                // corresponding runtime machinery is implemented.
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
                 body.instruction(&Instruction::Drop);
             }
@@ -1593,6 +1598,36 @@ impl WasmBackend {
         // value
         body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
         // store
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
+
+    /// Store a named record field. Records use the same flat heap layout as
+    /// tuples and arrays, with the field slot following the count word.
+    fn compile_field_store(
+        &self,
+        body: &mut Function,
+        obj: &LocalId,
+        field: &str,
+        src: &LocalId,
+        func: &mir::Function,
+    ) {
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        let slot = self.field_map.get(field).copied().unwrap_or(0) as i64;
+
+        // base = obj & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(obj, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // base + (slot + 1) * 8
+        body.instruction(&Instruction::I64Const((slot + 1) * 8));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::I32WrapI64);
+        // value
+        body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
         body.instruction(&Instruction::I64Store(MemArg {
             offset: 0,
             align: 3,
