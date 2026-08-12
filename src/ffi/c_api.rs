@@ -10,7 +10,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
-use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
@@ -119,18 +119,23 @@ fn compile_source(source: &str) -> Result<crate::bytecode::CodeModule, NuError> 
     let _module_type = type_checker.check_module(&ast)?;
 
     let mut effect_checker = EffectChecker::new();
-    let effect_ctx = EffectContext::empty();
-    for decl in &ast.decls {
-        if let crate::ast::Decl::Function { body, .. } = decl {
-            effect_checker.infer_effects(&effect_ctx, body)?;
-        }
-    }
+    effect_checker.check_module(&ast.decls)?;
 
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
-    for decl in &ast.decls {
-        if let crate::ast::Decl::Function { body, .. } = decl {
-            cap_analyzer.infer_cap(&cap_ctx, body)?;
+    for decl in crate::effect_checker::flatten_decls(&ast.decls) {
+        match decl {
+            crate::ast::Decl::Function { body, params, .. } => {
+                let ctx = cap_ctx.with_params(params);
+                cap_analyzer.infer_cap(&ctx, body)?;
+            }
+            crate::ast::Decl::Actor { behaviors, .. } => {
+                for behavior in behaviors {
+                    let ctx = cap_ctx.with_params(&behavior.params);
+                    cap_analyzer.infer_cap(&ctx, &behavior.body)?;
+                }
+            }
+            _ => {}
         }
     }
 

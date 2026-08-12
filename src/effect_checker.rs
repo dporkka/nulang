@@ -1178,6 +1178,17 @@ impl CapContext {
         }
         ctx
     }
+
+    /// Bind explicitly annotated capabilities of function-like parameters.
+    pub fn with_params(&self, params: &[Param]) -> Self {
+        let mut ctx = self.clone();
+        for param in params {
+            if let Some(cap) = param.cap {
+                ctx.bindings.push((param.name.clone(), cap));
+            }
+        }
+        ctx
+    }
 }
 
 impl Default for CapContext {
@@ -1233,7 +1244,14 @@ impl CapabilityAnalyzer {
                     name, binding_cap, name
                 );
                 self.diagnostics.push(msg.clone());
-                return Err(NuError::cap_error(msg, expr_span(expr)));
+                return Err(NuError::cap_error_explained(
+                    msg,
+                    expr_span(expr),
+                    format!(
+                        "`{}` is a linear binding in the initial scope (e.g. a function parameter); every path through the body must consume it exactly once",
+                        name
+                    ),
+                ));
             }
         }
 
@@ -1266,7 +1284,11 @@ impl CapabilityAnalyzer {
             msg.push_str("\nhelp: linear/lineariso bindings may be used at most once");
             msg.push_str(&format!("\nhelp: use `consume {}` to explicitly discharge the linear obligation on the first use, or restructure to avoid the second use", name));
             self.diagnostics.push(msg.clone());
-            return Err(NuError::cap_error(msg, span));
+            return Err(NuError::cap_error_explained(
+                msg,
+                span,
+                "linear/lineariso bindings are moved on first use and may not be referenced again on the same path",
+            ));
         }
         self.first_consumed.insert(name.to_string(), span);
         Ok(())
@@ -1299,7 +1321,11 @@ impl CapabilityAnalyzer {
                 name
             ));
             self.diagnostics.push(msg.clone());
-            return Err(NuError::cap_error(msg, span));
+            return Err(NuError::cap_error_explained(
+                msg,
+                span,
+                "an iso binding transfers ownership on send/ask/closure-capture and cannot be moved twice",
+            ));
         }
         self.first_consumed.insert(name.to_string(), span);
         Ok(())
@@ -2007,7 +2033,14 @@ impl CapabilityAnalyzer {
                 msg.push_str("\nhelp: use `consume <binding>` to discharge the linear obligation and obtain an Iso reference");
             }
             self.diagnostics.push(msg.clone());
-            Err(NuError::cap_error(msg, span))
+            Err(NuError::cap_error_explained(
+                msg,
+                span,
+                format!(
+                    "capability `{}` does not satisfy the subtyping relation `{} <: {}`",
+                    sub, sub, sup
+                ),
+            ))
         }
     }
 
@@ -2023,7 +2056,14 @@ impl CapabilityAnalyzer {
                 cap
             );
             self.diagnostics.push(msg.clone());
-            Err(NuError::cap_error(msg, span))
+            Err(NuError::cap_error_explained(
+                msg,
+                span,
+                format!(
+                    "only lineariso, iso, linear, val, and tag may cross an actor boundary; `{}` cannot",
+                    cap
+                ),
+            ))
         }
     }
 
@@ -2892,6 +2932,17 @@ mod tests {
         let ctx2 = ctx.with_binding("y", Capability::Ref);
         assert_eq!(ctx2.lookup("y"), Capability::Ref);
         assert_eq!(ctx2.lookup("x"), Capability::Iso);
+    }
+
+    #[test]
+    fn test_cap_context_with_params_preserves_only_annotations() {
+        let params = vec![
+            Param::new("plain", None),
+            Param::new("owned", None).with_cap(Capability::LinearIso),
+        ];
+        let ctx = CapContext::new().with_params(&params);
+        assert_eq!(ctx.lookup("plain"), Capability::Val);
+        assert_eq!(ctx.lookup("owned"), Capability::LinearIso);
     }
 
     #[test]

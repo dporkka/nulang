@@ -2104,7 +2104,11 @@ match { a: 2, b: 9 } with {
             interp.as_raw(),
             "JIT result must match interpreter for an effect performed in a hot loop"
         );
-        assert_eq!(hot.as_int(), Some(2000), "2000 iterations resume x+1 -> acc=2000");
+        assert_eq!(
+            hot.as_int(),
+            Some(2000),
+            "2000 iterations resume x+1 -> acc=2000"
+        );
         // `PerformDirect` is a safepoint that yields to the interpreter and
         // clobbers the register set, so typed (guard-stripped) compilation
         // cannot apply — the loop compiles through the scalar JIT path. Assert
@@ -2226,7 +2230,11 @@ match { a: 2, b: 9 } with {
         // Interpreter baseline.
         let (interp, _ty) = run_source(&source(2000)).unwrap();
         // Last i is 1999 -> add: 2009, then mul: 2009*3 = 6027.
-        assert_eq!(interp.as_int(), Some(6027), "interpreter multi-effect result");
+        assert_eq!(
+            interp.as_int(),
+            Some(6027),
+            "interpreter multi-effect result"
+        );
 
         // JIT: both ops must dispatch correctly across the yield boundary.
         let (module, _ty) = compile_source(&source(2000)).unwrap();
@@ -10292,12 +10300,24 @@ match { a: 2, b: 9 } with {
         "#;
         let result = run_source(source);
         assert!(result.is_err(), "reassigning immutable let should error");
-        let err = result.unwrap_err().to_string();
+        let error = result.unwrap_err();
+        let err = error.to_string();
         assert!(
             err.contains("cannot assign to immutable binding"),
             "error should mention immutable binding, got: {}",
             err
         );
+        match error {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("mutable binding"));
+                assert_eq!(found_type.as_deref(), Some("immutable binding"));
+            }
+            other => panic!("expected structured TypeError, got {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------

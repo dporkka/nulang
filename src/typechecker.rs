@@ -626,12 +626,29 @@ fn unify_open_records(
                 if extras1.is_empty() && extras2.is_empty() {
                     return Ok(subst);
                 }
-                return Err(NuError::type_error(
-                    "Incompatible record types: both sides require additional fields \
+                return Err(NuError::TypeError {
+                    msg: "Incompatible record types: both sides require additional fields \
                           that cannot be reconciled"
                         .to_string(),
                     span,
-                ));
+                    expected_type: Some(format!(
+                        "record with fields {{{}}}",
+                        fields1
+                            .iter()
+                            .map(|(name, _)| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    found_type: Some(format!(
+                        "record with fields {{{}}}",
+                        fields2
+                            .iter()
+                            .map(|(name, _)| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    similar_names: None,
+                });
             }
             let fresh_row = TypeVar::fresh();
             let s = mgu(
@@ -674,10 +691,27 @@ fn unify_open_records(
         }
         // Row tails are always fresh type variables by construction; a
         // residual non-variable tail cannot absorb fields.
-        _ => Err(NuError::type_error(
-            "Incompatible record types: the rows cannot be unified".to_string(),
+        _ => Err(NuError::TypeError {
+            msg: "Incompatible record types: the rows cannot be unified".to_string(),
             span,
-        )),
+            expected_type: Some(format!(
+                "record with fields {{{}}}",
+                fields1
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            found_type: Some(format!(
+                "record with fields {{{}}}",
+                fields2
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            similar_names: None,
+        }),
     }
 }
 
@@ -1679,18 +1713,25 @@ impl TypeChecker {
                         None => {
                             let available: Vec<_> =
                                 entity_events.iter().map(|(n, _)| n.as_str()).collect();
-                            return Err(NuError::type_error(
-                                format!(
+                            let available_text = if available.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                available.join(", ")
+                            };
+                            return Err(NuError::TypeError {
+                                msg: format!(
                                     "Unknown event '{}'. Available events: {}",
-                                    event,
-                                    if available.is_empty() {
-                                        "(none)".to_string()
-                                    } else {
-                                        available.join(", ")
-                                    }
+                                    event, available_text
                                 ),
-                                *span,
-                            ));
+                                span: *span,
+                                expected_type: Some("declared event name".to_string()),
+                                found_type: Some(event.clone()),
+                                similar_names: if available.is_empty() {
+                                    None
+                                } else {
+                                    Some(available.iter().map(|name| (*name).to_string()).collect())
+                                },
+                            });
                         }
                         Some(params) => {
                             if args.len() != params.1.len() {
@@ -1877,15 +1918,18 @@ impl TypeChecker {
                     Err(_) => {
                         // Produce a clearer error for simple variable assignments
                         if let Expr::Var(name, _) = target.as_ref() {
-                            return Err(NuError::type_error(
-                                format!(
+                            return Err(NuError::TypeError {
+                                msg: format!(
                                     "cannot assign to immutable binding `{}`; \
                                      use `var {} = ...` for a mutable local, \
                                      or `let {} = <new value> in ...` to shadow the binding.",
                                     name, name, name
                                 ),
-                                *span,
-                            ));
+                                span: *span,
+                                expected_type: Some("mutable binding".to_string()),
+                                found_type: Some("immutable binding".to_string()),
+                                similar_names: None,
+                            });
                         }
                         // For field access, deref, etc., re-run mgu for its error
                         return Err(mgu(&target_ty_resolved, &expected_ref, *span).unwrap_err());
@@ -2999,10 +3043,13 @@ impl TypeChecker {
             arm_types.push(arm_ty);
         }
         if arm_types.is_empty() {
-            return Err(NuError::type_error(
-                "Match expression with no arms".to_string(),
+            return Err(NuError::TypeError {
+                msg: "Match expression with no arms".to_string(),
                 span,
-            ));
+                expected_type: Some("at least one match arm".to_string()),
+                found_type: Some("0 match arms".to_string()),
+                similar_names: None,
+            });
         }
 
         // Unify all arm types
@@ -5035,6 +5082,64 @@ mod tests {
     }
 
     #[test]
+    fn test_same_row_var_record_unify_populates_structured_fields() {
+        // Two open records sharing the SAME row variable but demanding
+        // disjoint extra fields cannot be reconciled. This branch
+        // (`r1 == r2`) is unreachable from ordinary source (generalization
+        // mints a fresh row var per open record), so drive `unify_open_records`
+        // directly and assert the structured TypeError fields are populated.
+        let row = TypeVar(7781);
+        let fs1 = vec![("x".to_string(), Type::int())];
+        let fs2 = vec![("y".to_string(), Type::int())];
+        let err = unify_open_records(
+            &fs1,
+            &Some(Type::Var(row)),
+            &fs2,
+            &Some(Type::Var(row)),
+            Span::new(1, 2),
+        )
+        .unwrap_err();
+        match err {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("record with fields {x}"));
+                assert_eq!(found_type.as_deref(), Some("record with fields {y}"));
+            }
+            other => panic!("expected structured TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_residual_row_tail_record_unify_populates_structured_fields() {
+        // A residual (non-variable) row tail cannot absorb fields — the `_`
+        // fallback arm. Also unreachable from ordinary source; drive directly.
+        let fs1 = vec![("a".to_string(), Type::int())];
+        let fs2 = vec![("b".to_string(), Type::int())];
+        let err = unify_open_records(
+            &fs1,
+            &Some(Type::int()),
+            &fs2,
+            &Some(Type::int()),
+            Span::new(3, 4),
+        )
+        .unwrap_err();
+        match err {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("record with fields {a}"));
+                assert_eq!(found_type.as_deref(), Some("record with fields {b}"));
+            }
+            other => panic!("expected structured TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_unknown_type_name_in_annotation_errors() {
         let result = check_src("fn f(x: Bogus) x\nf(1)");
         match result {
@@ -5122,7 +5227,8 @@ mod tests {
             "#,
         );
         assert!(result.is_err(), "unknown event must be a type error");
-        let err = format!("{}", result.unwrap_err());
+        let error = result.unwrap_err();
+        let err = format!("{}", error);
         assert!(
             err.contains("UnknownEvent"),
             "error must name the bad event: {}",
@@ -5133,6 +5239,22 @@ mod tests {
             "error must list available events: {}",
             err
         );
+        match error {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                similar_names,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("declared event name"));
+                assert_eq!(found_type.as_deref(), Some("UnknownEvent"));
+                assert_eq!(
+                    similar_names.as_deref(),
+                    Some(["KnownEvent".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected structured TypeError, got {:?}", other),
+        }
     }
 
     #[test]

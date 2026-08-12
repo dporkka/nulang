@@ -1385,6 +1385,17 @@ impl NuError {
         }
     }
 
+    /// Construct a CapError with a concise rule explanation rendered as a
+    /// `note:` line by `Display`. Prefer this over [`NuError::cap_error`]
+    /// when the violated capability rule is known at the call site.
+    pub fn cap_error_explained(msg: String, span: Span, explanation: impl Into<String>) -> Self {
+        NuError::CapError {
+            msg,
+            span,
+            explanation: Some(explanation.into()),
+        }
+    }
+
     /// Construct an EffectError.
     pub fn effect_error(msg: String, span: Span) -> Self {
         NuError::EffectError {

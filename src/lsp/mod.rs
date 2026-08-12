@@ -1699,10 +1699,22 @@ impl NulangLanguageServer {
         let mut cap_analyzer = CapabilityAnalyzer::new();
         let cap_ctx = CapContext::new();
         for decl in crate::effect_checker::flatten_decls(&ast.decls) {
-            if let crate::ast::Decl::Function { body, .. } = decl {
-                if let Err(e) = cap_analyzer.infer_cap(&cap_ctx, body) {
-                    diagnostics.extend(nu_error_to_diagnostic(e));
+            match decl {
+                crate::ast::Decl::Function { body, params, .. } => {
+                    let ctx = cap_ctx.with_params(params);
+                    if let Err(e) = cap_analyzer.infer_cap(&ctx, body) {
+                        diagnostics.extend(nu_error_to_diagnostic(e));
+                    }
                 }
+                crate::ast::Decl::Actor { behaviors, .. } => {
+                    for behavior in behaviors {
+                        let ctx = cap_ctx.with_params(&behavior.params);
+                        if let Err(e) = cap_analyzer.infer_cap(&ctx, &behavior.body) {
+                            diagnostics.extend(nu_error_to_diagnostic(e));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         for msg in &cap_analyzer.diagnostics {
