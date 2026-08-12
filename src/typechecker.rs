@@ -5082,6 +5082,64 @@ mod tests {
     }
 
     #[test]
+    fn test_same_row_var_record_unify_populates_structured_fields() {
+        // Two open records sharing the SAME row variable but demanding
+        // disjoint extra fields cannot be reconciled. This branch
+        // (`r1 == r2`) is unreachable from ordinary source (generalization
+        // mints a fresh row var per open record), so drive `unify_open_records`
+        // directly and assert the structured TypeError fields are populated.
+        let row = TypeVar(7781);
+        let fs1 = vec![("x".to_string(), Type::int())];
+        let fs2 = vec![("y".to_string(), Type::int())];
+        let err = unify_open_records(
+            &fs1,
+            &Some(Type::Var(row)),
+            &fs2,
+            &Some(Type::Var(row)),
+            Span::new(1, 2),
+        )
+        .unwrap_err();
+        match err {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("record with fields {x}"));
+                assert_eq!(found_type.as_deref(), Some("record with fields {y}"));
+            }
+            other => panic!("expected structured TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_residual_row_tail_record_unify_populates_structured_fields() {
+        // A residual (non-variable) row tail cannot absorb fields — the `_`
+        // fallback arm. Also unreachable from ordinary source; drive directly.
+        let fs1 = vec![("a".to_string(), Type::int())];
+        let fs2 = vec![("b".to_string(), Type::int())];
+        let err = unify_open_records(
+            &fs1,
+            &Some(Type::int()),
+            &fs2,
+            &Some(Type::int()),
+            Span::new(3, 4),
+        )
+        .unwrap_err();
+        match err {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("record with fields {a}"));
+                assert_eq!(found_type.as_deref(), Some("record with fields {b}"));
+            }
+            other => panic!("expected structured TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_unknown_type_name_in_annotation_errors() {
         let result = check_src("fn f(x: Bogus) x\nf(1)");
         match result {
