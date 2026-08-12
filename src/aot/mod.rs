@@ -66,6 +66,7 @@ impl AotModule {
         // Set up Cranelift with the target ISA.
         let mut flag_builder = settings::builder();
         let _ = flag_builder.set("enable_simd", "true");
+        let _ = flag_builder.set("opt_level", "speed");
         let isa_builder = create_isa_builder(target)?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
