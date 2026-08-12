@@ -969,7 +969,10 @@ pub fn process_network_packets(
                 // incarnation numbers win (see ClusterState::merge_membership).
                 // Each entry carries its own listen address, so no extra
                 // connection bookkeeping is needed for the relayed nodes.
-                cluster.merge_membership(members);
+                // The sender's self-entry is authoritative: it overrides a
+                // heartbeat-discovered ephemeral source-port address for
+                // the sending node (see `merge_membership_from_sender`).
+                cluster.merge_membership_from_sender(members, incoming.from_node);
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::SpawnRequest {

@@ -1048,6 +1048,29 @@ impl ClusterState {
     /// partial-view notes in the merge body). Returns `true` if any
     /// changes were made to our membership table.
     pub fn merge_membership(&mut self, gossip: Vec<NodeGossip>) -> bool {
+        self.merge_membership_inner(gossip, None)
+    }
+
+    /// Merge gossip, treating the gossip sender's own entry as authoritative.
+    ///
+    /// A node is the ultimate authority on its own listen address and
+    /// status, so when a peer gossips we adopt its self-entry (for the
+    /// sending node) regardless of incarnation. This corrects addresses
+    /// that were discovered via the heartbeat fallback path
+    /// (`connection_addr`), which records a joiner's *ephemeral source
+    /// port* rather than its listen address; without the override that
+    /// wrong address survives at equal incarnation forever and remote
+    /// messages dial a dead port. The `sender` is the node that sent this
+    /// gossip (e.g. the transport's `from_node` on `Packet::Gossip`).
+    pub fn merge_membership_from_sender(
+        &mut self,
+        gossip: Vec<NodeGossip>,
+        sender: NodeId,
+    ) -> bool {
+        self.merge_membership_inner(gossip, Some(sender))
+    }
+
+    fn merge_membership_inner(&mut self, gossip: Vec<NodeGossip>, sender: Option<NodeId>) -> bool {
         let mut changed = false;
 
         let now = self.now();
@@ -1057,6 +1080,12 @@ impl ClusterState {
                 continue;
             }
 
+            // The gossip sender asserts its own identity: its self-entry
+            // is authoritative for its listen address and status, so it
+            // wins even at equal/lower incarnation (see doc on
+            // `merge_membership_from_sender`).
+            let authoritative_self = sender == Some(entry.node_id);
+
             match self.members.get_mut(&entry.node_id) {
                 Some(existing) => {
                     let stored_incarnation = existing
@@ -1064,19 +1093,20 @@ impl ClusterState {
                         .get("_incarnation")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    // Higher incarnation wins. A strictly-newer entry
-                    // refreshes `last_heartbeat` and applies the new
-                    // status. An equal-incarnation re-broadcast of a
-                    // LIVE entry also refreshes the timestamp: under
-                    // partial-view membership most members are never
-                    // heartbeated directly, so gossip is their only
-                    // liveness evidence. Failed entries are never
-                    // refreshed — that would let surviving nodes keep a
-                    // dead peer fresh forever and defeat the failure
-                    // detector. (Direct heartbeats refresh via
-                    // `handle_heartbeat`.)
-                    if entry.incarnation > stored_incarnation {
+                    // Higher incarnation wins, and the sender's own entry
+                    // always wins. A strictly-newer entry refreshes
+                    // `last_heartbeat` and applies the new status. An
+                    // equal-incarnation re-broadcast of a LIVE entry also
+                    // refreshes the timestamp: under partial-view
+                    // membership most members are never heartbeated
+                    // directly, so gossip is their only liveness evidence.
+                    // Failed entries are never refreshed — that would let
+                    // surviving nodes keep a dead peer fresh forever and
+                    // defeat the failure detector. (Direct heartbeats
+                    // refresh via `handle_heartbeat`.)
+                    if entry.incarnation > stored_incarnation || authoritative_self {
                         let old_status = existing.status;
+                        let old_addr = existing.address;
                         existing.last_heartbeat = now;
                         existing.status = entry.status;
                         existing.address = entry.address;
@@ -1089,6 +1119,17 @@ impl ClusterState {
                             if entry.status == NodeStatus::Failed {
                                 self.failed_nodes.insert(entry.node_id, now);
                             }
+                        } else if authoritative_self && old_addr != entry.address {
+                            // A sender self-correction of its own listen
+                            // address is a real table mutation even when
+                            // the status is unchanged. Bump the entry past
+                            // the sender's baseline incarnation so the
+                            // corrected address PROPAGATES: peers that
+                            // learned the stale address via relayed gossip
+                            // (equal incarnation) must accept the fix when
+                            // we re-gossip it.
+                            changed = true;
+                            Self::bump_entry_incarnation(existing);
                         }
                     } else if !self.active_view.contains(&entry.node_id)
                         && matches!(existing.status, NodeStatus::Healthy | NodeStatus::Joining)
@@ -1496,6 +1537,56 @@ mod tests {
         let changed = cs.merge_membership(gossip);
         assert!(changed);
         assert_eq!(cs.get_node(pid).unwrap().status, NodeStatus::Leaving);
+    }
+
+    // -- 12b. Sender self-entry is authoritative over a discovered address --
+
+    #[test]
+    fn test_merge_membership_sender_self_entry_corrects_discovered_address() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+
+        // A peer is discovered via a RELAYED gossip entry (a third node's
+        // view) carrying its ephemeral SOURCE port instead of its listen
+        // address — the `connection_addr` fallback path in the runtime. It
+        // is recorded at incarnation 1, so it is now a normal peer entry,
+        // not a fresh heartbeat.
+        let peer = NodeId(77);
+        let source_port = addr(9777);
+        let wrong_view = vec![NodeGossip {
+            node_id: peer,
+            address: source_port,
+            status: NodeStatus::Healthy,
+            incarnation: 1,
+        }];
+        cs.merge_membership(wrong_view);
+        assert_eq!(cs.get_node(peer).unwrap().address, source_port);
+
+        // The peer's own gossip entry advertises its real listen address
+        // at the SAME (baseline) incarnation. Plain `merge_membership`
+        // refuses it — equal incarnation only refreshes liveness — so the
+        // wrong source-port address survives.
+        let listen = addr(9900);
+        let self_entry = vec![NodeGossip {
+            node_id: peer,
+            address: listen,
+            status: NodeStatus::Healthy,
+            incarnation: 1,
+        }];
+        cs.merge_membership(self_entry.clone());
+        assert_eq!(
+            cs.get_node(peer).unwrap().address,
+            source_port,
+            "equal-incarnation relayed gossip must not overwrite the address"
+        );
+
+        // But when the gossip comes FROM that peer directly, its self-entry
+        // is authoritative and corrects the address.
+        let changed = cs.merge_membership_from_sender(self_entry, peer);
+        assert!(changed);
+        assert_eq!(cs.get_node(peer).unwrap().address, listen);
+        assert_eq!(cs.get_node(peer).unwrap().status, NodeStatus::Healthy);
     }
 
     // -- 13. Join cluster via seed -----------------------------------------
