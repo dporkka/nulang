@@ -2090,6 +2090,21 @@ impl VM {
             .unwrap_or(0)
     }
 
+    /// Number of scalar (non-type-directed) regions JIT-compiled on this VM.
+    ///
+    /// Distinct from [`Self::jit_typed_compiled_count`]: regions whose
+    /// registers can't be provably typed (e.g. containing `PerformDirect`,
+    /// which yields to the interpreter and clobbers the register set) fall
+    /// back to the scalar compiler, which is still a real JIT compile that
+    /// must agree with the interpreter. Tests asserting the JIT *engaged* for
+    /// such regions should check this count, not the typed one.
+    pub fn jit_compiled_count(&self) -> usize {
+        self.jit_session
+            .as_ref()
+            .map(|j| j.compiled_count())
+            .unwrap_or(0)
+    }
+
     /// Discard all closure capture environments.
     ///
     /// Only call this when no live value can reference an existing

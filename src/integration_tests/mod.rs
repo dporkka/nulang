@@ -2049,6 +2049,202 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// A resuming effect handler performed INSIDE a hot loop (past the JIT
+    /// tier-up threshold) must produce the same result under JIT and pure
+    /// interpretation. `PerformDirect` is in the JIT compilable set but
+    /// compiles to a yield-to-interpreter: the compiled region sets a yield
+    /// PC at the PerformDirect and `try_jit_execute` re-enters the
+    /// interpreter there, which captures the continuation, dispatches the
+    /// handler, and resumes. This is the exact interaction the differential
+    /// fuzzer cannot reach (its corpus contains no effect programs), so this
+    /// test pins interp==JIT for an effect performed once per loop iteration
+    /// for 2000 iterations.
+    #[test]
+    fn test_effect_in_hot_loop_jit_matches_interpreter() {
+        let source = |n: i64| {
+            format!(
+                r#"
+                effect Ticker {{ next: Int -> Int }}
+                fn run(n: Int) -> Int {{
+                    var acc = 0;
+                    var i = 0;
+                    handle {{
+                        while i < n {{
+                            acc = perform Ticker.next(i);
+                            i = i + 1;
+                        }}
+                    }} {{
+                        | Ticker.next(x) resume => resume(x + 1)
+                    }}
+                    acc
+                }}
+                run({})
+                "#,
+                n
+            )
+        };
+
+        // Interpreter on the SAME program: n=2000, purely interpreted
+        // (below the tiering threshold this would also run, but we run it
+        // through `run_source`'s plain interpreter for the parity baseline).
+        let (interp, _ty) = run_source(&source(2000)).unwrap();
+        assert_eq!(
+            interp.as_int(),
+            Some(2000),
+            "interpreter: 2000 iterations resume x+1 -> acc=2000"
+        );
+
+        // Hot: forces JIT tier-up of the loop body containing PerformDirect.
+        let (module, _ty) = compile_source(&source(2000)).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let hot = vm.run().unwrap();
+        assert_eq!(
+            hot.as_raw(),
+            interp.as_raw(),
+            "JIT result must match interpreter for an effect performed in a hot loop"
+        );
+        assert_eq!(hot.as_int(), Some(2000), "2000 iterations resume x+1 -> acc=2000");
+        // `PerformDirect` is a safepoint that yields to the interpreter and
+        // clobbers the register set, so typed (guard-stripped) compilation
+        // cannot apply — the loop compiles through the scalar JIT path. Assert
+        // the JIT genuinely engaged (not silently interpreted) via the scalar
+        // count, and that the typed count stayed 0 (honest about mechanism).
+        assert!(
+            vm.jit_compiled_count() >= 1,
+            "hot effect loop must JIT-compile (scalar path)"
+        );
+        assert_eq!(
+            vm.jit_typed_compiled_count(),
+            0,
+            "effect-containing region must not use typed compilation (PerformDirect clobbers regs)"
+        );
+    }
+
+    /// The value a resuming handler feeds back through `resume` must flow
+    /// across the JIT yield boundary into subsequent arithmetic, bit-for-bit
+    /// matching the interpreter. Here `Double.apply(i)` resumes with `i+1`,
+    /// and the loop accumulates `v * 2` where `v` is the resumed value read
+    /// at the perform site. The resumed value crosses from the handler
+    /// (interpreted, since `PerformDirect` yields) back into the JIT-compiled
+    /// loop body's `acc += v * 2`, pinning the register-round-trip at the
+    /// yield point. Expected: Σ 2(i+1) for i in 0..n == n(n+1).
+    #[test]
+    fn test_effect_resume_value_flows_into_jit_loop_arithmetic() {
+        let source = |n: i64| {
+            format!(
+                r#"
+                effect Double {{ apply: Int -> Int }}
+                fn run(n: Int) -> Int {{
+                    var acc = 0;
+                    var i = 0;
+                    handle {{
+                        while i < n {{
+                            let v = perform Double.apply(i);
+                            acc = acc + v * 2;
+                            i = i + 1;
+                        }}
+                    }} {{
+                        | Double.apply(x) resume => resume(x + 1)
+                    }}
+                    acc
+                }}
+                run({})
+                "#,
+                n
+            )
+        };
+
+        // Interpreter baseline.
+        let (interp, _ty) = run_source(&source(2000)).unwrap();
+        let n = 2000i64;
+        assert_eq!(
+            interp.as_int(),
+            Some(n * (n + 1)),
+            "Σ 2(i+1) for i in 0..n == n(n+1) = {}",
+            n * (n + 1)
+        );
+
+        // JIT: the resumed value must survive the yield boundary identically.
+        let (module, _ty) = compile_source(&source(2000)).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let hot = vm.run().unwrap();
+        assert_eq!(
+            hot.as_raw(),
+            interp.as_raw(),
+            "resumed value flowing into JIT-compiled arithmetic must match interpreter"
+        );
+        assert_eq!(hot.as_int(), Some(n * (n + 1)));
+        assert!(
+            vm.jit_compiled_count() >= 1,
+            "hot effect loop must JIT-compile (scalar path)"
+        );
+    }
+
+    /// Two distinct effect ops (`add`/`mul`) performed SEQUENTIALLY each
+    /// hot-loop iteration must each route through the correct resuming
+    /// handler and feed the chained value across the JIT yield boundary. This
+    /// pins handler-table dispatch + per-op continuation capture at scale,
+    /// under the JIT: `PerformDirect` yields to the interpreter for EACH op,
+    /// the interpreter dispatches the matching handler arm and resumes, and
+    /// the resumed value flows into the next perform. Unlike the if/else
+    /// form (which is correct but fragments the JIT region), the straight-line
+    /// loop body compiles as one region, so `jit_compiled_count() >= 1`.
+    /// Expected for last i = n-1: acc = (i+10)*3.
+    #[test]
+    fn test_multi_effect_dispatch_in_hot_loop_jit() {
+        let source = |n: i64| {
+            format!(
+                r#"
+                effect Ops {{
+                  add: Int -> Int
+                  mul: Int -> Int
+                }}
+                fn run(n: Int) -> Int {{
+                    var acc = 0;
+                    var i = 0;
+                    handle {{
+                        while i < n {{
+                            let a = perform Ops.add(i);
+                            let b = perform Ops.mul(a);
+                            acc = b;
+                            i = i + 1;
+                        }}
+                    }} {{
+                        | Ops.add(x) resume => resume(x + 10)
+                        | Ops.mul(x) resume => resume(x * 3)
+                    }}
+                    acc
+                }}
+                run({})
+                "#,
+                n
+            )
+        };
+
+        // Interpreter baseline.
+        let (interp, _ty) = run_source(&source(2000)).unwrap();
+        // Last i is 1999 -> add: 2009, then mul: 2009*3 = 6027.
+        assert_eq!(interp.as_int(), Some(6027), "interpreter multi-effect result");
+
+        // JIT: both ops must dispatch correctly across the yield boundary.
+        let (module, _ty) = compile_source(&source(2000)).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let hot = vm.run().unwrap();
+        assert_eq!(
+            hot.as_raw(),
+            interp.as_raw(),
+            "multi-effect dispatch in a hot loop must match interpreter under JIT"
+        );
+        assert_eq!(hot.as_int(), Some(6027));
+        assert!(
+            vm.jit_compiled_count() >= 1,
+            "hot multi-effect loop must JIT-compile (scalar path)"
+        );
+    }
+
     /// Hot float arithmetic with a nonzero divisor: the typed JIT path
     /// must produce bit-identical results to the interpreter. The
     /// recurrence acc' = (2*acc + 1)/4 converges to exactly 0.5.
