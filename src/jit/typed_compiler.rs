@@ -34,7 +34,6 @@ use std::collections::HashMap;
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::jit::compiler::{emit_arr_load, emit_yield_pc, CompileError};
-use crate::jit::JitSession;
 
 // ---------------------------------------------------------------------------
 // NaN-tag constants and CLIF helpers — single source in `cranelift_utils`
@@ -870,23 +869,14 @@ pub fn compile_bytecode_region_typed(
         blocks.insert(i, builder.create_block());
     }
     let return_block = builder.create_block();
-    // Inject JIT safepoint: decrement counter, yield if exhausted.
-    // Pointer is never null (initialized to a VM-owned dummy).
-    let safepoint_ptr_addr = JitSession::safepoint_ptr_addr();
-    let ptr_addr = builder.ins().iconst(types::I64, safepoint_ptr_addr);
-    let counter_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_addr, 0);
-    let counter = builder
-        .ins()
-        .load(types::I64, MemFlags::new(), counter_ptr, 0);
-    let one = builder.ins().iconst(types::I64, 1);
-    let new_counter = builder.ins().isub(counter, one);
-    builder
-        .ins()
-        .store(MemFlags::new(), new_counter, counter_ptr, 0);
+    // Use a thread-local helper for the safepoint so concurrent VMs do not
+    // share a process-global actor reduction counter.
     let zero = builder.ins().iconst(types::I64, 0);
-    let exhausted = builder
+    let safepoint = builder
         .ins()
-        .icmp(IntCC::SignedLessThanOrEqual, new_counter, zero);
+        .call(helpers["nulang_jit_safepoint_check"], &[zero]);
+    let safepoint_result = builder.inst_results(safepoint)[0];
+    let exhausted = builder.ins().icmp(IntCC::NotEqual, safepoint_result, zero);
     let yield_block = builder.create_block();
     if let Some(&first_block) = blocks.get(&start_offset) {
         builder
@@ -898,12 +888,12 @@ pub fn compile_bytecode_region_typed(
             .brif(exhausted, yield_block, &[], return_block, &[]);
     }
 
-    // Yield block: store 0 to JIT_YIELD_PC, then return.
+    // Yield block: mark a relative resume offset in thread-local state.
     builder.switch_to_block(yield_block);
-    let yield_pc_addr = JitSession::yield_pc_addr();
-    let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
     let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().store(MemFlags::new(), zero, yield_pc_ptr, 0);
+    builder
+        .ins()
+        .call(helpers["nulang_jit_set_yield_pc"], &[zero]);
     builder.ins().jump(return_block, &[]);
 
     // Seal all new blocks.
@@ -1437,7 +1427,12 @@ pub fn compile_bytecode_region_typed(
                 if let Some(&target_block) = blocks.get(&target) {
                     builder.ins().jump(target_block, &[]);
                 } else {
-                    emit_yield_pc(&mut builder, start_offset, target);
+                    emit_yield_pc(
+                        &mut builder,
+                        helpers["nulang_jit_set_branch_exit_pc"],
+                        start_offset,
+                        target,
+                    );
                     builder.ins().jump(return_block, &[]);
                 }
             }
@@ -1459,7 +1454,12 @@ pub fn compile_bytecode_region_typed(
                     let outside = builder.create_block();
                     builder.ins().brif(is_true, outside, &[], fallthrough, &[]);
                     builder.switch_to_block(outside);
-                    emit_yield_pc(&mut builder, start_offset, target);
+                    emit_yield_pc(
+                        &mut builder,
+                        helpers["nulang_jit_set_branch_exit_pc"],
+                        start_offset,
+                        target,
+                    );
                     builder.ins().jump(return_block, &[]);
                     builder.seal_block(outside);
                 }
@@ -1480,7 +1480,12 @@ pub fn compile_bytecode_region_typed(
                     let outside = builder.create_block();
                     builder.ins().brif(is_false, outside, &[], fallthrough, &[]);
                     builder.switch_to_block(outside);
-                    emit_yield_pc(&mut builder, start_offset, target);
+                    emit_yield_pc(
+                        &mut builder,
+                        helpers["nulang_jit_set_branch_exit_pc"],
+                        start_offset,
+                        target,
+                    );
                     builder.ins().jump(return_block, &[]);
                     builder.seal_block(outside);
                 }

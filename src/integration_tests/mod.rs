@@ -8619,7 +8619,11 @@ match { a: 2, b: 9 } with {
             let val = run_source_to_value(r#""abc" == "abc""#).expect("run");
             assert_eq!(val.as_bool(), Some(true), "equal strings must be == ");
             let val = run_source_to_value(r#""abc" == "abd""#).expect("run");
-            assert_eq!(val.as_bool(), Some(false), "different strings must not be ==");
+            assert_eq!(
+                val.as_bool(),
+                Some(false),
+                "different strings must not be =="
+            );
         }
 
         #[test]
@@ -8630,7 +8634,11 @@ match { a: 2, b: 9 } with {
             let wasm = compile_source_to_wasm(r#"("a" + "bc") == "abc""#).expect("compile");
             let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).expect("runtime");
             let val = rt.run().expect("run");
-            assert_eq!(val.as_bool(), Some(true), "concat result must equal its text");
+            assert_eq!(
+                val.as_bool(),
+                Some(true),
+                "concat result must equal its text"
+            );
         }
 
         #[test]
@@ -8687,20 +8695,18 @@ match { a: 2, b: 9 } with {
         fn test_wasm_run_record() {
             // Record literals + named field access (LoadFieldNamed) must work;
             // previously Record/LoadFieldNamed silently compiled to nil.
-            let val = run_source_to_value(
-                r#"fn f() -> Int { let r = {x: 1, y: 2} in r.x + r.y } f()"#,
-            )
-            .expect("run");
+            let val =
+                run_source_to_value(r#"fn f() -> Int { let r = {x: 1, y: 2} in r.x + r.y } f()"#)
+                    .expect("run");
             assert_eq!(val.as_int(), Some(3), "r.x + r.y must be 3");
         }
 
         #[test]
         fn test_wasm_run_tuple() {
             // Tuple literals + positional field access (LoadFieldPos).
-            let val = run_source_to_value(
-                r#"fn f() -> Int { let t = (1, 2, 3) in t.0 + t.2 } f()"#,
-            )
-            .expect("run");
+            let val =
+                run_source_to_value(r#"fn f() -> Int { let t = (1, 2, 3) in t.0 + t.2 } f()"#)
+                    .expect("run");
             assert_eq!(val.as_int(), Some(4), "t.0 + t.2 must be 4");
         }
 
@@ -8862,7 +8868,13 @@ match { a: 2, b: 9 } with {
                 arg,
                 crate::mir::RValue::Const(crate::bytecode::Constant::Int(21)),
             );
-            builder.assign(out, crate::mir::RValue::FFICall { idx: 0, args: vec![arg] });
+            builder.assign(
+                out,
+                crate::mir::RValue::FFICall {
+                    idx: 0,
+                    args: vec![arg],
+                },
+            );
             builder.terminate(crate::mir::Terminator::Return(Some(out)));
             let func = builder.build();
             let module = crate::mir::Module {
@@ -8875,7 +8887,9 @@ match { a: 2, b: 9 } with {
                 foreign_functions: vec![crate::mir::ForeignFunction {
                     library: String::new(),
                     symbol: "wasm_double".into(),
-                    params: vec![crate::types::Type::Primitive(crate::types::PrimitiveType::Int)],
+                    params: vec![crate::types::Type::Primitive(
+                        crate::types::PrimitiveType::Int,
+                    )],
                     ret: crate::types::Type::Primitive(crate::types::PrimitiveType::Int),
                 }],
             };
@@ -8907,7 +8921,9 @@ match { a: 2, b: 9 } with {
             }
             let mut builder = crate::mir::FunctionBuilder::new(
                 "main",
-                Some(crate::types::Type::Primitive(crate::types::PrimitiveType::Int)),
+                Some(crate::types::Type::Primitive(
+                    crate::types::PrimitiveType::Int,
+                )),
             );
             let s = builder.add_temp(crate::types::Type::string());
             let out = builder.add_temp(crate::types::Type::int());
@@ -8915,7 +8931,13 @@ match { a: 2, b: 9 } with {
                 s,
                 crate::mir::RValue::Const(crate::bytecode::Constant::String("nulang".into())),
             );
-            builder.assign(out, crate::mir::RValue::FFICall { idx: 0, args: vec![s] });
+            builder.assign(
+                out,
+                crate::mir::RValue::FFICall {
+                    idx: 0,
+                    args: vec![s],
+                },
+            );
             builder.terminate(crate::mir::Terminator::Return(Some(out)));
             let func = builder.build();
             let module = crate::mir::Module {
@@ -8943,11 +8965,11 @@ match { a: 2, b: 9 } with {
         fn test_wasm_run_array_oob() {
             // Out-of-range and negative array indices must yield nil, not
             // garbage. In-range access still works.
-            let v = run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[5] } f()"#)
-                .expect("run");
+            let v =
+                run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[5] } f()"#).expect("run");
             assert!(v.is_nil(), "a[5] must be nil, got {:?}", v.as_int());
-            let v = run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[-1] } f()"#)
-                .expect("run");
+            let v =
+                run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[-1] } f()"#).expect("run");
             assert!(v.is_nil(), "a[-1] must be nil");
             let v = run_source_to_value(r#"fn f() -> Int { let a = [1, 2]; a[0] + a[1] } f()"#)
                 .expect("run");

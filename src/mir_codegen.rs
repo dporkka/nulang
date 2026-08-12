@@ -1589,9 +1589,7 @@ fn fold_rvalue(
             }
         }
         RValue::StrConcat(a, b) => match (const_locals.get(&a), const_locals.get(&b)) {
-            (Some(CString(sa)), Some(CString(sb))) => {
-                RValue::Const(CString(sa.clone() + sb))
-            }
+            (Some(CString(sa)), Some(CString(sb))) => RValue::Const(CString(sa.clone() + sb)),
             _ => RValue::StrConcat(a, b),
         },
         other => other,
@@ -1724,9 +1722,8 @@ fn thread_jumps(func: &mut mir::Function) -> bool {
                 && matches!(b.terminator, mir::Terminator::Jump(t) if t != b.id)
         })
         .collect();
-    let is_tramp = |id: mir::BlockId| -> bool {
-        is_trampoline.get(id.0 as usize).copied().unwrap_or(false)
-    };
+    let is_tramp =
+        |id: mir::BlockId| -> bool { is_trampoline.get(id.0 as usize).copied().unwrap_or(false) };
 
     // Follow each trampoline's Jump chain to its final non-trampoline
     // target. A cycle (or a chain into the entry block) yields no entry —
@@ -1969,7 +1966,10 @@ fn rvalue_reads(rv: &mir::RValue, out: &mut HashSet<mir::LocalId>) {
         | RValue::Binary(_, arr, idx)
         | RValue::StringEq(arr, idx)
         | RValue::StrConcat(arr, idx)
-        | RValue::Migrate { actor: arr, node: idx } => {
+        | RValue::Migrate {
+            actor: arr,
+            node: idx,
+        } => {
             out.insert(*arr);
             out.insert(*idx);
         }
@@ -2015,7 +2015,9 @@ fn rvalue_reads(rv: &mir::RValue, out: &mut HashSet<mir::LocalId>) {
         RValue::ReceiveWait { timeout, .. } => {
             out.insert(*timeout);
         }
-        RValue::Spawn { init, target_node, .. } => {
+        RValue::Spawn {
+            init, target_node, ..
+        } => {
             if let Some(n) = target_node {
                 out.insert(*n);
             }

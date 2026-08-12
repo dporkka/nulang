@@ -99,7 +99,8 @@ impl CoreVM {
     }
 
     pub fn load_nbc(&mut self, data: &[u8]) -> Result<usize, String> {
-        let artifact = <crate::bytecode::CodeModule>::from_nbc(data).map_err(|e| format!("Failed to load .nbc: {e}"))?;
+        let artifact = <crate::bytecode::CodeModule>::from_nbc(data)
+            .map_err(|e| format!("Failed to load .nbc: {e}"))?;
         let module_idx = self.modules.len();
         self.modules.push(artifact.module);
         Ok(module_idx)
@@ -178,7 +179,11 @@ impl CoreVM {
             }
         }
 
-        let result = self.frames.last().map(|f| f.regs[0]).unwrap_or(value_layout::TAG_UNIT);
+        let result = self
+            .frames
+            .last()
+            .map(|f| f.regs[0])
+            .unwrap_or(value_layout::TAG_UNIT);
         if value_layout::is_int_raw(result) {
             self.exit_code = value_layout::as_int_raw(result);
         }
@@ -204,7 +209,9 @@ impl CoreVM {
             OpCode::Const0 => self.frames[frame_idx].regs[op1 as usize] = value_layout::tag_int(0),
             OpCode::Const1 => self.frames[frame_idx].regs[op1 as usize] = value_layout::tag_int(1),
             OpCode::Const2 => self.frames[frame_idx].regs[op1 as usize] = value_layout::tag_int(2),
-            OpCode::ConstM1 => self.frames[frame_idx].regs[op1 as usize] = value_layout::tag_int(-1),
+            OpCode::ConstM1 => {
+                self.frames[frame_idx].regs[op1 as usize] = value_layout::tag_int(-1)
+            }
 
             OpCode::ConstU => {
                 let idx = imm16 as usize;
@@ -241,17 +248,20 @@ impl CoreVM {
             OpCode::IAdd => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
                 let b = value_layout::as_int_raw(self.frames[frame_idx].regs[op2 as usize]);
-                self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_int(a.wrapping_add(b));
+                self.frames[frame_idx].regs[op3 as usize] =
+                    value_layout::tag_int(a.wrapping_add(b));
             }
             OpCode::ISub => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
                 let b = value_layout::as_int_raw(self.frames[frame_idx].regs[op2 as usize]);
-                self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_int(a.wrapping_sub(b));
+                self.frames[frame_idx].regs[op3 as usize] =
+                    value_layout::tag_int(a.wrapping_sub(b));
             }
             OpCode::IMul => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
                 let b = value_layout::as_int_raw(self.frames[frame_idx].regs[op2 as usize]);
-                self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_int(a.wrapping_mul(b));
+                self.frames[frame_idx].regs[op3 as usize] =
+                    value_layout::tag_int(a.wrapping_mul(b));
             }
             OpCode::IDiv => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
@@ -286,12 +296,14 @@ impl CoreVM {
             OpCode::Shl => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
                 let b = value_layout::as_int_raw(self.frames[frame_idx].regs[op2 as usize]);
-                self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_int(a << (b as u32).min(63));
+                self.frames[frame_idx].regs[op3 as usize] =
+                    value_layout::tag_int(a << (b as u32).min(63));
             }
             OpCode::Shr => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
                 let b = value_layout::as_int_raw(self.frames[frame_idx].regs[op2 as usize]);
-                self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_int(a >> (b as u32).min(63));
+                self.frames[frame_idx].regs[op3 as usize] =
+                    value_layout::tag_int(a >> (b as u32).min(63));
             }
 
             OpCode::ICmpEq => {
@@ -325,27 +337,34 @@ impl CoreVM {
                 self.frames[frame_idx].regs[op2 as usize] = value_layout::tag_bool(!truthy);
             }
             OpCode::And => {
-                let a = (self.frames[frame_idx].regs[op1 as usize] & value_layout::PAYLOAD_MASK) != 0;
-                let b = (self.frames[frame_idx].regs[op2 as usize] & value_layout::PAYLOAD_MASK) != 0;
+                let a =
+                    (self.frames[frame_idx].regs[op1 as usize] & value_layout::PAYLOAD_MASK) != 0;
+                let b =
+                    (self.frames[frame_idx].regs[op2 as usize] & value_layout::PAYLOAD_MASK) != 0;
                 self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_bool(a && b);
             }
             OpCode::Or => {
-                let a = (self.frames[frame_idx].regs[op1 as usize] & value_layout::PAYLOAD_MASK) != 0;
-                let b = (self.frames[frame_idx].regs[op2 as usize] & value_layout::PAYLOAD_MASK) != 0;
+                let a =
+                    (self.frames[frame_idx].regs[op1 as usize] & value_layout::PAYLOAD_MASK) != 0;
+                let b =
+                    (self.frames[frame_idx].regs[op2 as usize] & value_layout::PAYLOAD_MASK) != 0;
                 self.frames[frame_idx].regs[op3 as usize] = value_layout::tag_bool(a || b);
             }
 
             OpCode::Jmp => {
-                self.frames[frame_idx].pc = (self.frames[frame_idx].pc as i64 + imm16 as i16 as i64 - 1) as usize;
+                self.frames[frame_idx].pc =
+                    (self.frames[frame_idx].pc as i64 + imm16 as i16 as i64 - 1) as usize;
             }
             OpCode::JmpT => {
                 if (self.frames[frame_idx].regs[op1 as usize] & value_layout::PAYLOAD_MASK) != 0 {
-                    self.frames[frame_idx].pc = (self.frames[frame_idx].pc as i64 + offset16 as i64 - 1) as usize;
+                    self.frames[frame_idx].pc =
+                        (self.frames[frame_idx].pc as i64 + offset16 as i64 - 1) as usize;
                 }
             }
             OpCode::JmpF => {
                 if (self.frames[frame_idx].regs[op1 as usize] & value_layout::PAYLOAD_MASK) == 0 {
-                    self.frames[frame_idx].pc = (self.frames[frame_idx].pc as i64 + offset16 as i64 - 1) as usize;
+                    self.frames[frame_idx].pc =
+                        (self.frames[frame_idx].pc as i64 + offset16 as i64 - 1) as usize;
                 }
             }
 
@@ -388,8 +407,9 @@ impl CoreVM {
                         func_idx: payload as usize,
                         captures: Vec::new(),
                     });
-                    self.frames[frame_idx].regs[op1 as usize] =
-                        value_layout::tag_closure(CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK));
+                    self.frames[frame_idx].regs[op1 as usize] = value_layout::tag_closure(
+                        CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
+                    );
                     idx
                 };
                 let env = &mut self.closure_envs[env_idx];
@@ -450,7 +470,12 @@ impl CoreVM {
 
             OpCode::Resume => {
                 let val = self.frames[frame_idx].regs[op1 as usize];
-                if let Some(hf) = self.handler_stack.iter_mut().rev().find(|h| h.saved_regs.is_some()) {
+                if let Some(hf) = self
+                    .handler_stack
+                    .iter_mut()
+                    .rev()
+                    .find(|h| h.saved_regs.is_some())
+                {
                     if let Some(regs) = hf.saved_regs.take() {
                         self.frames[frame_idx].regs = regs;
                         self.frames[frame_idx].regs[hf.resume_dst as usize] = val;
@@ -527,9 +552,13 @@ impl CoreVM {
             let table_idx = instr.op1 as usize;
             let binding_idx = instr.op2 as usize;
             let module = &self.modules[module_idx];
-            let table = module.handler_tables.get(table_idx)
+            let table = module
+                .handler_tables
+                .get(table_idx)
                 .ok_or_else(|| format!("Handler table {table_idx} not found"))?;
-            let binding = table.bindings.get(binding_idx)
+            let binding = table
+                .bindings
+                .get(binding_idx)
                 .ok_or_else(|| format!("Binding {binding_idx} not found"))?;
             binding.effect_name.clone()
         } else {
@@ -561,9 +590,16 @@ impl CoreVM {
                     use std::io::BufRead;
                     let stdin = std::io::stdin();
                     let mut line = String::new();
-                    stdin.lock().read_line(&mut line).map_err(|e| format!("IO.read: {e}"))?;
-                    if line.ends_with('\n') { line.pop(); }
-                    if line.ends_with('\r') { line.pop(); }
+                    stdin
+                        .lock()
+                        .read_line(&mut line)
+                        .map_err(|e| format!("IO.read: {e}"))?;
+                    if line.ends_with('\n') {
+                        line.pop();
+                    }
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
                     self.frames[frame_idx].regs[instr.op3 as usize] = self.intern_string(&line);
                 }
             }
@@ -575,22 +611,30 @@ impl CoreVM {
                 let s_val = self.frames[frame_idx].regs[0];
                 let idx_val = self.frames[frame_idx].regs[1];
                 let char_idx = value_layout::as_int_raw(idx_val) as usize;
-                let s = self.resolve_string(s_val).ok_or("String.charAt: string not found")?;
+                let s = self
+                    .resolve_string(s_val)
+                    .ok_or("String.charAt: string not found")?;
                 let ch = s.chars().nth(char_idx).unwrap_or('\0');
                 self.frames[frame_idx].regs[instr.op3 as usize] = value_layout::tag_int(ch as i64);
             }
             "String.length" => {
                 let s_val = self.frames[frame_idx].regs[0];
-                let s = self.resolve_string(s_val).ok_or("String.length: string not found")?;
-                self.frames[frame_idx].regs[instr.op3 as usize] = value_layout::tag_int(s.len() as i64);
+                let s = self
+                    .resolve_string(s_val)
+                    .ok_or("String.length: string not found")?;
+                self.frames[frame_idx].regs[instr.op3 as usize] =
+                    value_layout::tag_int(s.len() as i64);
             }
             "Int.to_string" => {
                 let val = value_layout::as_int_raw(self.frames[frame_idx].regs[0]);
-                self.frames[frame_idx].regs[instr.op3 as usize] = self.intern_string(&val.to_string());
+                self.frames[frame_idx].regs[instr.op3 as usize] =
+                    self.intern_string(&val.to_string());
             }
             "String.from_char" => {
                 let ch = value_layout::as_int_raw(self.frames[frame_idx].regs[0]);
-                let s = char::from_u32(ch as u32).map(|c| c.to_string()).unwrap_or_default();
+                let s = char::from_u32(ch as u32)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
                 self.frames[frame_idx].regs[instr.op3 as usize] = self.intern_string(&s);
             }
             _ => return Err(format!("Unhandled effect: {eff_name}")),
@@ -600,7 +644,9 @@ impl CoreVM {
 }
 
 impl Default for CoreVM {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -639,11 +685,7 @@ mod tests {
 
     fn assert_int(source: &str, expected: i64) {
         let v = run_core(source).unwrap_or_else(|e| panic!("{source}: {e}"));
-        assert_eq!(
-            value_layout::as_int_raw(v),
-            expected,
-            "source: {source}"
-        );
+        assert_eq!(value_layout::as_int_raw(v), expected, "source: {source}");
     }
 
     #[test]
@@ -683,9 +725,18 @@ mod tests {
 
     #[test]
     fn test_core_recursion() {
-        assert_int("let rec fact = fn(n) if n <= 1 then 1 else n * fact(n - 1) in fact(5)", 120);
-        assert_int("let rec fib = fn(n) if n < 2 then n else fib(n - 1) + fib(n - 2) in fib(10)", 55);
-        assert_int("let rec count = fn(n) if n == 0 then 0 else count(n - 1) + 1 in count(5)", 5);
+        assert_int(
+            "let rec fact = fn(n) if n <= 1 then 1 else n * fact(n - 1) in fact(5)",
+            120,
+        );
+        assert_int(
+            "let rec fib = fn(n) if n < 2 then n else fib(n - 1) + fib(n - 2) in fib(10)",
+            55,
+        );
+        assert_int(
+            "let rec count = fn(n) if n == 0 then 0 else count(n - 1) + 1 in count(5)",
+            5,
+        );
     }
 
     #[test]
@@ -694,7 +745,10 @@ mod tests {
         assert_int("let f = fn(x) x * x in f(6)", 36);
         assert_int("let add = fn(x) fn(y) x + y in add(3)(4)", 7);
         assert_int("let x = 10 in let f = fn(y) x + y in f(5)", 15);
-        assert_int("let x = 10 in let f = fn(y) x + y in let g = fn(y) x * y in f(1) + g(2)", 31);
+        assert_int(
+            "let x = 10 in let f = fn(y) x + y in let g = fn(y) x * y in f(1) + g(2)",
+            31,
+        );
         assert_int(
             "let sum = fn(n) let rec loop = fn(i, acc) if i > n then acc else loop(i + 1, acc + i) in loop(0, 0) in sum(100)",
             5050,

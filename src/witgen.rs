@@ -140,7 +140,11 @@ pub fn builtin_effect_wit_interfaces() -> Vec<WitInterface> {
                 },
                 WitOp {
                     name: "substring".into(),
-                    params: vec![("s".into(), "string".into()), ("start".into(), "s64".into()), ("len".into(), "s64".into())],
+                    params: vec![
+                        ("s".into(), "string".into()),
+                        ("start".into(), "s64".into()),
+                        ("len".into(), "s64".into()),
+                    ],
                     result: Some("string".into()),
                 },
                 WitOp {
@@ -165,12 +169,18 @@ pub fn builtin_effect_wit_interfaces() -> Vec<WitInterface> {
                 },
                 WitOp {
                     name: "write".into(),
-                    params: vec![("path".into(), "string".into()), ("content".into(), "string".into())],
+                    params: vec![
+                        ("path".into(), "string".into()),
+                        ("content".into(), "string".into()),
+                    ],
                     result: None,
                 },
                 WitOp {
                     name: "append".into(),
-                    params: vec![("path".into(), "string".into()), ("content".into(), "string".into())],
+                    params: vec![
+                        ("path".into(), "string".into()),
+                        ("content".into(), "string".into()),
+                    ],
                     result: None,
                 },
                 WitOp {
@@ -190,7 +200,10 @@ pub fn builtin_effect_wit_interfaces() -> Vec<WitInterface> {
                 },
                 WitOp {
                     name: "push".into(),
-                    params: vec![("arr".into(), "list<s64>".into()), ("elem".into(), "s64".into())],
+                    params: vec![
+                        ("arr".into(), "list<s64>".into()),
+                        ("elem".into(), "s64".into()),
+                    ],
                     result: Some("list<s64>".into()),
                 },
                 WitOp {
@@ -200,12 +213,20 @@ pub fn builtin_effect_wit_interfaces() -> Vec<WitInterface> {
                 },
                 WitOp {
                     name: "set".into(),
-                    params: vec![("arr".into(), "list<s64>".into()), ("idx".into(), "s64".into()), ("val".into(), "s64".into())],
+                    params: vec![
+                        ("arr".into(), "list<s64>".into()),
+                        ("idx".into(), "s64".into()),
+                        ("val".into(), "s64".into()),
+                    ],
                     result: Some("list<s64>".into()),
                 },
                 WitOp {
                     name: "slice".into(),
-                    params: vec![("arr".into(), "list<s64>".into()), ("start".into(), "s64".into()), ("end".into(), "s64".into())],
+                    params: vec![
+                        ("arr".into(), "list<s64>".into()),
+                        ("start".into(), "s64".into()),
+                        ("end".into(), "s64".into()),
+                    ],
                     result: Some("list<s64>".into()),
                 },
                 WitOp {
@@ -225,20 +246,24 @@ pub fn builtin_effect_wit_interfaces() -> Vec<WitInterface> {
                 },
                 WitOp {
                     name: "post".into(),
-                    params: vec![("url".into(), "string".into()), ("body".into(), "string".into())],
+                    params: vec![
+                        ("url".into(), "string".into()),
+                        ("body".into(), "string".into()),
+                    ],
                     result: Some("string".into()),
                 },
             ],
         },
         WitInterface {
             name: "debug".into(),
-            ops: vec![
-                WitOp {
-                    name: "inspect".into(),
-                    params: vec![("label".into(), "string".into()), ("value".into(), "s64".into())],
-                    result: Some("s64".into()),
-                },
-            ],
+            ops: vec![WitOp {
+                name: "inspect".into(),
+                params: vec![
+                    ("label".into(), "string".into()),
+                    ("value".into(), "s64".into()),
+                ],
+                result: Some("s64".into()),
+            }],
         },
         WitInterface {
             name: "int".into(),

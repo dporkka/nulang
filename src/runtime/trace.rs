@@ -32,7 +32,9 @@ struct Rng {
 
 impl Rng {
     fn next_u64(&self) -> u64 {
-        let mut z = self.state.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+        let mut z = self
+            .state
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
@@ -138,10 +140,7 @@ impl TraceContext {
     /// Encode as a W3C `traceparent` string.
     pub fn to_traceparent(&self) -> String {
         let flags = if self.sampled { "01" } else { "00" };
-        format!(
-            "00-{:032x}-{:016x}-{flags}",
-            self.trace_id, self.span_id
-        )
+        format!("00-{:032x}-{:016x}-{flags}", self.trace_id, self.span_id)
     }
 
     pub fn trace_id(&self) -> u128 {
@@ -221,10 +220,7 @@ mod tests {
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         )
         .expect("spec example parses");
-        assert_eq!(
-            ctx.trace_id(),
-            0x4bf9_2f35_77b3_4da6_a3ce_929d_0e0e_4736
-        );
+        assert_eq!(ctx.trace_id(), 0x4bf9_2f35_77b3_4da6_a3ce_929d_0e0e_4736);
         assert_eq!(ctx.span_id(), 0x00f0_67aa_0ba9_02b7);
         assert!(ctx.sampled());
     }
@@ -245,12 +241,16 @@ mod tests {
         assert!(TraceContext::from_traceparent("00-abc-123-01").is_none()); // wrong lengths
         assert!(TraceContext::from_traceparent("00-zz..-..-..").is_none()); // bad hex
         assert!(
-            TraceContext::from_traceparent("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
-                .is_none() // version != 00
+            TraceContext::from_traceparent(
+                "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+            )
+            .is_none() // version != 00
         );
         assert!(
-            TraceContext::from_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01")
-                .is_none() // zero trace id
+            TraceContext::from_traceparent(
+                "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+            )
+            .is_none() // zero trace id
         );
     }
 

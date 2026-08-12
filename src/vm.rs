@@ -1192,11 +1192,7 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 }
                 None => return Some(Value::nil()),
             };
-            return match crate::runtime::HttpServerState::bind(
-                port,
-                module.clone(),
-                func_idx,
-            ) {
+            return match crate::runtime::HttpServerState::bind(port, module.clone(), func_idx) {
                 Ok(server) => {
                     let actual_port = server.port;
                     // Deliberately leak: a standalone HTTP server keeps
@@ -3769,7 +3765,10 @@ impl VM {
         // Try JIT execution for hot bytecode regions before interpreting.
         // Disabled while a debugger is attached so every instruction flows
         // through the interpreter (and the debug hook below).
-        if self.debug_hook.is_none() && self.jit_session.is_some() && self.try_jit_execute(frame_idx) {
+        if self.debug_hook.is_none()
+            && self.jit_session.is_some()
+            && self.try_jit_execute(frame_idx)
+        {
             return Ok(());
         }
 
@@ -5932,7 +5931,10 @@ mod vm_tests {
             compiled > 0,
             "source-compiled hot loop must JIT-compile, got {compiled} regions"
         );
-        assert!(result.is_int(), "hot_loop must return an Int, got {result:?}");
+        assert!(
+            result.is_int(),
+            "hot_loop must return an Int, got {result:?}"
+        );
     }
 
     /// round-trips the captured value into the callee frame.

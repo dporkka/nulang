@@ -756,7 +756,8 @@ static AOT_FRESH_ACTOR_ID: std::sync::atomic::AtomicU64 =
 /// The pointer must stay valid until `unregister_aot_actor`.
 pub fn register_aot_actor(actor: &mut crate::runtime::Actor) {
     AOT_ACTORS.with(|c| {
-        c.borrow_mut().insert(actor.id, actor as *mut crate::runtime::Actor);
+        c.borrow_mut()
+            .insert(actor.id, actor as *mut crate::runtime::Actor);
     });
 }
 
@@ -825,9 +826,14 @@ fn call_aot_behavior(ptr: *const u8, raw: &[u64]) {
         8 => {
             let f: extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
                 unsafe { std::mem::transmute(ptr) };
-            let _ = f(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
+            let _ = f(
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            );
         }
-        n => panic!("call_aot_behavior: unsupported arity {} (add an arity arm)", n),
+        n => panic!(
+            "call_aot_behavior: unsupported arity {} (add an arity arm)",
+            n
+        ),
     }
 }
 
@@ -841,9 +847,12 @@ fn call_aot_behavior(ptr: *const u8, raw: &[u64]) {
 /// standalone `AotActorCallbacks` over the raw actor.
 pub fn aot_behavior_adapter(actor: &mut crate::runtime::Actor, args: &[crate::vm::Value]) {
     let target = AOT_DISPATCH.with(|c| *c.borrow());
-    let target = target
-        .expect("aot_behavior_adapter: no native target armed (call set_aot_dispatch first)");
-    assert!(!target.fn_ptr.is_null(), "aot_behavior_adapter: null fn ptr");
+    let target =
+        target.expect("aot_behavior_adapter: no native target armed (call set_aot_dispatch first)");
+    assert!(
+        !target.fn_ptr.is_null(),
+        "aot_behavior_adapter: null fn ptr"
+    );
 
     let raw: Vec<u64> = args.iter().map(|v| v.as_raw()).collect();
     if target.runtime.is_null() {
@@ -904,7 +913,11 @@ impl crate::vm::ActorVmCallbacks for AotActorCallbacks {
 
     fn drop_ref(&mut self, ptr: *mut u8) {
         // SAFETY: both raw pointers are valid; `ptr` is from this actor's heap.
-        unsafe { (*self.actor).orca_gc.drop_local_ref(&mut (*self.actor).heap, ptr) };
+        unsafe {
+            (*self.actor)
+                .orca_gc
+                .drop_local_ref(&mut (*self.actor).heap, ptr)
+        };
     }
 
     fn retain_ref(&mut self, ptr: *mut u8) {
@@ -917,8 +930,9 @@ impl crate::vm::ActorVmCallbacks for AotActorCallbacks {
         unsafe {
             let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
             if header.type_tag == HeapTypeTag::Array {
-                let payload =
-                    header.size.saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
+                let payload = header
+                    .size
+                    .saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
                 Some(payload / std::mem::size_of::<crate::vm::Value>())
             } else {
                 None
@@ -1023,7 +1037,13 @@ impl crate::vm::ActorVmCallbacks for AotRuntimeCallbacks {
     fn alloc(&mut self, size: usize, type_tag: HeapTypeTag) -> Option<*mut u8> {
         // SAFETY: the scheduler holds `&mut Runtime`; re-borrow through the
         // raw pointer, mirroring `BytecodeRuntimeCallbacks`.
-        unsafe { (*self.runtime).actors.get_mut(&self.actor_id)?.heap.alloc(size, type_tag) }
+        unsafe {
+            (*self.runtime)
+                .actors
+                .get_mut(&self.actor_id)?
+                .heap
+                .alloc(size, type_tag)
+        }
     }
 
     fn drop_ref(&mut self, ptr: *mut u8) {
@@ -1047,8 +1067,9 @@ impl crate::vm::ActorVmCallbacks for AotRuntimeCallbacks {
             let _actor = (*self.runtime).actors.get(&self.actor_id)?;
             let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
             if header.type_tag == HeapTypeTag::Array {
-                let payload_size =
-                    header.size.saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
+                let payload_size = header
+                    .size
+                    .saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
                 Some(payload_size / std::mem::size_of::<crate::vm::Value>())
             } else {
                 None
@@ -1135,7 +1156,14 @@ impl crate::vm::ActorVmCallbacks for AotRuntimeCallbacks {
 
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         // SAFETY: as above; mailbox access runs on the owning scheduler thread.
-        unsafe { (*self.runtime).actors.get_mut(&self.actor_id)?.mailbox.pop() }.map(|msg| {
+        unsafe {
+            (*self.runtime)
+                .actors
+                .get_mut(&self.actor_id)?
+                .mailbox
+                .pop()
+        }
+        .map(|msg| {
             let first = msg
                 .payload
                 .first()
@@ -1150,8 +1178,14 @@ impl crate::vm::ActorVmCallbacks for AotRuntimeCallbacks {
         behavior_ids: &[u16],
     ) -> Option<(usize, Vec<crate::vm::Value>)> {
         // SAFETY: as above; mailbox access runs on the owning scheduler thread.
-        unsafe { (*self.runtime).actors.get_mut(&self.actor_id)?.mailbox.receive_match(behavior_ids) }
-            .map(|(pos, payload)| (pos, payload.to_vec()))
+        unsafe {
+            (*self.runtime)
+                .actors
+                .get_mut(&self.actor_id)?
+                .mailbox
+                .receive_match(behavior_ids)
+        }
+        .map(|(pos, payload)| (pos, payload.to_vec()))
     }
 }
 

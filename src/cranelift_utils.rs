@@ -94,7 +94,9 @@ pub fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
 pub fn memflags_for_capability(cap: Capability) -> MemFlags {
     let mut flags = MemFlags::new();
     match cap {
-        Capability::Val | Capability::Box => { flags.set_readonly(); }
+        Capability::Val | Capability::Box => {
+            flags.set_readonly();
+        }
         _ => {}
     }
     flags

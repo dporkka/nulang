@@ -172,4 +172,7 @@ define_helpers! {
     ObjSet   => nulang_obj_set,     Reg4, // actually (i64,i64,i64)->void
     ObjLen   => nulang_obj_len,     Unary,
     RecCopy  => nulang_rec_copy,    Unary,
+    SafePoint => nulang_jit_safepoint_check, Unary,
+    SetYield => nulang_jit_set_yield_pc, Unary,
+    SetBranchExit => nulang_jit_set_branch_exit_pc, Unary,
 }

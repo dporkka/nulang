@@ -30,7 +30,6 @@ use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
 
 use crate::bytecode::{Instruction, OpCode};
-use crate::jit::JitSession;
 use crate::runtime::heap::{ActorHeap, OrcaHeader, TypeTag};
 use crate::value_layout::{PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_NIL, TAG_PTR};
 
@@ -186,15 +185,16 @@ impl std::error::Error for CompileError {}
 /// PerformDirect / safepoints), so it must not make the VM halt.
 pub(crate) fn emit_yield_pc(
     builder: &mut FunctionBuilder,
+    branch_exit_helper: FuncRef,
     start_offset: usize,
     target: usize,
 ) {
-    let exit_pc_addr = JitSession::branch_exit_pc_addr();
-    let exit_pc_ptr = builder.ins().iconst(types::I64, exit_pc_addr);
     // Target may precede the region (a backward jump); the VM adds the signed
     // relative offset to the region-start pc, so wrap the subtraction.
-    let rel = builder.ins().iconst(types::I64, target.wrapping_sub(start_offset) as i64);
-    builder.ins().store(MemFlags::new(), rel, exit_pc_ptr, 0);
+    let rel = builder
+        .ins()
+        .iconst(types::I64, target.wrapping_sub(start_offset) as i64);
+    builder.ins().call(branch_exit_helper, &[rel]);
 }
 
 /// Compile a bytecode region to a native function.
@@ -231,23 +231,15 @@ pub fn compile_bytecode_region(
         blocks.insert(i, builder.create_block());
     }
     let return_block = builder.create_block();
-    // Inject JIT safepoint: decrement counter, yield if exhausted.
-    // Pointer is never null (initialized to a VM-owned dummy).
-    let safepoint_ptr_addr = JitSession::safepoint_ptr_addr();
-    let ptr_addr = builder.ins().iconst(types::I64, safepoint_ptr_addr);
-    let counter_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_addr, 0);
-    let counter = builder
-        .ins()
-        .load(types::I64, MemFlags::new(), counter_ptr, 0);
-    let one = builder.ins().iconst(types::I64, 1);
-    let new_counter = builder.ins().isub(counter, one);
-    builder
-        .ins()
-        .store(MemFlags::new(), new_counter, counter_ptr, 0);
+    // Inject a thread-local JIT safepoint check. A runtime helper is used
+    // instead of an embedded process-global pointer so concurrent VMs cannot
+    // consume each other's actor reduction counters.
     let zero = builder.ins().iconst(types::I64, 0);
-    let exhausted = builder
+    let safepoint = builder
         .ins()
-        .icmp(IntCC::SignedLessThanOrEqual, new_counter, zero);
+        .call(helpers[&RuntimeHelper::SafePoint], &[zero]);
+    let safepoint_result = builder.inst_results(safepoint)[0];
+    let exhausted = builder.ins().icmp(IntCC::NotEqual, safepoint_result, zero);
     let yield_block = builder.create_block();
     if let Some(&first_block) = blocks.get(&start_offset) {
         builder
@@ -259,13 +251,13 @@ pub fn compile_bytecode_region(
             .brif(exhausted, yield_block, &[], return_block, &[]);
     }
 
-    // Yield block: store 0 to JIT_YIELD_PC, then return.
+    // Yield block: mark a relative resume offset in thread-local state.
     builder.switch_to_block(yield_block);
     builder.set_cold_block(yield_block);
-    let yield_pc_addr = JitSession::yield_pc_addr();
-    let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
     let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().store(MemFlags::new(), zero, yield_pc_ptr, 0);
+    builder
+        .ins()
+        .call(helpers[&RuntimeHelper::SetYield], &[zero]);
     builder.ins().jump(return_block, &[]);
 
     // Seal all new blocks.
@@ -602,7 +594,12 @@ pub fn compile_bytecode_region(
                 } else {
                     // Target outside the region: yield the target pc so the
                     // interpreter resumes there (branch-exit, not a suspension).
-                    emit_yield_pc(&mut builder, start_offset, target);
+                    emit_yield_pc(
+                        &mut builder,
+                        helpers[&RuntimeHelper::SetBranchExit],
+                        start_offset,
+                        target,
+                    );
                     builder.ins().jump(return_block, &[]);
                 }
             }
@@ -627,7 +624,12 @@ pub fn compile_bytecode_region(
                     let outside = builder.create_block();
                     builder.ins().brif(is_true, outside, &[], fallthrough, &[]);
                     builder.switch_to_block(outside);
-                    emit_yield_pc(&mut builder, start_offset, target);
+                    emit_yield_pc(
+                        &mut builder,
+                        helpers[&RuntimeHelper::SetBranchExit],
+                        start_offset,
+                        target,
+                    );
                     builder.ins().jump(return_block, &[]);
                     builder.seal_block(outside);
                 }
@@ -649,7 +651,12 @@ pub fn compile_bytecode_region(
                     let outside = builder.create_block();
                     builder.ins().brif(is_false, outside, &[], fallthrough, &[]);
                     builder.switch_to_block(outside);
-                    emit_yield_pc(&mut builder, start_offset, target);
+                    emit_yield_pc(
+                        &mut builder,
+                        helpers[&RuntimeHelper::SetBranchExit],
+                        start_offset,
+                        target,
+                    );
                     builder.ins().jump(return_block, &[]);
                     builder.seal_block(outside);
                 }
@@ -734,12 +741,10 @@ pub fn compile_bytecode_region(
                 // look up the binding, and (b) support for compiling
                 // non-contiguous handler bodies (different PC offset)
                 // as callable subroutines within the JIT region.
-                let yield_pc_addr = JitSession::yield_pc_addr();
-                let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
                 let rel_offset = builder.ins().iconst(types::I64, (pc - start_offset) as i64);
                 builder
                     .ins()
-                    .store(MemFlags::new(), rel_offset, yield_pc_ptr, 0);
+                    .call(helpers[&RuntimeHelper::SetYield], &[rel_offset]);
                 builder.ins().jump(return_block, &[]);
             }
             _ => {

@@ -56,7 +56,10 @@ pub enum CirStmt {
     /// Pure computation (no side effects): dst = src
     Assign { dst: VarId, src: CirExpr },
     /// Fire-and-forget effect (non-suspending): ActorSend, IO.print, log
-    Emit { effect: EffectKind, args: Vec<CirExpr> },
+    Emit {
+        effect: EffectKind,
+        args: Vec<CirExpr>,
+    },
     /// Allocate continuation frame for upcoming SuspendAndYield.
     /// Emitted at the end of the block before SuspendAndYield.
     SaveFrame {

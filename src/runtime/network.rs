@@ -1815,7 +1815,6 @@ impl TcpTransport {
             ));
         }
 
-
         let conn = TcpConnection {
             node_id,
             addr,
@@ -1825,7 +1824,9 @@ impl TcpTransport {
 
         // Short read timeout so the reader periodically releases the Mutex,
         // giving the sender thread windows to interleave writes.
-        let _ = conn.stream.set_read_timeout(Some(Duration::from_millis(50)));
+        let _ = conn
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(50)));
 
         let read_stream = conn.stream.try_clone()?;
         {

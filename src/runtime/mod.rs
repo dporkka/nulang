@@ -4845,9 +4845,7 @@ impl Runtime {
         let boxed = Box::new(module);
         let module_ptr: *const crate::aot::AotModule = &*boxed;
         for name in unsafe { &*module_ptr }.actor_type_names() {
-            self.aot_modules
-                .entry(name)
-                .or_insert(module_ptr);
+            self.aot_modules.entry(name).or_insert(module_ptr);
         }
         self.aot_module_storage.push(boxed);
     }

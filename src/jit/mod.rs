@@ -375,31 +375,6 @@ impl JitSession {
         self.compiled.len()
     }
 
-    /// Address of the `JIT_SAFEPOINT_PTR` global, embedded as an i64
-    /// constant in CLIF so JIT code can load the current actor's counter
-    /// without indirection through a thread-local.
-    pub fn safepoint_ptr_addr() -> i64 {
-        let ptr: *const std::sync::atomic::AtomicPtr<u64> =
-            &raw const crate::jit::runtime::JIT_SAFEPOINT_PTR;
-        ptr as i64
-    }
-
-    /// Address of the `JIT_YIELD_PC` static, embedded as an i64 constant
-    /// in CLIF so the cold yield path can store to it inline.
-    pub fn yield_pc_addr() -> i64 {
-        let ptr: *const std::sync::atomic::AtomicU64 = &raw const crate::jit::runtime::JIT_YIELD_PC;
-        ptr as i64
-    }
-
-    /// Address of the `JIT_BRANCH_EXIT_PC` static — the non-suspending slot a
-    /// compiled region stores to when it exits via a branch to an outside
-    /// target.
-    pub fn branch_exit_pc_addr() -> i64 {
-        let ptr: *const std::sync::atomic::AtomicU64 =
-            &raw const crate::jit::runtime::JIT_BRANCH_EXIT_PC;
-        ptr as i64
-    }
-
     /// Compile a SIMD-vectorizable bytecode region.
     /// First analyzes the region for vectorizable array loop patterns. If found,
     /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the
@@ -523,8 +498,12 @@ pub(crate) fn find_compilable_region(
         let op = instructions[i].opcode;
         // Stop *before* return/halt instructions so the VM still executes the
         // return (frame pop) / halt itself after the JIT region.
-        if matches!(op, crate::bytecode::OpCode::Ret | crate::bytecode::OpCode::RetVal | crate::bytecode::OpCode::Halt)
-        {
+        if matches!(
+            op,
+            crate::bytecode::OpCode::Ret
+                | crate::bytecode::OpCode::RetVal
+                | crate::bytecode::OpCode::Halt
+        ) {
             break;
         }
         let is_branch = matches!(
@@ -684,9 +663,7 @@ impl crate::backends::JitBackend for JitSession {
             // returning true and re-scanning every step — a rejected pc would
             // otherwise call `find_compilable_region` on every execution,
             // regressing call-heavy loops ~5x.
-            if module_idx < self.hot_counts.len()
-                && pc < self.hot_counts[module_idx].len()
-            {
+            if module_idx < self.hot_counts.len() && pc < self.hot_counts[module_idx].len() {
                 self.hot_counts[module_idx][pc] = 0;
             }
         }

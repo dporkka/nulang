@@ -328,8 +328,7 @@ fn continuation_live_ins(
         out
     };
     // Which (block, idx) are sites.
-    let site_set: HashSet<(mir::BlockId, usize)> =
-        sites.iter().map(|s| (s.block, s.idx)).collect();
+    let site_set: HashSet<(mir::BlockId, usize)> = sites.iter().map(|s| (s.block, s.idx)).collect();
 
     let mut out: HashMap<(mir::BlockId, usize), HashSet<u32>> = HashMap::new();
     for block in &func.blocks {
@@ -394,7 +393,10 @@ fn continuation_live_ins(
 /// to that width.
 fn resuming_threading(
     func: &mir::Function,
-) -> (HashMap<mir::BlockId, usize>, HashMap<(mir::BlockId, usize), Vec<u32>>) {
+) -> (
+    HashMap<mir::BlockId, usize>,
+    HashMap<(mir::BlockId, usize), Vec<u32>>,
+) {
     let sites = resuming_sites(func);
     let cont_live = continuation_live_ins(func, &sites);
     // Same-block prior results per site: perform dsts earlier in the same block.
@@ -411,7 +413,12 @@ fn resuming_threading(
     let mut site_extras: HashMap<(mir::BlockId, usize), Vec<u32>> = HashMap::new();
     for site in &sites {
         let key = (site.block, site.idx);
-        let priors: HashSet<u32> = per_site_priors.get(&key).cloned().unwrap_or_default().into_iter().collect();
+        let priors: HashSet<u32> = per_site_priors
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let mut extras: Vec<u32> = cont_live
             .get(&key)
             .cloned()
@@ -497,12 +504,7 @@ fn stmt_rvalue_uses(op: &mir::RValue) -> Vec<mir::LocalId> {
                 out.extend(stmt_rvalue_uses(rv));
             }
         }
-        mir::RValue::Send {
-            actor, args, ..
-        }
-        | mir::RValue::Ask {
-            actor, args, ..
-        } => {
+        mir::RValue::Send { actor, args, .. } | mir::RValue::Ask { actor, args, .. } => {
             out.push(*actor);
             out.extend_from_slice(args);
         }
@@ -798,10 +800,13 @@ fn compile_terminator_with_params(
                 // slots the continuation carries (continuation live-ins / prior
                 // results). No continuation-index param exists for a single
                 // site, so threaded slots start at block_params.len().
-                let idx_pos = block_params.get(&current_block).map(|p| p.len()).unwrap_or(0);
-                let cur = builder.current_block().ok_or_else(|| {
-                    AotCompileError::Internal("Resume outside a block".into())
-                })?;
+                let idx_pos = block_params
+                    .get(&current_block)
+                    .map(|p| p.len())
+                    .unwrap_or(0);
+                let cur = builder
+                    .current_block()
+                    .ok_or_else(|| AotCompileError::Internal("Resume outside a block".into()))?;
                 let hparams = builder.block_params(cur);
                 let mut args: Vec<BlockArg> = vec![BlockArg::from(v)];
                 args.extend(hparams[idx_pos..].iter().copied().map(BlockArg::from));
@@ -816,10 +821,13 @@ fn compile_terminator_with_params(
             // entered this invocation; each continuation binds only the
             // same-block prior slots it actually has, so the excess (cross-block
             // or padded) slots are ignored by all continuations.
-            let idx_pos = block_params.get(&current_block).map(|p| p.len()).unwrap_or(0);
-            let cur = builder.current_block().ok_or_else(|| {
-                AotCompileError::Internal("Resume outside a block".into())
-            })?;
+            let idx_pos = block_params
+                .get(&current_block)
+                .map(|p| p.len())
+                .unwrap_or(0);
+            let cur = builder
+                .current_block()
+                .ok_or_else(|| AotCompileError::Internal("Resume outside a block".into()))?;
             let hparams = builder.block_params(cur);
             let mut idx_val = hparams[idx_pos];
             let mut resume_val = v;
@@ -908,7 +916,13 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     // that call foreign functions must stay boxed.
     for block in &func.blocks {
         for stmt in &block.stmts {
-            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::FFICall { .. }, .. }) {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::FFICall { .. },
+                    ..
+                }
+            ) {
                 return false;
             }
         }
@@ -917,7 +931,13 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     // dispatcher; an unboxed (raw) Int argument would be misread there.
     for block in &func.blocks {
         for stmt in &block.stmts {
-            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::PerformAsync { .. }, .. }) {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::PerformAsync { .. },
+                    ..
+                }
+            ) {
                 return false;
             }
         }
@@ -926,7 +946,13 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     // would misread it if used as a raw int.
     for block in &func.blocks {
         for stmt in &block.stmts {
-            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::SignalWait { .. }, .. }) {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::SignalWait { .. },
+                    ..
+                }
+            ) {
                 return false;
             }
         }
@@ -935,7 +961,13 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     // it if used as a raw int.
     for block in &func.blocks {
         for stmt in &block.stmts {
-            if matches!(stmt, mir::Stmt::Assign { op: mir::RValue::Migrate { .. }, .. }) {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::Migrate { .. },
+                    ..
+                }
+            ) {
                 return false;
             }
         }
@@ -949,10 +981,8 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             let nil_or_object = match stmt {
                 mir::Stmt::Assign { op, .. } => matches!(
                     op,
-                    mir::RValue::Binary(
-                        crate::ast::BinOp::Div | crate::ast::BinOp::Mod,
-                        ..
-                    ) | mir::RValue::ArrayLit(_)
+                    mir::RValue::Binary(crate::ast::BinOp::Div | crate::ast::BinOp::Mod, ..)
+                        | mir::RValue::ArrayLit(_)
                         | mir::RValue::ArrayLoad { .. }
                         | mir::RValue::ArrayLen(_)
                         | mir::RValue::Record(_)
@@ -1012,10 +1042,11 @@ pub fn is_all_int(func: &mir::Function) -> bool {
     for block in &func.blocks {
         for stmt in &block.stmts {
             if let mir::Stmt::Assign {
-                op: mir::RValue::Call {
-                    func: mir::FuncRef::Local(id),
-                    ..
-                },
+                op:
+                    mir::RValue::Call {
+                        func: mir::FuncRef::Local(id),
+                        ..
+                    },
                 ..
             } = stmt
             {
@@ -1648,7 +1679,8 @@ pub fn compile_mir_function_body(
                     }
                     // Merge with handler-effect params (dedup, stable order:
                     // effect params first, then live-ins).
-                    let mut all: Vec<u32> = block_params.get(&block.id).cloned().unwrap_or_default();
+                    let mut all: Vec<u32> =
+                        block_params.get(&block.id).cloned().unwrap_or_default();
                     for reg in params {
                         if !all.contains(&reg) {
                             all.push(reg);
@@ -1928,12 +1960,7 @@ fn compile_stmt(
             // Payload temps are the contiguous locals dst+1 .. dst+max_params.
             for i in 0..*max_params {
                 let idx_const = builder.ins().iconst(types::I64, i as i64);
-                let pv = call_helper(
-                    builder,
-                    helpers,
-                    "nulang_aot_receive_payload",
-                    &[idx_const],
-                )?;
+                let pv = call_helper(builder, helpers, "nulang_aot_receive_payload", &[idx_const])?;
                 local_vals.insert(dst_reg + 1 + i as u32, pv);
             }
             Ok(())
@@ -2004,8 +2031,7 @@ fn compile_stmt(
                             .collect();
                         let param_regs = block_params.get(&body_block).cloned().unwrap_or_default();
                         let mut arg_iter = args.iter();
-                        let mut jump_args: Vec<BlockArg> =
-                            Vec::with_capacity(param_regs.len() + 1);
+                        let mut jump_args: Vec<BlockArg> = Vec::with_capacity(param_regs.len() + 1);
                         for (i, reg) in param_regs.iter().enumerate() {
                             let v = if i < effect_regs.len() {
                                 let arg = arg_iter.next().ok_or_else(|| {
@@ -2034,9 +2060,8 @@ fn compile_stmt(
                         let conts = handler_continuations.entry(body_block).or_default();
                         let idx = conts.len();
                         if multi_cont_bodies.contains(&body_block) {
-                            jump_args.push(BlockArg::from(
-                                builder.ins().iconst(types::I64, idx as i64),
-                            ));
+                            jump_args
+                                .push(BlockArg::from(builder.ins().iconst(types::I64, idx as i64)));
                         }
                         // Threaded slots: this site's prior perform results
                         // (real values, in order), then its extra continuation
@@ -2101,21 +2126,19 @@ fn compile_stmt(
                                 binding.body.0
                             ))
                         })?;
-                        let param_regs = block_params
-                            .get(&binding.body)
-                            .cloned()
-                            .unwrap_or_default();
+                        let param_regs =
+                            block_params.get(&binding.body).cloned().unwrap_or_default();
                         let mut jump_args: Vec<BlockArg> = Vec::with_capacity(param_regs.len());
                         for (arg, _param_reg) in args.iter().zip(param_regs.iter()) {
                             let arg_reg = mir::FunctionBuilder::LOCAL_BASE + arg.0;
-                            jump_args.push(BlockArg::from(
-                                *local_vals.get(&arg_reg).ok_or_else(|| {
+                            jump_args.push(BlockArg::from(*local_vals.get(&arg_reg).ok_or_else(
+                                || {
                                     AotCompileError::Internal(format!(
                                         "perform arg local {} uninitialized",
                                         arg.0
                                     ))
-                                })?,
-                            ));
+                                },
+                            )?));
                         }
                         builder.ins().jump(handler_block, &jump_args);
                         let cont = builder.create_block();
@@ -2243,10 +2266,15 @@ fn compile_stmt(
             let c = crate::bytecode::Constant::String(field.clone());
             let field_val = compile_const(builder, &c, mode, constants)?;
             let src_reg = mir::FunctionBuilder::LOCAL_BASE + src.0;
-            let src_val = *local_vals.get(&src_reg).ok_or_else(|| {
-                AotCompileError::Internal("StateSet src uninitialized".into())
-            })?;
-            call_void_helper(builder, helpers, "nulang_aot_state_set", &[field_val, src_val])?;
+            let src_val = *local_vals
+                .get(&src_reg)
+                .ok_or_else(|| AotCompileError::Internal("StateSet src uninitialized".into()))?;
+            call_void_helper(
+                builder,
+                helpers,
+                "nulang_aot_state_set",
+                &[field_val, src_val],
+            )?;
             Ok(())
         }
     }
@@ -3092,9 +3120,7 @@ fn compile_binary(
                 emit_tag_bool(builder, cmp)
             }),
             BinOp::Lt => Some({
-                let cmp = builder
-                    .ins()
-                    .icmp(IntCC::SignedLessThan, lhs_val, rhs_val);
+                let cmp = builder.ins().icmp(IntCC::SignedLessThan, lhs_val, rhs_val);
                 emit_tag_bool(builder, cmp)
             }),
             BinOp::Le => Some({
@@ -3242,9 +3268,7 @@ fn compile_binary(
                 } else {
                     let l = emit_sext48(builder, lhs_val);
                     let r = emit_sext48(builder, rhs_val);
-                    let cmp = builder
-                        .ins()
-                        .icmp(IntCC::SignedGreaterThan, l, r);
+                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, l, r);
                     Ok(emit_tag_bool(builder, cmp))
                 }
             } else {
@@ -3661,9 +3685,13 @@ mod tests {
         actor.register_behavior("add", crate::aot::aot_behavior_adapter);
 
         // Deliver `add(5)` then `add(7)`.
-        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(native, &aot)));
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(
+            native, &aot,
+        )));
         (actor.behavior_table[0].handler_fn)(&mut actor, &[crate::vm::Value::int(5)]);
-        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(native, &aot)));
+        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(
+            native, &aot,
+        )));
         (actor.behavior_table[0].handler_fn)(&mut actor, &[crate::vm::Value::int(7)]);
 
         let count = actor.get_state_field("count").and_then(|v| v.as_int());
@@ -3735,12 +3763,19 @@ mod tests {
 
         // B's mailbox must hold the queued message; dispatch it natively.
         let msg = b.mailbox.pop().expect("B should have received the message");
-        assert_eq!(msg.behavior_id, 0, "add is B's first behavior (module index 0)");
+        assert_eq!(
+            msg.behavior_id, 0,
+            "add is B's first behavior (module index 0)"
+        );
         crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(add, &aot)));
         (b.behavior_table[msg.behavior_id as usize].handler_fn)(&mut b, &msg.payload);
 
         let count = b.get_state_field("count").and_then(|v| v.as_int());
-        assert_eq!(count, Some(5), "native send must deliver and mutate B's state");
+        assert_eq!(
+            count,
+            Some(5),
+            "native send must deliver and mutate B's state"
+        );
 
         crate::aot::unregister_aot_actor(2);
         crate::aot::unregister_aot_actor(1);
@@ -3862,20 +3897,23 @@ mod tests {
         crate::aot::unregister_aot_actor(10);
 
         let after = crate::aot::aot_actor_ids();
-        let spawned: Vec<u64> = after.into_iter().filter(|id| !before.contains(id)).collect();
+        let spawned: Vec<u64> = after
+            .into_iter()
+            .filter(|id| !before.contains(id))
+            .collect();
         assert_eq!(spawned.len(), 1, "spawn must create exactly one actor");
         let spawned_id = spawned[0];
         let c = crate::aot::aot_spawned_actor(spawned_id)
             .expect("spawned actor should be in the ownership registry");
         // SAFETY: the spawned actor is owned by the module registry.
         let c = unsafe { &mut *c };
-        assert_eq!(c.name, "Counter", "spawned actor must have the right type name");
+        assert_eq!(
+            c.name, "Counter",
+            "spawned actor must have the right type name"
+        );
         let total = c.get_state_field("total").and_then(|v| v.as_int());
         assert_eq!(total, Some(7), "spawn init must set total to base");
-        let has_add = c
-            .behavior_table
-            .iter()
-            .any(|e| e.name == "Add");
+        let has_add = c.behavior_table.iter().any(|e| e.name == "Add");
         assert!(has_add, "spawned actor must register its behaviors");
         crate::aot::unregister_aot_actor(spawned_id);
     }
@@ -3914,9 +3952,9 @@ mod tests {
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
-        let aot = crate::aot::AotModule::compile(&mir_module)
-            .expect("AOT compile should succeed");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile should succeed");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -3932,7 +3970,9 @@ mod tests {
             assert_eq!(actor.behavior_table.len(), 2, "both behaviors registered");
             assert!(
                 actor.behavior_table[0].handler_fn as usize
-                    == crate::aot::aot_behavior_adapter as fn(&mut crate::runtime::Actor, &[crate::vm::Value]) as usize,
+                    == crate::aot::aot_behavior_adapter
+                        as fn(&mut crate::runtime::Actor, &[crate::vm::Value])
+                        as usize,
                 "Add should dispatch through the AOT adapter"
             );
             assert!(
@@ -3994,7 +4034,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4019,9 +4060,7 @@ mod tests {
             // The runtime names non-workflow actors `actor_{id}` (spawn.rs),
             // but the behavior must be AOT-wired and the init state applied.
             let counter = rt.actors.get(&counter_id).expect("spawned Counter");
-            let total = counter
-                .get_state_field("total")
-                .and_then(|v| v.as_int());
+            let total = counter.get_state_field("total").and_then(|v| v.as_int());
             assert_eq!(total, Some(7), "spawn init must set total to base");
             assert!(
                 counter.behavior_table[0].handler_fn as usize
@@ -4084,7 +4123,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4153,7 +4193,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4722,7 +4763,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4781,7 +4823,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4797,7 +4840,10 @@ mod tests {
         let log = &rt.actors.get(&w).expect("W actor").event_log;
         assert_eq!(log.len(), 1, "one event should be emitted");
         assert_eq!(log[0].0, "Got", "event name should match");
-        let pid = log[0].1.first().expect("event should carry the pipeline id");
+        let pid = log[0]
+            .1
+            .first()
+            .expect("event should carry the pipeline id");
         assert!(
             pid.is_string() || pid.as_ptr().is_some(),
             "pipeline id must be a string value, got {:?}",
@@ -4839,7 +4885,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4895,7 +4942,8 @@ mod tests {
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mut mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
-        let code = crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
+        let code =
+            crate::mir_codegen::compile_mir(&mut mir_module, "test").expect("bytecode compile");
 
         let mut rt = crate::runtime::Runtime::new();
         rt.register_aot_module(aot);
@@ -4956,7 +5004,11 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         let val = crate::vm::Value::from_raw(raw);
-        assert_eq!(val, crate::vm::Value::bool(true), "CapabilityCheck must yield true");
+        assert_eq!(
+            val,
+            crate::vm::Value::bool(true),
+            "CapabilityCheck must yield true"
+        );
     }
 
     #[test]
@@ -4986,7 +5038,13 @@ mod tests {
         let arg = builder.add_temp(crate::types::Type::int());
         let out = builder.add_temp(crate::types::Type::int());
         builder.assign(arg, mir::RValue::Const(crate::bytecode::Constant::Int(21)));
-        builder.assign(out, mir::RValue::FFICall { idx: 0, args: vec![arg] });
+        builder.assign(
+            out,
+            mir::RValue::FFICall {
+                idx: 0,
+                args: vec![arg],
+            },
+        );
         builder.terminate(mir::Terminator::Return(Some(out)));
         let func = builder.build();
         let module = mir::Module {
@@ -4999,7 +5057,9 @@ mod tests {
             foreign_functions: vec![mir::ForeignFunction {
                 library: "".into(), // pre-registered under (None, "double_int")
                 symbol: "double_int".into(),
-                params: vec![crate::types::Type::Primitive(crate::types::PrimitiveType::Int)],
+                params: vec![crate::types::Type::Primitive(
+                    crate::types::PrimitiveType::Int,
+                )],
                 ret: crate::types::Type::Primitive(crate::types::PrimitiveType::Int),
             }],
         };
@@ -5122,7 +5182,6 @@ mod tests {
             "recursive fact(5) should yield 120"
         );
     }
-
 
     #[test]
     fn test_is_all_int_empty() {

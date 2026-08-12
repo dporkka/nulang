@@ -60,7 +60,9 @@ fn test_send_carries_current_trace_span() {
     rt.send_message_by_id(b, 0, &[]);
     let actor = rt.actors.get_mut(&b).unwrap();
     let msg = actor.receive().expect("message delivered");
-    let tp = msg.trace_id.expect("outgoing message carries a traceparent");
+    let tp = msg
+        .trace_id
+        .expect("outgoing message carries a traceparent");
     let parsed = TraceContext::from_traceparent(&tp).expect("valid traceparent");
     // `traceparent` carries the current span (trace-id + span-id), so the
     // outgoing message exposes the handler's span for the receiver to child.
@@ -88,7 +90,9 @@ fn test_delivery_establishes_child_context_and_inherits() {
             .unwrap();
     }
     rt.step_actor(a);
-    let ctx = rt.current_trace.expect("delivery establishes a trace context");
+    let ctx = rt
+        .current_trace
+        .expect("delivery establishes a trace context");
     assert_eq!(ctx.trace_id(), 0x4bf9_2f35_77b3_4da6_a3ce_929d_0e0e_4736);
     assert_eq!(ctx.parent_span_id(), 0x00f0_67aa_0ba9_02b7);
 

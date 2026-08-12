@@ -223,15 +223,13 @@ impl WasmBackend {
                             // Only the IO.print/println/read and Array.length
                             // builtins are handled; any user-defined effect
                             // previously compiled to nil.
-                            RValue::Perform { effect, op, .. } => {
-                                !matches!(
-                                    (effect.as_str(), op.as_str()),
-                                    ("IO", "print")
-                                        | ("IO", "println")
-                                        | ("IO", "read")
-                                        | ("Array", "length")
-                                )
-                            }
+                            RValue::Perform { effect, op, .. } => !matches!(
+                                (effect.as_str(), op.as_str()),
+                                ("IO", "print")
+                                    | ("IO", "println")
+                                    | ("IO", "read")
+                                    | ("Array", "length")
+                            ),
                             _ => false,
                         };
                         if unsupported {
@@ -351,7 +349,11 @@ impl WasmBackend {
         imports.import("env", "arith_mul", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "arith_div", EntityType::Function(TY_I64I64_TO_I64));
         imports.import("env", "arith_mod", EntityType::Function(TY_I64I64_TO_I64));
-        imports.import("env", "arith_cmp", EntityType::Function(TY_I64I64I64_TO_I64));
+        imports.import(
+            "env",
+            "arith_cmp",
+            EntityType::Function(TY_I64I64I64_TO_I64),
+        );
         imports.import("env", "arith_neg", EntityType::Function(TY_I64_TO_I64));
         imports.import("env", "arr_load", EntityType::Function(TY_I64I64_TO_I64));
         // ffi_call_N(lib, sym, sig, arg0..argN-1) -> i64.
@@ -416,7 +418,8 @@ impl WasmBackend {
         body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
         body.instruction(&Instruction::End); // function end
         self.codes.function(&body);
-        self.exports.export("nulang_init", ExportKind::Func, wasm_idx);
+        self.exports
+            .export("nulang_init", ExportKind::Func, wasm_idx);
     }
 
     fn compile_function(&mut self, func: &mir::Function, mir_idx: usize) {
@@ -804,12 +807,7 @@ impl WasmBackend {
                     BinOp::Div => Some(IMPORT_ARITH_DIV),
                     BinOp::Mod => Some(IMPORT_ARITH_MOD),
                     BinOp::Pow => Some(IMPORT_POW),
-                    BinOp::Eq
-                    | BinOp::Ne
-                    | BinOp::Lt
-                    | BinOp::Gt
-                    | BinOp::Le
-                    | BinOp::Ge => {
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                         let code = match op {
                             BinOp::Eq => 0,
                             BinOp::Ne => 1,
@@ -1067,22 +1065,22 @@ impl WasmBackend {
                 // runtime, so the check always succeeds — mirroring the
                 // interpreter (`CapabilityCheck` compiles to `Const1`) and the
                 // AOT backend. Previously this silently fell through to nil.
-                body.instruction(&Instruction::I64Const(
-                    value_layout::tag_bool(true) as i64
-                ));
+                body.instruction(&Instruction::I64Const(value_layout::tag_bool(true) as i64));
             }
             RValue::FFICall { idx, args } => {
                 // Foreign function call: intern the library/symbol as string
                 // constants, bit-pack the CType signature, push the args, and
                 // call the arity-matched host `ffi_call_N`.
-                let def = self.foreign_functions.get(*idx).cloned().unwrap_or_else(|| {
-                    mir::ForeignFunction {
+                let def = self
+                    .foreign_functions
+                    .get(*idx)
+                    .cloned()
+                    .unwrap_or_else(|| mir::ForeignFunction {
                         library: String::new(),
                         symbol: String::new(),
                         params: vec![],
                         ret: crate::types::Type::unit(),
-                    }
-                });
+                    });
                 let ctype_tag = |c: crate::ffi::marshal::CType| -> u64 {
                     match c {
                         crate::ffi::marshal::CType::I64 => 0,
@@ -1093,7 +1091,8 @@ impl WasmBackend {
                         crate::ffi::marshal::CType::Unit => 5,
                     }
                 };
-                let mut params: Vec<crate::ffi::marshal::CType> = Vec::with_capacity(def.params.len());
+                let mut params: Vec<crate::ffi::marshal::CType> =
+                    Vec::with_capacity(def.params.len());
                 for p in &def.params {
                     let ffi_ty = crate::ffi::marshal::nulang_type_to_ffi_type(p)
                         .unwrap_or(crate::bytecode::FfiType::Int);
@@ -1120,8 +1119,12 @@ impl WasmBackend {
                 // Library + symbol were pre-interned into the data segment.
                 let (lib_off, _) = self.interned.get(&def.library).copied().unwrap_or((0, 0));
                 let (sym_off, _) = self.interned.get(&def.symbol).copied().unwrap_or((0, 0));
-                body.instruction(&Instruction::I64Const(value_layout::TAG_STRING as i64 | lib_off as i64));
-                body.instruction(&Instruction::I64Const(value_layout::TAG_STRING as i64 | sym_off as i64));
+                body.instruction(&Instruction::I64Const(
+                    value_layout::TAG_STRING as i64 | lib_off as i64,
+                ));
+                body.instruction(&Instruction::I64Const(
+                    value_layout::TAG_STRING as i64 | sym_off as i64,
+                ));
                 body.instruction(&Instruction::I64Const(sig as i64));
                 for a in args {
                     body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
@@ -1136,13 +1139,7 @@ impl WasmBackend {
 
     /// Emit a field load: `obj[slot]` where `obj` is a TAG_PTR heap object
     /// with layout `[count][slot0]..`. Leaves the loaded i64 on the stack.
-    fn emit_obj_load(
-        &self,
-        body: &mut Function,
-        obj: &LocalId,
-        slot: u8,
-        func: &mir::Function,
-    ) {
+    fn emit_obj_load(&self, body: &mut Function, obj: &LocalId, slot: u8, func: &mir::Function) {
         let pm = value_layout::PAYLOAD_MASK as i64;
         // base = obj & PAYLOAD_MASK
         body.instruction(&Instruction::LocalGet(self.mir_local(obj, func)));
@@ -1650,7 +1647,10 @@ fn collect_wasm_fields(
     };
     match stmt {
         Stmt::Assign { op, .. } => match op {
-            RValue::Record(fields) | RValue::RecordUpdate { overrides: fields, .. } => {
+            RValue::Record(fields)
+            | RValue::RecordUpdate {
+                overrides: fields, ..
+            } => {
                 for (name, _) in fields {
                     insert(name);
                 }

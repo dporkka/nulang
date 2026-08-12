@@ -130,9 +130,9 @@ fn test_find_region_includes_loop_back_edge() {
     // Jmp from pc3 with simm16 -3 targets pc0 (the region start), and a
     // forward JmpF at pc2 targets pc3.
     let loop2 = vec![
-        Instruction::new3(OpCode::IAdd, 0, 1, 2), // 0
-        Instruction::new3(OpCode::ISub, 0, 1, 2), // 1
-        Instruction::new3(OpCode::JmpF, 0, 0, 1), // 2: target 2+1 = 3
+        Instruction::new3(OpCode::IAdd, 0, 1, 2),    // 0
+        Instruction::new3(OpCode::ISub, 0, 1, 2),    // 1
+        Instruction::new3(OpCode::JmpF, 0, 0, 1),    // 2: target 2+1 = 3
         Instruction::new3(OpCode::Jmp, 255, 253, 0), // 3: target 3 + (-3) = 0 (back-edge)
     ];
     assert_eq!(
@@ -148,9 +148,9 @@ fn test_find_region_includes_loop_back_edge() {
     // jump back to a RetVal) is NOT a loop back-edge — and the resulting
     // 1-instruction straight-line fragment is rejected (small region).
     let exit_seq = vec![
-        Instruction::new3(OpCode::IAdd, 0, 1, 2), // 0
-        Instruction::new3(OpCode::ISub, 0, 1, 2), // 1
-        Instruction::new3(OpCode::JmpF, 0, 0, 1), // 2: target 3
+        Instruction::new3(OpCode::IAdd, 0, 1, 2),    // 0
+        Instruction::new3(OpCode::ISub, 0, 1, 2),    // 1
+        Instruction::new3(OpCode::JmpF, 0, 0, 1),    // 2: target 3
         Instruction::new3(OpCode::Jmp, 255, 253, 0), // 3: target 0 (< offset when offset=1)
     ];
     assert_eq!(
@@ -506,7 +506,7 @@ fn build_pow_module(limit: i64) -> CodeModule {
     m.emit(Instruction::new1(OpCode::Const0, 0)); //  1: r0 = 0 (i)
     emit_c(&mut m, c_two, 2); //  2: r2 = 2
     m.emit(Instruction::new1(OpCode::Const0, 3)); //  3: r3 = 0 (sum)
-    // loop body (pc 4..=8)
+                                                  // loop body (pc 4..=8)
     m.emit(Instruction::new3(OpCode::IPow, 0, 2, 4)); //  4: r4 = i ** 2
     m.emit(Instruction::new3(OpCode::IAdd, 3, 4, 3)); //  5: r3 += r4
     m.emit(Instruction::new1(OpCode::IInc, 0)); //  6: i++

@@ -119,8 +119,7 @@ static TRACING_INIT: Mutex<bool> = Mutex::new(false);
 /// [`init_tracing`] can build an `opentelemetry_sdk::trace::Tracer` (the
 /// `tracing_opentelemetry` layer requires a `PreSampledTracer`, which the
 /// boxed global tracer is not).
-static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::TracerProvider>> =
-    Mutex::new(None);
+static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::TracerProvider>> = Mutex::new(None);
 
 /// Install a `tracing` subscriber that forwards spans to both the terminal
 /// (formatted layer, filtered by `RUST_LOG`) and OpenTelemetry/OTLP, using
@@ -131,9 +130,9 @@ static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::TracerProvider>> 
 /// provider is configured the layer forwards to a no-op tracer (spans are
 /// dropped) while terminal logging still works.
 pub fn init_tracing(service_name: &str) -> Result<(), String> {
+    use opentelemetry::trace::TracerProvider as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use opentelemetry::trace::TracerProvider as _;
     let mut guard = TRACING_INIT.lock();
     if *guard {
         return Ok(());

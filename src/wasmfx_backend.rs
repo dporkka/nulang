@@ -19,9 +19,7 @@
 //! suspension effect kinds. The tag imports are only emitted when at least
 //! one function actually suspends.
 
-use crate::cir::{
-    BinaryOp, CirExpr, CirFunction, CirStmt, CirTerminator, EffectKind, UnaryOp,
-};
+use crate::cir::{BinaryOp, CirExpr, CirFunction, CirStmt, CirTerminator, EffectKind, UnaryOp};
 use crate::cir_analysis;
 use crate::cir_lower;
 use crate::mir;
@@ -99,11 +97,15 @@ impl WasmFxBackend {
         let mut types = TypeSection::new();
         types.ty().function([], [ValType::I64]); // 0
         types.ty().function([ValType::I64], [ValType::I64]); // 1
-        types.ty().function([ValType::I64, ValType::I64], [ValType::I64]); // 2
-        types.ty().function([ValType::I32, ValType::I32], [ValType::I64]); // 3
+        types
+            .ty()
+            .function([ValType::I64, ValType::I64], [ValType::I64]); // 2
+        types
+            .ty()
+            .function([ValType::I32, ValType::I32], [ValType::I64]); // 3
         types.ty().function([ValType::I64], []); // 4 — tag payload type
-        // Continuation types (wasm-encoder 0.220 exposes these only through
-        // the subtype path on the core-type encoder).
+                                                 // Continuation types (wasm-encoder 0.220 exposes these only through
+                                                 // the subtype path on the core-type encoder).
         types.ty().subtype(&SubType {
             is_final: true,
             supertype_idx: None,
@@ -145,7 +147,11 @@ impl WasmFxBackend {
 
     pub fn compile(&mut self, mir_module: &mir::Module, _module_name: &str) -> NuResult<Vec<u8>> {
         // Pre-scan: closures are unsupported (mirrors mir_wasm.rs).
-        for func in mir_module.functions.iter().chain(mir_module.behaviors.iter()) {
+        for func in mir_module
+            .functions
+            .iter()
+            .chain(mir_module.behaviors.iter())
+        {
             for block in &func.blocks {
                 for stmt in &block.stmts {
                     if let mir::Stmt::Assign { op, .. } = stmt {
@@ -550,7 +556,7 @@ impl WasmFxBackend {
         body.instruction(&Instruction::LocalSet(SCRATCH_B));
         for (i, arg) in args.iter().enumerate() {
             let offset = crate::cir::FRAME_HEADER_SIZE + i * 8;
-        body.instruction(&Instruction::LocalGet(SCRATCH_B));
+            body.instruction(&Instruction::LocalGet(SCRATCH_B));
             body.instruction(&Instruction::I64Const(offset as i64));
             body.instruction(&Instruction::I64Add);
             body.instruction(&Instruction::I32WrapI64);
@@ -658,7 +664,11 @@ impl WasmFxBackend {
                 // the payload. Resume functions wrap themselves (the
                 // registry maps main function → resume function; a resume
                 // function's own index falls back to itself).
-                let resume_idx = self.resume_func_of.get(&own_idx).copied().unwrap_or(own_idx);
+                let resume_idx = self
+                    .resume_func_of
+                    .get(&own_idx)
+                    .copied()
+                    .unwrap_or(own_idx);
                 body.instruction(&Instruction::RefFunc(resume_idx));
                 body.instruction(&Instruction::ContNew(TY_CONT_FULL));
                 body.instruction(&Instruction::LocalGet(FRAME_PTR_LOCAL));
@@ -830,7 +840,13 @@ impl WasmFxBackend {
         body.instruction(&Instruction::I64Or);
     }
 
-    fn emit_cir_unary(&self, body: &mut Function, op: UnaryOp, operand: &CirExpr, cir: &CirFunction) {
+    fn emit_cir_unary(
+        &self,
+        body: &mut Function,
+        op: UnaryOp,
+        operand: &CirExpr,
+        cir: &CirFunction,
+    ) {
         let pm = value_layout::PAYLOAD_MASK as i64;
         match op {
             UnaryOp::Neg => {
@@ -929,7 +945,10 @@ mod tests {
         assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
         // Should have the nulang_init export
         let wasm_str = String::from_utf8_lossy(&wasm);
-        assert!(wasm_str.contains("nulang_init"), "missing nulang_init export");
+        assert!(
+            wasm_str.contains("nulang_init"),
+            "missing nulang_init export"
+        );
     }
 
     #[test]
@@ -1017,7 +1036,10 @@ mod tests {
         let wasm = compile_source_to_wasmfx(r#"perform LLM.ask("test")"#).expect("compile");
         let wasm_str = String::from_utf8_lossy(&wasm);
         // Should have tag_llm_ask import for suspension
-        assert!(wasm_str.contains("tag_llm_ask"), "missing tag_llm_ask import");
+        assert!(
+            wasm_str.contains("tag_llm_ask"),
+            "missing tag_llm_ask import"
+        );
     }
 
     #[test]
@@ -1025,7 +1047,10 @@ mod tests {
         let wasm = compile_source_to_wasmfx("42").expect("compile");
         let wasm_str = String::from_utf8_lossy(&wasm);
         // Non-suspending modules should NOT have tag imports
-        assert!(!wasm_str.contains("tag_"), "non-suspending module should not have tag imports");
+        assert!(
+            !wasm_str.contains("tag_"),
+            "non-suspending module should not have tag imports"
+        );
     }
 
     #[test]

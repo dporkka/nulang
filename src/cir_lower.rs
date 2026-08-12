@@ -64,7 +64,6 @@ pub fn is_suspending_rvalue(op: &RValue) -> bool {
     }
 }
 
-
 /// Non-suspending functions produce a CIR with no `SuspendAndYield`
 /// terminators and compile to plain Wasm (no `cont.new`/`suspend`).
 pub fn lower_mir_function_unconditional(func: &mir::Function) -> CirFunction {
@@ -158,13 +157,20 @@ pub fn lower_mir_function_unconditional(func: &mir::Function) -> CirFunction {
     // MIR locals plus reserved locals (frame ptr at 252).
     let max_mir_local = func.locals.iter().map(|l| l.id.0).max().unwrap_or(0);
     let local_count = (pc + max_mir_local + 1).max(FRAME_PTR_VAR.0 + 1);
-    let locals: Vec<CirLocal> = (0..local_count).map(|i| CirLocal { id: VarId(i) }).collect();
+    let locals: Vec<CirLocal> = (0..local_count)
+        .map(|i| CirLocal { id: VarId(i) })
+        .collect();
 
     CirFunction {
         name: func.name.clone(),
         locals,
         blocks: cir_blocks,
-        entry_block: BlockId(block_map.get(&func.entry.0).copied().unwrap_or(func.entry.0)),
+        entry_block: BlockId(
+            block_map
+                .get(&func.entry.0)
+                .copied()
+                .unwrap_or(func.entry.0),
+        ),
     }
 }
 
@@ -217,9 +223,7 @@ fn translate_stmt(stmt: &Stmt, func: &mir::Function, pc: u32) -> CirStmt {
                     src: CirExpr::ConstNil,
                 },
             },
-            RValue::Send {
-                actor, args, ..
-            } => CirStmt::Emit {
+            RValue::Send { actor, args, .. } => CirStmt::Emit {
                 effect: EffectKind::ActorSend,
                 args: std::iter::once(CirExpr::Var(var(actor, pc)))
                     .chain(args.iter().map(|a| CirExpr::Var(var(a, pc))))
@@ -366,11 +370,7 @@ fn translate_terminator(term: &Terminator, _func: &mir::Function, pc: u32) -> Ci
         Terminator::Return(Some(l)) => CirTerminator::Return(Some(CirExpr::Var(var(l, pc)))),
         Terminator::Return(None) => CirTerminator::Return(None),
         Terminator::Jump(t) => CirTerminator::Jump(BlockId(t.0)),
-        Terminator::Branch {
-            cond,
-            then_,
-            else_,
-        } => CirTerminator::Branch {
+        Terminator::Branch { cond, then_, else_ } => CirTerminator::Branch {
             cond: CirExpr::Var(var(cond, pc)),
             then_block: BlockId(then_.0),
             else_block: BlockId(else_.0),
@@ -388,10 +388,7 @@ fn translate_terminator(term: &Terminator, _func: &mir::Function, pc: u32) -> Ci
 fn suspend_effect_and_args(op: &RValue, pc: u32) -> (EffectKind, Vec<CirExpr>) {
     match op {
         RValue::Perform {
-            effect,
-            op,
-            args,
-            ..
+            effect, op, args, ..
         } if effect == "LLM" && op == "ask" => (
             EffectKind::LlmAsk,
             args.iter().map(|a| CirExpr::Var(var(a, pc))).collect(),
@@ -401,7 +398,9 @@ fn suspend_effect_and_args(op: &RValue, pc: u32) -> (EffectKind, Vec<CirExpr>) {
             vec![CirExpr::ConstString(name.clone())],
         ),
         RValue::ReceiveWait {
-            timeout, max_params, ..
+            timeout,
+            max_params,
+            ..
         } => (
             EffectKind::MailboxDequeue,
             vec![
@@ -413,7 +412,9 @@ fn suspend_effect_and_args(op: &RValue, pc: u32) -> (EffectKind, Vec<CirExpr>) {
             EffectKind::MailboxDequeue,
             vec![CirExpr::ConstI64(*max_params as i64)],
         ),
-        RValue::PerformAsync { effect_op, args, .. } => (
+        RValue::PerformAsync {
+            effect_op, args, ..
+        } => (
             EffectKind::PerformAsync,
             std::iter::once(CirExpr::ConstString(effect_op.clone()))
                 .chain(args.iter().map(|a| CirExpr::Var(var(a, pc))))
@@ -442,8 +443,8 @@ const IMPORT_IO_READ: u32 = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::{FunctionBuilder, RValue, Terminator, LocalId};
     use crate::cir::CirTerminator;
+    use crate::mir::{FunctionBuilder, LocalId, RValue, Terminator};
     use crate::types::{PrimitiveType, Type};
     /// Build a MIR function that adds two int params.
     fn build_add_function() -> mir::Function {
@@ -451,11 +452,7 @@ mod tests {
         let a = b.add_param("a", Type::Primitive(PrimitiveType::Int));
         let b_id = b.add_param("b", Type::Primitive(PrimitiveType::Int));
         let sum = b.add_temp(Type::Primitive(PrimitiveType::Int));
-        b.assign(sum, RValue::Binary(
-            crate::ast::BinOp::Add,
-            a,
-            b_id,
-        ));
+        b.assign(sum, RValue::Binary(crate::ast::BinOp::Add, a, b_id));
         b.terminate(Terminator::Return(Some(sum)));
         b.build()
     }
@@ -464,13 +461,19 @@ mod tests {
         let mut b = FunctionBuilder::new("ask_llm", Some(Type::Primitive(PrimitiveType::String)));
         let prompt = b.add_temp(Type::Primitive(PrimitiveType::String));
         let result = b.add_temp(Type::Primitive(PrimitiveType::String));
-        b.assign(prompt, RValue::Const(crate::bytecode::Constant::String("test".into())));
-        b.assign(result, RValue::Perform {
-            effect: "LLM".into(),
-            op: "ask".into(),
-            args: vec![prompt],
-            resolved_handler: None,
-        });
+        b.assign(
+            prompt,
+            RValue::Const(crate::bytecode::Constant::String("test".into())),
+        );
+        b.assign(
+            result,
+            RValue::Perform {
+                effect: "LLM".into(),
+                op: "ask".into(),
+                args: vec![prompt],
+                resolved_handler: None,
+            },
+        );
         b.terminate(Terminator::Return(Some(result)));
         b.build()
     }
@@ -479,7 +482,12 @@ mod tests {
     fn build_signal_wait_function() -> mir::Function {
         let mut b = FunctionBuilder::new("wait_signal", Some(Type::Primitive(PrimitiveType::Unit)));
         let result = b.add_temp(Type::Primitive(PrimitiveType::Unit));
-        b.assign(result, RValue::SignalWait { name: "tick".into() });
+        b.assign(
+            result,
+            RValue::SignalWait {
+                name: "tick".into(),
+            },
+        );
         b.terminate(Terminator::Return(Some(result)));
         b.build()
     }
@@ -490,11 +498,14 @@ mod tests {
         let timeout = b.add_temp(Type::Primitive(PrimitiveType::Int));
         b.assign(timeout, RValue::Const(crate::bytecode::Constant::Int(5000)));
         let result = b.add_temp(Type::Primitive(PrimitiveType::Unit));
-        b.assign(result, RValue::ReceiveWait {
-            behavior_ids: vec![],
-            max_params: 4,
-            timeout,
-        });
+        b.assign(
+            result,
+            RValue::ReceiveWait {
+                behavior_ids: vec![],
+                max_params: 4,
+                timeout,
+            },
+        );
         b.terminate(Terminator::Return(Some(result)));
         b.build()
     }
@@ -547,8 +558,10 @@ mod tests {
         // Entry block should have no SuspendAndYield
         assert!(!cir.blocks.is_empty());
         for block in &cir.blocks {
-            assert!(!matches!(block.terminator, CirTerminator::SuspendAndYield { .. }),
-                "non-suspending function should have no SuspendAndYield");
+            assert!(
+                !matches!(block.terminator, CirTerminator::SuspendAndYield { .. }),
+                "non-suspending function should have no SuspendAndYield"
+            );
         }
     }
 
@@ -557,8 +570,15 @@ mod tests {
         let func = build_llm_ask_function();
         let cir = lower_mir_function_unconditional(&func);
         // Should have at least 2 blocks: pre-suspend + resume
-        assert!(cir.blocks.len() >= 2, "suspending function should have >=2 CIR blocks, got {}", cir.blocks.len());
-        let has_suspend = cir.blocks.iter().any(|b| matches!(b.terminator, CirTerminator::SuspendAndYield { .. }));
+        assert!(
+            cir.blocks.len() >= 2,
+            "suspending function should have >=2 CIR blocks, got {}",
+            cir.blocks.len()
+        );
+        let has_suspend = cir
+            .blocks
+            .iter()
+            .any(|b| matches!(b.terminator, CirTerminator::SuspendAndYield { .. }));
         assert!(has_suspend, "suspending function must have SuspendAndYield");
     }
 

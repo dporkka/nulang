@@ -266,7 +266,15 @@ fn cmd_new(path_arg: Option<&str>, template: Option<&str>) -> NuResult<()> {
         });
     }
     let tmpl = template.unwrap_or("default");
-    let valid = ["default", "cli", "lib", "full", "distributed", "ai-agent", "web"];
+    let valid = [
+        "default",
+        "cli",
+        "lib",
+        "full",
+        "distributed",
+        "ai-agent",
+        "web",
+    ];
     if !valid.contains(&tmpl) {
         return Err(NuError::PackageError {
             msg: format!(
@@ -1501,16 +1509,29 @@ mod tests {
         // that references a `main` entry point. Guards against a template
         // arm being added to `template_files` but forgotten in the valid
         // list (or vice versa).
-        for name in ["default", "cli", "lib", "full", "distributed", "ai-agent", "web"] {
-            let dir = std::env::temp_dir()
-                .join(format!("nulang_tmpl_test_{}_{}", name, std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            scaffold_package(&dir, "tmpl-app", name).expect(&format!(
-                "template '{}' should scaffold",
-                name
+        for name in [
+            "default",
+            "cli",
+            "lib",
+            "full",
+            "distributed",
+            "ai-agent",
+            "web",
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "nulang_tmpl_test_{}_{}",
+                name,
+                std::process::id()
             ));
+            let _ = std::fs::remove_dir_all(&dir);
+            scaffold_package(&dir, "tmpl-app", name)
+                .expect(&format!("template '{}' should scaffold", name));
             let main = dir.join("src/main.nula");
-            assert!(main.exists(), "template '{}' must provide src/main.nula", name);
+            assert!(
+                main.exists(),
+                "template '{}' must provide src/main.nula",
+                name
+            );
             let src = std::fs::read_to_string(&main).expect("read main.nula");
             assert!(
                 src.contains("main"),
@@ -1591,7 +1612,8 @@ mod tests {
 
     impl ChangeDir {
         fn new(dir: &Path) -> Self {
-            let original = PACKAGE_ROOT_OVERRIDE.with(|c| c.borrow_mut().replace(dir.to_path_buf()));
+            let original =
+                PACKAGE_ROOT_OVERRIDE.with(|c| c.borrow_mut().replace(dir.to_path_buf()));
             ChangeDir { original }
         }
     }

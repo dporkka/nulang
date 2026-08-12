@@ -407,7 +407,12 @@ impl FunctionBuilder {
         self.add_local_with_cap(name, ty, Capability::Tag)
     }
 
-    pub fn add_local_with_cap(&mut self, name: impl Into<String>, ty: Type, cap: Capability) -> LocalId {
+    pub fn add_local_with_cap(
+        &mut self,
+        name: impl Into<String>,
+        ty: Type,
+        cap: Capability,
+    ) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
         self.locals.push(Local {
@@ -426,7 +431,12 @@ impl FunctionBuilder {
     pub fn add_temp_with_cap(&mut self, ty: Type, cap: Capability) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
-        self.locals.push(Local { id, name: None, ty, cap });
+        self.locals.push(Local {
+            id,
+            name: None,
+            ty,
+            cap,
+        });
         id
     }
 

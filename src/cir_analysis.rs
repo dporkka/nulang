@@ -115,9 +115,13 @@ pub fn compute_live_vars(func: &mut CirFunction) {
         // The resume value arrives via the shared resume function's RESULT_VAR
         // local; copy it into the MIR destination local of the suspending
         // assignment.
-        func.blocks[i]
-            .stmts
-            .insert(1, CirStmt::Assign { dst: resume_var, src: CirExpr::Var(RESULT_VAR) });
+        func.blocks[i].stmts.insert(
+            1,
+            CirStmt::Assign {
+                dst: resume_var,
+                src: CirExpr::Var(RESULT_VAR),
+            },
+        );
     }
 }
 
@@ -208,7 +212,9 @@ fn successors(term: &CirTerminator) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cir::{CirBlock, CirExpr, CirFunction, CirStmt, CirTerminator, EffectKind, BlockId, VarId};
+    use crate::cir::{
+        BlockId, CirBlock, CirExpr, CirFunction, CirStmt, CirTerminator, EffectKind, VarId,
+    };
 
     /// Build a minimal 2-block CIR: block 0 suspends (LLM.ask with one live var),
     /// block 1 (resume) returns the result.
@@ -219,14 +225,17 @@ mod tests {
 
         CirFunction {
             name: "test_suspend".into(),
-            locals: (0..256).map(|i| crate::cir::CirLocal { id: VarId(i) }).collect(),
+            locals: (0..256)
+                .map(|i| crate::cir::CirLocal { id: VarId(i) })
+                .collect(),
             entry_block: BlockId(0),
             blocks: vec![
                 CirBlock {
                     id: BlockId(0),
-                    stmts: vec![
-                        CirStmt::Assign { dst: v1, src: CirExpr::ConstI64(42) },
-                    ],
+                    stmts: vec![CirStmt::Assign {
+                        dst: v1,
+                        src: CirExpr::ConstI64(42),
+                    }],
                     terminator: CirTerminator::SuspendAndYield {
                         effect: EffectKind::LlmAsk,
                         args: vec![CirExpr::Var(v0)],
@@ -261,8 +270,14 @@ mod tests {
 
         // Block 0 should have SaveFrame appended
         let block0 = &cir.blocks[0];
-        let has_save = block0.stmts.iter().any(|s| matches!(s, CirStmt::SaveFrame { .. }));
-        assert!(has_save, "block 0 should have SaveFrame after liveness analysis");
+        let has_save = block0
+            .stmts
+            .iter()
+            .any(|s| matches!(s, CirStmt::SaveFrame { .. }));
+        assert!(
+            has_save,
+            "block 0 should have SaveFrame after liveness analysis"
+        );
 
         // Block 0's terminator should have live_vars populated
         if let CirTerminator::SuspendAndYield { live_vars, .. } = &block0.terminator {
@@ -275,13 +290,21 @@ mod tests {
 
         // Block 1 should have RestoreFrame + resume Assign
         let block1 = &cir.blocks[1];
-        let has_restore = block1.stmts.iter().any(|s| matches!(s, CirStmt::RestoreFrame { .. }));
+        let has_restore = block1
+            .stmts
+            .iter()
+            .any(|s| matches!(s, CirStmt::RestoreFrame { .. }));
         assert!(has_restore, "resume block should have RestoreFrame");
-        let has_resume_assign = block1.stmts.iter().any(|s| matches!(s,
-            CirStmt::Assign { dst, src: CirExpr::Var(resume_src) }
-            if *dst == VarId(2) && *resume_src == RESULT_VAR
-        ));
-        assert!(has_resume_assign, "resume block should assign from RESULT_VAR");
+        let has_resume_assign = block1.stmts.iter().any(|s| {
+            matches!(s,
+                CirStmt::Assign { dst, src: CirExpr::Var(resume_src) }
+                if *dst == VarId(2) && *resume_src == RESULT_VAR
+            )
+        });
+        assert!(
+            has_resume_assign,
+            "resume block should assign from RESULT_VAR"
+        );
     }
 
     #[test]
@@ -291,20 +314,22 @@ mod tests {
             name: "no_suspend".into(),
             locals: vec![],
             entry_block: BlockId(0),
-            blocks: vec![
-                CirBlock {
-                    id: BlockId(0),
-                    stmts: vec![
-                        CirStmt::Assign { dst: VarId(0), src: CirExpr::ConstI64(1) },
-                    ],
-                    terminator: CirTerminator::Return(Some(CirExpr::Var(VarId(0)))),
-                },
-            ],
+            blocks: vec![CirBlock {
+                id: BlockId(0),
+                stmts: vec![CirStmt::Assign {
+                    dst: VarId(0),
+                    src: CirExpr::ConstI64(1),
+                }],
+                terminator: CirTerminator::Return(Some(CirExpr::Var(VarId(0)))),
+            }],
         };
         let blocks_before = cir.blocks[0].stmts.len();
         compute_live_vars(&mut cir);
         // No SaveFrame/RestoreFrame should be added
-        assert_eq!(cir.blocks[0].stmts.len(), blocks_before,
-            "non-suspending function should not get SaveFrame/RestoreFrame");
+        assert_eq!(
+            cir.blocks[0].stmts.len(),
+            blocks_before,
+            "non-suspending function should not get SaveFrame/RestoreFrame"
+        );
     }
 }

@@ -14,9 +14,9 @@ pub mod cir;
 pub mod cir_analysis;
 #[cfg(feature = "wasmfx-backend")]
 pub mod cir_lower;
+pub mod core_vm;
 pub mod cranelift_utils;
 pub mod dap;
-pub mod core_vm;
 pub mod docgen;
 pub mod dst;
 pub mod effect_checker;
@@ -63,9 +63,9 @@ pub mod vm;
 pub mod wasm_component_runtime;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
+pub mod wasm_types;
 #[cfg(feature = "wasmfx-backend")]
 pub mod wasmfx_backend;
 #[cfg(feature = "wasmfx-backend")]
 pub mod wasmfx_runtime;
-pub mod wasm_types;
 pub mod witgen;

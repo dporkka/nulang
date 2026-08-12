@@ -145,7 +145,6 @@ impl TypeMetadata {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Capability Metadata
 // ---------------------------------------------------------------------------
@@ -156,22 +155,32 @@ pub struct CapabilityMetadata {
 
 impl Default for CapabilityMetadata {
     fn default() -> Self {
-        Self { caps: [crate::types::Capability::Tag; REG_COUNT] }
+        Self {
+            caps: [crate::types::Capability::Tag; REG_COUNT],
+        }
     }
 }
 
 impl CapabilityMetadata {
-    pub fn new() -> Self { Self::default() }
-    pub fn set_cap(&mut self, reg: usize, cap: crate::types::Capability) {
-        if reg < REG_COUNT { self.caps[reg] = cap; }
+    pub fn new() -> Self {
+        Self::default()
     }
-    pub fn get_cap(&self, reg: usize) -> crate::types::Capability { self.caps[reg] }
+    pub fn set_cap(&mut self, reg: usize, cap: crate::types::Capability) {
+        if reg < REG_COUNT {
+            self.caps[reg] = cap;
+        }
+    }
+    pub fn get_cap(&self, reg: usize) -> crate::types::Capability {
+        self.caps[reg]
+    }
     pub fn from_mir_function(func: &crate::mir::Function) -> Self {
         let mut meta = Self::new();
         let local_base = crate::mir::FunctionBuilder::LOCAL_BASE;
         for local in &func.locals {
             let reg = local_base as usize + local.id.0 as usize;
-            if reg < REG_COUNT { meta.caps[reg] = local.cap; }
+            if reg < REG_COUNT {
+                meta.caps[reg] = local.cap;
+            }
         }
         meta
     }

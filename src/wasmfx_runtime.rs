@@ -223,7 +223,11 @@ fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: 
 ///
 /// Fire-and-forget effect dispatch (Actor.send, event emission, ...).
 /// Effects are not wired to the actor runtime in this backend.
-fn host_emit(_caller: Caller<'_, HostState>, _frame_ptr: i32, _arg_count: i32) -> Result<i64, Error> {
+fn host_emit(
+    _caller: Caller<'_, HostState>,
+    _frame_ptr: i32,
+    _arg_count: i32,
+) -> Result<i64, Error> {
     Ok(value_layout::TAG_UNIT as i64)
 }
 

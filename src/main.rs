@@ -68,8 +68,8 @@ fn main() {
             Err(e) => {
                 eprintln!("OTLP tracing init failed ({e}); terminal logging only");
                 use tracing_subscriber::{fmt, EnvFilter};
-                let env_filter = EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("warn"));
+                let env_filter =
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
                 fmt().with_env_filter(env_filter).with_target(false).init();
             }
         }
@@ -1635,15 +1635,19 @@ fn run_source(
                 println!("{}", disassemble(&m));
             }
             let mut vm = nulang::core_vm::CoreVM::new();
-            let module_idx = vm.load_module_from_code(&m).map_err(|e| nulang::types::NuError::VMError {
-                msg: e,
-                span: Span::default(),
-            })?;
+            let module_idx =
+                vm.load_module_from_code(&m)
+                    .map_err(|e| nulang::types::NuError::VMError {
+                        msg: e,
+                        span: Span::default(),
+                    })?;
             let entry = m.entry_point.unwrap_or(0);
-            let value = vm.run(module_idx, entry).map_err(|e| nulang::types::NuError::VMError {
-                msg: e,
-                span: Span::default(),
-            })?;
+            let value = vm
+                .run(module_idx, entry)
+                .map_err(|e| nulang::types::NuError::VMError {
+                    msg: e,
+                    span: Span::default(),
+                })?;
             let result_str = if let Some(s) = vm.resolve_display_string(value) {
                 s
             } else {
@@ -2071,8 +2075,10 @@ mod tests {
                 c
             }
         "#;
-        let (ast, type_checker) = run_frontend(source, None, false).expect("frontend should accept the actor program");
-        let module = compile_with_new_pipeline(&ast, "test", &type_checker).expect("actor program should compile");
+        let (ast, type_checker) =
+            run_frontend(source, None, false).expect("frontend should accept the actor program");
+        let module = compile_with_new_pipeline(&ast, "test", &type_checker)
+            .expect("actor program should compile");
         let (_value, runtime) = run_with_runtime(module, None).expect("actor program should run");
         let rt = runtime.borrow();
         let actor = rt.actors.values().next().expect("one actor should exist");

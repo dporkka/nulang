@@ -200,10 +200,7 @@ pub(crate) fn spawn_from_module(
                                 runtime: runtime_ptr,
                             }));
                         } else {
-                            actor.register_behavior(
-                                String::new(),
-                                bytecode_step_placeholder,
-                            );
+                            actor.register_behavior(String::new(), bytecode_step_placeholder);
                             actor.aot_targets.push(None);
                         }
                     }

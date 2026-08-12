@@ -6,9 +6,8 @@ use crate::value_layout::{
     TAG_STRING,
 };
 use crate::vm::Value;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 // is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).
 
@@ -503,71 +502,79 @@ fn resolve_jit_string(raw: u64) -> Option<String> {
 /// back to the scheduler. Reset at each behavior invocation.
 pub const JIT_SAFEPOINT_BUDGET: u64 = 1000;
 
-/// Dummy counter that never reaches 0 — acts as fallback when no runtime
-/// actor is executing JIT code. `i64::MAX` is used because the safepoint
-/// check is a signed `≤ 0` comparison.
-static JIT_SAFEPOINT_DUMMY: AtomicU64 = AtomicU64::new(i64::MAX as u64);
-
-/// Process-global pointer to the current actor's `jit_safepoint_counter`.
-/// Set/cleared by the runtime. `AtomicPtr` so JIT code can load it via a
-/// single embedded address constant without indirection through a
-/// thread-local.
-pub static JIT_SAFEPOINT_PTR: AtomicPtr<u64> =
-    AtomicPtr::new(&JIT_SAFEPOINT_DUMMY as *const AtomicU64 as *mut u64);
+// JIT code can execute concurrently on different runtime worker threads. The
+// status slots and safepoint target therefore must be thread-local: process-
+// global slots let one VM consume another VM's branch exit or yield marker.
+thread_local! {
+    static JIT_SAFEPOINT_PTR: Cell<*mut u64> = const { Cell::new(std::ptr::null_mut()) };
+    static JIT_YIELD_PC: Cell<u64> = const { Cell::new(u64::MAX) };
+    static JIT_BRANCH_EXIT_PC: Cell<u64> = const { Cell::new(u64::MAX) };
+}
 
 pub fn set_jit_safepoint_ptr(ptr: *mut u64) {
-    JIT_SAFEPOINT_PTR.store(ptr, Ordering::Release);
+    JIT_SAFEPOINT_PTR.with(|cell| cell.set(ptr));
 }
 
 pub fn clear_jit_safepoint_ptr() {
-    JIT_SAFEPOINT_PTR.store(
-        &JIT_SAFEPOINT_DUMMY as *const AtomicU64 as *mut u64,
-        Ordering::Release,
-    );
+    JIT_SAFEPOINT_PTR.with(|cell| cell.set(std::ptr::null_mut()));
+}
+
+/// Check and decrement the current thread's actor reduction budget.
+/// Returns 1 when the compiled region must yield, otherwise 0.
+#[no_mangle]
+pub extern "C" fn nulang_jit_safepoint_check(_unused: u64) -> u64 {
+    JIT_SAFEPOINT_PTR.with(|cell| {
+        let ptr = cell.get();
+        if ptr.is_null() {
+            return 0;
+        }
+        // SAFETY: the runtime installs a pointer to the active actor's
+        // scheduler-confined counter for the duration of this JIT call.
+        unsafe {
+            let next = (*ptr).wrapping_sub(1);
+            *ptr = next;
+            u64::from((next as i64) <= 0)
+        }
+    })
+}
+
+/// Store a relative bytecode offset for a safepoint/effect fallback.
+#[no_mangle]
+pub extern "C" fn nulang_jit_set_yield_pc(offset: u64) -> u64 {
+    JIT_YIELD_PC.with(|slot| slot.set(offset));
+    0
+}
+
+/// Store a relative bytecode offset for a compiled branch exit.
+#[no_mangle]
+pub extern "C" fn nulang_jit_set_branch_exit_pc(offset: u64) -> u64 {
+    JIT_BRANCH_EXIT_PC.with(|slot| slot.set(offset));
+    0
 }
 
 /// Bytecode offset where the JIT yielded, or `u64::MAX` if no yield is
-/// pending. Set by JIT-compiled code (inline store), consumed by
-/// `try_jit_execute`. Single-scheduler-thread invariant: no CAS needed.
-pub static JIT_YIELD_PC: AtomicU64 = AtomicU64::new(u64::MAX);
-
+/// pending. Thread-local because multiple runtime workers can execute JIT
+/// code concurrently.
 pub fn take_jit_yield_pc() -> Option<usize> {
-    let old = JIT_YIELD_PC.swap(u64::MAX, Ordering::AcqRel);
-    if old == u64::MAX {
-        None
-    } else {
-        Some(old as usize)
-    }
+    JIT_YIELD_PC.with(|slot| {
+        let old = slot.replace(u64::MAX);
+        (old != u64::MAX).then_some(old as usize)
+    })
 }
 
 /// Bytecode offset where a compiled region exited via a branch to a target
-/// OUTSIDE the region, or `u64::MAX` if none. Unlike `JIT_YIELD_PC` (real
-/// suspensions — PerformDirect / safepoint), a branch exit is NOT a
-/// suspension: the VM just resumes the interpreter at the target pc and keeps
-/// running. Single-scheduler-thread invariant: no CAS needed.
-pub static JIT_BRANCH_EXIT_PC: AtomicU64 = AtomicU64::new(u64::MAX);
-
-/// Take the branch-exit pc (relative to region start) if one is pending.
+/// outside the region. Thread-local for the same reason as the yield slot.
 pub fn take_jit_branch_exit_pc() -> Option<usize> {
-    let old = JIT_BRANCH_EXIT_PC.swap(u64::MAX, Ordering::AcqRel);
-    if old == u64::MAX {
-        None
-    } else {
-        Some(old as usize)
-    }
+    JIT_BRANCH_EXIT_PC.with(|slot| {
+        let old = slot.replace(u64::MAX);
+        (old != u64::MAX).then_some(old as usize)
+    })
 }
 
 /// Called from JIT-compiled code when the safepoint budget is exhausted.
-///
-/// Stores the bytecode offset where execution should resume (relative to
-/// region start) and returns 1 (must yield).
-///
-/// # Safety
-/// Called only from JIT-compiled code on the scheduler thread.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_safepoint_yield(resume_offset: u64) -> u64 {
-    JIT_YIELD_PC.store(resume_offset, Ordering::Release);
-    1 // must yield
+    nulang_jit_set_yield_pc(resume_offset)
 }
 
 unsafe fn with_callbacks<R>(f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks) -> R) -> R {
@@ -1336,21 +1343,38 @@ unsafe fn call_closure_dispatch(fn_ptr: u64, all: &[u64]) -> u64 {
         8 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
                 std::mem::transmute(fn_ptr);
-            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7])
+            f(
+                all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7],
+            )
         }
         9 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
                 std::mem::transmute(fn_ptr);
-            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8])
+            f(
+                all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8],
+            )
         }
         10 => {
             let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
                 std::mem::transmute(fn_ptr);
-            f(all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9])
+            f(
+                all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9],
+            )
         }
         11 => {
-            let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
-                std::mem::transmute(fn_ptr);
+            let f: unsafe extern "C" fn(
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+                u64,
+            ) -> u64 = std::mem::transmute(fn_ptr);
             f(
                 all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9],
                 all[10],
@@ -1581,8 +1605,27 @@ define_aot_receive!(nulang_aot_receive_match_3, id0, id1, id2);
 define_aot_receive!(nulang_aot_receive_match_4, id0, id1, id2, id3);
 define_aot_receive!(nulang_aot_receive_match_5, id0, id1, id2, id3, id4);
 define_aot_receive!(nulang_aot_receive_match_6, id0, id1, id2, id3, id4, id5);
-define_aot_receive!(nulang_aot_receive_match_7, id0, id1, id2, id3, id4, id5, id6);
-define_aot_receive!(nulang_aot_receive_match_8, id0, id1, id2, id3, id4, id5, id6, id7);
+define_aot_receive!(
+    nulang_aot_receive_match_7,
+    id0,
+    id1,
+    id2,
+    id3,
+    id4,
+    id5,
+    id6
+);
+define_aot_receive!(
+    nulang_aot_receive_match_8,
+    id0,
+    id1,
+    id2,
+    id3,
+    id4,
+    id5,
+    id6,
+    id7
+);
 
 /// Read the i-th payload value of the most recent AOT receive match (boxed),
 /// or nil when out of range.
@@ -1610,6 +1653,31 @@ pub unsafe extern "C" fn nulang_aot_receive_pop() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_jit_status_slots_are_thread_local() {
+        let left = std::thread::spawn(|| {
+            let mut budget = 1u64;
+            super::set_jit_safepoint_ptr(&mut budget);
+            assert_eq!(super::nulang_jit_safepoint_check(0), 1);
+            super::nulang_jit_set_yield_pc(7);
+            super::nulang_jit_set_branch_exit_pc(11);
+            assert_eq!(super::take_jit_yield_pc(), Some(7));
+            assert_eq!(super::take_jit_branch_exit_pc(), Some(11));
+            super::clear_jit_safepoint_ptr();
+        });
+        let right = std::thread::spawn(|| {
+            let mut budget = 100u64;
+            super::set_jit_safepoint_ptr(&mut budget);
+            assert_eq!(super::nulang_jit_safepoint_check(0), 0);
+            assert_eq!(super::take_jit_yield_pc(), None);
+            assert_eq!(super::take_jit_branch_exit_pc(), None);
+            super::clear_jit_safepoint_ptr();
+        });
+        left.join().unwrap();
+        right.join().unwrap();
+    }
+
     #[test]
     fn test_jit_helpers_linked() {
         // Force the linker to retain the JIT runtime helpers by taking
@@ -1619,6 +1687,9 @@ mod tests {
         let _ = super::nulang_arr_len as unsafe extern "C" fn(_, _, _);
         let _ = super::nulang_field_load as unsafe extern "C" fn(_, _, _, _);
         let _ = super::nulang_safepoint_yield as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_jit_safepoint_check as extern "C" fn(u64) -> u64;
+        let _ = super::nulang_jit_set_yield_pc as extern "C" fn(u64) -> u64;
+        let _ = super::nulang_jit_set_branch_exit_pc as extern "C" fn(u64) -> u64;
         let _ = super::nulang_alloc_obj as unsafe extern "C" fn(u64, u32) -> u64;
         let _ = super::nulang_obj_get as unsafe extern "C" fn(u64, u64) -> u64;
         let _ = super::nulang_obj_set as unsafe extern "C" fn(u64, u64, u64);
@@ -1633,7 +1704,8 @@ mod tests {
         let _ = super::nulang_aot_send_0 as unsafe extern "C" fn(u64, u64);
         let _ = super::nulang_aot_send_1 as unsafe extern "C" fn(u64, u64, u64);
         let _ = super::nulang_aot_send_2 as unsafe extern "C" fn(u64, u64, u64, u64);
-        let _ = super::nulang_aot_send_8 as unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
+        let _ = super::nulang_aot_send_8
+            as unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
         let _ = super::nulang_aot_receive_match_1 as unsafe extern "C" fn(u64) -> u64;
         let _ = super::nulang_aot_receive_match_2 as unsafe extern "C" fn(u64, u64) -> u64;
         let _ = super::nulang_aot_receive_payload as unsafe extern "C" fn(u64) -> u64;
@@ -1663,15 +1735,15 @@ mod tests {
 
         // nulang_iadd must also handle string operands (unknown-type add):
         // "hello" + 2 + 3 = "hello23".
-        let r2 = super::nulang_iadd(
-            hello,
-            crate::vm::Value::int(2).as_raw(),
-        );
+        let r2 = super::nulang_iadd(hello, crate::vm::Value::int(2).as_raw());
         let r3 = super::nulang_iadd(r2, crate::vm::Value::int(3).as_raw());
         assert_eq!(super::resolve_string_coerce(r3).as_deref(), Some("hello23"));
 
         // Pure int add is unaffected.
-        let ri = super::nulang_iadd(crate::vm::Value::int(5).as_raw(), crate::vm::Value::int(7).as_raw());
+        let ri = super::nulang_iadd(
+            crate::vm::Value::int(5).as_raw(),
+            crate::vm::Value::int(7).as_raw(),
+        );
         assert_eq!(crate::vm::Value::from_raw(ri).as_int(), Some(12));
 
         super::aot_clear_constants();

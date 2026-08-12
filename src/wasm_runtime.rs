@@ -412,12 +412,7 @@ fn host_str_eq(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64,
 /// interpreter's IAdd/ISub/IMul/IDiv/IMod semantics. The WASM backend has no
 /// float arithmetic of its own (its `emit_binop` is integer-only), so numeric
 /// ops route here.
-fn host_arith_fi(
-    a: u64,
-    b: u64,
-    fop: fn(f64, f64) -> f64,
-    iop: fn(i64, i64) -> i64,
-) -> i64 {
+fn host_arith_fi(a: u64, b: u64, fop: fn(f64, f64) -> f64, iop: fn(i64, i64) -> i64) -> i64 {
     if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
         fop(f64::from_bits(a), f64::from_bits(b)).to_bits() as i64
     } else {
@@ -430,10 +425,20 @@ fn host_arith_fi(
 }
 
 fn host_add(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
-    Ok(host_arith_fi(a as u64, b as u64, |x, y| x + y, |x, y| x + y))
+    Ok(host_arith_fi(
+        a as u64,
+        b as u64,
+        |x, y| x + y,
+        |x, y| x + y,
+    ))
 }
 fn host_sub(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
-    Ok(host_arith_fi(a as u64, b as u64, |x, y| x - y, |x, y| x - y))
+    Ok(host_arith_fi(
+        a as u64,
+        b as u64,
+        |x, y| x - y,
+        |x, y| x - y,
+    ))
 }
 fn host_mul(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error> {
     Ok(host_arith_fi(
@@ -544,8 +549,11 @@ fn host_ffi_call_impl(
     let func = {
         let registry = crate::ffi::native::FFI_REGISTRY
             .get_or_init(|| std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new()));
-        let mut reg = registry.lock().map_err(|_| Error::msg("ffi registry lock"))?;
-        unsafe { reg.resolve_or_load(&lib_s, &sym_s, signature) }.map_err(|_| Error::msg("ffi resolve"))?
+        let mut reg = registry
+            .lock()
+            .map_err(|_| Error::msg("ffi registry lock"))?;
+        unsafe { reg.resolve_or_load(&lib_s, &sym_s, signature) }
+            .map_err(|_| Error::msg("ffi resolve"))?
     };
     // Marshal CStr params from WASM memory into CStrings valid for the call.
     let mut cstrings: Vec<std::ffi::CString> = Vec::new();
@@ -640,14 +648,10 @@ fn host_cmp(_caller: Caller<'_, HostState>, a: i64, b: i64, code: i64) -> Result
             _ => ia >= ib,
         }
     };
-    // Float comparisons return a tagged float 0.0/1.0 (matching the
-    // interpreter's step_fcmp_*) — not a bool — otherwise `-(0.3 >= 3.22)`
-    // negates a bool as int 0 instead of a float -0.0.
-    if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
-        Ok(crate::vm::Value::float(if eq { 1.0 } else { 0.0 }).as_raw() as i64)
-    } else {
-        Ok(value_layout::tag_bool(eq) as i64)
-    }
+    // Comparisons always produce booleans, including when both operands are
+    // floats. Returning a float 0.0/1.0 makes `as_bool()` fail and diverges
+    // from the interpreter's FCmp* opcodes.
+    Ok(value_layout::tag_bool(eq) as i64)
 }
 
 /// `env.pow(a: i64, b: i64) -> i64`
