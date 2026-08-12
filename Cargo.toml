@@ -86,7 +86,7 @@ tokio = { version = "1.37.0", features = ["full", "macros", "net", "rt-multi-thr
 # OpenTelemetry observability (optional, see [features])
 opentelemetry = { version = "0.24", optional = true }
 opentelemetry-otlp = { version = "0.17", optional = true, default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-client"] }
-opentelemetry_sdk = { version = "0.24", optional = true, features = ["rt-tokio", "rt-tokio-current-thread"] }
+opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio", "rt-tokio-current-thread"] }
 
 # Python interop (optional, see [features])
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }
