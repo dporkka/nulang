@@ -140,6 +140,9 @@ impl WasmRuntime {
             .func_wrap("env", "arith_neg", host_neg)
             .map_err(map_wasmtime_err)?;
         linker
+            .func_wrap("env", "arith_fneg", host_fneg)
+            .map_err(map_wasmtime_err)?;
+        linker
             .func_wrap("env", "arr_load", host_arr_load)
             .map_err(map_wasmtime_err)?;
         linker
@@ -501,6 +504,17 @@ fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
         // matching the interpreter (negating a tuple/array yields 0, not a
         // corrupted pointer payload).
         Ok(value_layout::tag_int(-crate::jit::runtime::as_int_or_zero(a)) as i64)
+    }
+}
+
+/// VM FNeg semantics: negate a real float, and use -0.0 for every tagged
+/// or otherwise non-float operand via `as_float().unwrap_or(0.0)`.
+fn host_fneg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
+    let a = a as u64;
+    if value_layout::is_float_raw(a) {
+        Ok((a ^ 0x8000_0000_0000_0000) as i64)
+    } else {
+        Ok((-0.0f64).to_bits() as i64)
     }
 }
 

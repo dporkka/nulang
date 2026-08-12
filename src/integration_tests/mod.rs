@@ -9216,6 +9216,22 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
+        fn test_wasm_negated_float_comparison_matches_interpreter() {
+            // This accepted mutant lowers the comparison to a tagged Bool,
+            // while the VM's FNeg fallback produces -0.0. WASM must preserve
+            // that exact result instead of returning tagged Int 0.
+            let source = "-(0.3 >= 3.22)";
+            let (expected, _) = super::run_source(source).expect("interpreter run");
+            let actual = run_source_to_value(source).expect("WASM run");
+            assert_eq!(
+                actual.as_raw(),
+                expected.as_raw(),
+                "WASM unary negation must match interpreter"
+            );
+            assert_eq!(actual.as_float(), Some(-0.0));
+        }
+
+        #[test]
         fn test_wasm_run_pow() {
             // Integer exponentiation `a ** b` (previously returned nil in WASM).
             let val = run_source_to_value(r#"fn f() -> Int { 10 - 3 ** 2 } f()"#).expect("run");

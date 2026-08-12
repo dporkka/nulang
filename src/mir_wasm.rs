@@ -41,6 +41,9 @@ const IMPORT_ARITH_MOD: u32 = 12;
 const IMPORT_ARITH_CMP: u32 = 13;
 /// Function index of `env.arith_neg` — unary negation (i64) -> i64.
 const IMPORT_ARITH_NEG: u32 = 14;
+/// Function index of `env.arith_fneg` — VM FNeg semantics (i64) -> i64.
+/// Kept after the existing imports so older indices remain stable.
+const IMPORT_ARITH_FNEG: u32 = 21;
 /// Function index of `env.arr_load` — bounds-checked array load (i64, i64) -> i64.
 const IMPORT_ARR_LOAD: u32 = 15;
 /// Function index of `env.ffi_call_0` — foreign call (lib, sym, sig) -> i64.
@@ -50,7 +53,7 @@ const IMPORT_FFI_CALL_2: u32 = 18;
 const IMPORT_FFI_CALL_3: u32 = 19;
 const IMPORT_FFI_CALL_4: u32 = 20;
 /// Number of function imports. Module-defined functions start at this index.
-const FUNC_IMPORT_COUNT: u32 = 21;
+const FUNC_IMPORT_COUNT: u32 = 22;
 
 const TY_VOID_TO_I64: u32 = 0;
 
@@ -367,6 +370,8 @@ impl WasmBackend {
         imports.import("env", "ffi_call_2", EntityType::Function(ffi2));
         imports.import("env", "ffi_call_3", EntityType::Function(ffi3));
         imports.import("env", "ffi_call_4", EntityType::Function(ffi4));
+        // Keep this new import at the end so existing function indices stay stable.
+        imports.import("env", "arith_fneg", EntityType::Function(TY_I64_TO_I64));
         self.imports = imports;
     }
 
@@ -1175,7 +1180,23 @@ impl WasmBackend {
                 // Route through `env.arith_neg` so float operands negate their
                 // sign bit instead of being int-corrupted.
                 body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
-                body.instruction(&Instruction::Call(IMPORT_ARITH_NEG));
+                // Mirror mir_codegen's type-directed opcode choice. MIR locals
+                // carry Float for comparisons in this pipeline, even though the
+                // runtime comparison result is a tagged Bool; that path is still
+                // FNeg in the VM and must produce -0.0 for the Bool fallback.
+                let is_float = func
+                    .locals
+                    .get(a.0 as usize)
+                    .map(|local| {
+                        local.ty
+                            == crate::types::Type::Primitive(crate::types::PrimitiveType::Float)
+                    })
+                    .unwrap_or(false);
+                body.instruction(&Instruction::Call(if is_float {
+                    IMPORT_ARITH_FNEG
+                } else {
+                    IMPORT_ARITH_NEG
+                }));
             }
             UnOp::Not => {
                 let tf = value_layout::tag_bool(false) as i64;
