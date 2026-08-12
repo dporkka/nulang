@@ -3073,6 +3073,60 @@ fn compile_binary(
         .ok_or_else(|| AotCompileError::Internal("uninitialized rhs".into()))?;
 
     use crate::ast::BinOp;
+    // `TypeMetadata` is conservative for locals produced by control-flow
+    // merges. In an all-Int unboxed function those locals still carry raw
+    // integers; falling through to the boxed helper path would reinterpret
+    // them as NaN-tagged values. Use the unboxed operation whenever the
+    // enclosing function has selected the unboxed representation.
+    if mode == CompileMode::Unboxed {
+        let raw = match op {
+            BinOp::Add => Some(builder.ins().iadd(lhs_val, rhs_val)),
+            BinOp::Sub => Some(builder.ins().isub(lhs_val, rhs_val)),
+            BinOp::Mul => Some(builder.ins().imul(lhs_val, rhs_val)),
+            BinOp::Eq => Some({
+                let cmp = builder.ins().icmp(IntCC::Equal, lhs_val, rhs_val);
+                emit_tag_bool(builder, cmp)
+            }),
+            BinOp::Ne => Some({
+                let cmp = builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val);
+                emit_tag_bool(builder, cmp)
+            }),
+            BinOp::Lt => Some({
+                let cmp = builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThan, lhs_val, rhs_val);
+                emit_tag_bool(builder, cmp)
+            }),
+            BinOp::Le => Some({
+                let cmp = builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val);
+                emit_tag_bool(builder, cmp)
+            }),
+            BinOp::Gt => Some({
+                let cmp = builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val);
+                emit_tag_bool(builder, cmp)
+            }),
+            BinOp::Ge => Some({
+                let cmp = builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThanOrEqual, lhs_val, rhs_val);
+                emit_tag_bool(builder, cmp)
+            }),
+            BinOp::BitAnd => Some(builder.ins().band(lhs_val, rhs_val)),
+            BinOp::BitOr => Some(builder.ins().bor(lhs_val, rhs_val)),
+            BinOp::BitXor => Some(builder.ins().bxor(lhs_val, rhs_val)),
+            BinOp::Shl => Some(builder.ins().ishl(lhs_val, rhs_val)),
+            BinOp::Shr => Some(builder.ins().sshr(lhs_val, rhs_val)),
+            _ => None,
+        };
+        if let Some(value) = raw {
+            return Ok(value);
+        }
+    }
+
     let lhs_reg_usize = lhs_reg as usize;
     let rhs_reg_usize = rhs_reg as usize;
 
@@ -3188,7 +3242,9 @@ fn compile_binary(
                 } else {
                     let l = emit_sext48(builder, lhs_val);
                     let r = emit_sext48(builder, rhs_val);
-                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, l, r);
+                    let cmp = builder
+                        .ins()
+                        .icmp(IntCC::SignedGreaterThan, l, r);
                     Ok(emit_tag_bool(builder, cmp))
                 }
             } else {

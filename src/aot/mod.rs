@@ -140,7 +140,6 @@ impl AotModule {
                     span: Span::default(),
                 })?;
             func_ids.push(fid);
-
             // If the function is all-Int, also declare an unboxed variant.
             if codegen::is_all_int(func) {
                 let ub_name = format!("nulang_fn_{}_unboxed", idx);
