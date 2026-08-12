@@ -10,7 +10,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
-use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
@@ -119,12 +119,7 @@ fn compile_source(source: &str) -> Result<crate::bytecode::CodeModule, NuError> 
     let _module_type = type_checker.check_module(&ast)?;
 
     let mut effect_checker = EffectChecker::new();
-    let effect_ctx = EffectContext::empty();
-    for decl in &ast.decls {
-        if let crate::ast::Decl::Function { body, .. } = decl {
-            effect_checker.infer_effects(&effect_ctx, body)?;
-        }
-    }
+    effect_checker.check_module(&ast.decls)?;
 
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
