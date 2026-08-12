@@ -5,9 +5,9 @@
 //! on a background thread.  The scheduler thread periodically calls
 //! [`Runtime::publish_metrics`] to push the latest snapshot into a shared
 //! buffer; the server thread serves whichever snapshot it last received.
+use std::net::TcpListener;
 
 use std::io::Write;
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;

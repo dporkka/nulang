@@ -3277,7 +3277,6 @@ mod optimize_tests {
     fn test_fold_string_concat() {
         // `"hello" + " " + "world"` folds to a single string constant.
         let module = compile_source(r#""hello" + " " + "world""#).unwrap();
-        eprintln!("DEBUG constants: {:?}", module.constants);
         assert!(
             module
                 .constants

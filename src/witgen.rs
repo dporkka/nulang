@@ -115,6 +115,216 @@ pub fn builtin_effect_wit_interfaces() -> Vec<WitInterface> {
                 result: Some("string".into()),
             }],
         },
+        WitInterface {
+            name: "string".into(),
+            ops: vec![
+                WitOp {
+                    name: "length".into(),
+                    params: vec![("s".into(), "string".into())],
+                    result: Some("s64".into()),
+                },
+                WitOp {
+                    name: "char-at".into(),
+                    params: vec![("s".into(), "string".into()), ("idx".into(), "s64".into())],
+                    result: Some("s64".into()),
+                },
+                WitOp {
+                    name: "from-char".into(),
+                    params: vec![("code".into(), "s64".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "concat".into(),
+                    params: vec![("a".into(), "string".into()), ("b".into(), "string".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "substring".into(),
+                    params: vec![("s".into(), "string".into()), ("start".into(), "s64".into()), ("len".into(), "s64".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "to-int".into(),
+                    params: vec![("s".into(), "string".into())],
+                    result: Some("s64".into()),
+                },
+                WitOp {
+                    name: "to-float".into(),
+                    params: vec![("s".into(), "string".into())],
+                    result: Some("f64".into()),
+                },
+            ],
+        },
+        WitInterface {
+            name: "fs".into(),
+            ops: vec![
+                WitOp {
+                    name: "read".into(),
+                    params: vec![("path".into(), "string".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "write".into(),
+                    params: vec![("path".into(), "string".into()), ("content".into(), "string".into())],
+                    result: None,
+                },
+                WitOp {
+                    name: "append".into(),
+                    params: vec![("path".into(), "string".into()), ("content".into(), "string".into())],
+                    result: None,
+                },
+                WitOp {
+                    name: "exists".into(),
+                    params: vec![("path".into(), "string".into())],
+                    result: Some("bool".into()),
+                },
+            ],
+        },
+        WitInterface {
+            name: "array".into(),
+            ops: vec![
+                WitOp {
+                    name: "length".into(),
+                    params: vec![("arr".into(), "list<s64>".into())],
+                    result: Some("s64".into()),
+                },
+                WitOp {
+                    name: "push".into(),
+                    params: vec![("arr".into(), "list<s64>".into()), ("elem".into(), "s64".into())],
+                    result: Some("list<s64>".into()),
+                },
+                WitOp {
+                    name: "new".into(),
+                    params: vec![("len".into(), "s64".into()), ("init".into(), "s64".into())],
+                    result: Some("list<s64>".into()),
+                },
+                WitOp {
+                    name: "set".into(),
+                    params: vec![("arr".into(), "list<s64>".into()), ("idx".into(), "s64".into()), ("val".into(), "s64".into())],
+                    result: Some("list<s64>".into()),
+                },
+                WitOp {
+                    name: "slice".into(),
+                    params: vec![("arr".into(), "list<s64>".into()), ("start".into(), "s64".into()), ("end".into(), "s64".into())],
+                    result: Some("list<s64>".into()),
+                },
+                WitOp {
+                    name: "range".into(),
+                    params: vec![("start".into(), "s64".into()), ("end".into(), "s64".into())],
+                    result: Some("list<s64>".into()),
+                },
+            ],
+        },
+        WitInterface {
+            name: "http".into(),
+            ops: vec![
+                WitOp {
+                    name: "get".into(),
+                    params: vec![("url".into(), "string".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "post".into(),
+                    params: vec![("url".into(), "string".into()), ("body".into(), "string".into())],
+                    result: Some("string".into()),
+                },
+            ],
+        },
+        WitInterface {
+            name: "debug".into(),
+            ops: vec![
+                WitOp {
+                    name: "inspect".into(),
+                    params: vec![("label".into(), "string".into()), ("value".into(), "s64".into())],
+                    result: Some("s64".into()),
+                },
+            ],
+        },
+        WitInterface {
+            name: "int".into(),
+            ops: vec![
+                WitOp {
+                    name: "to-string".into(),
+                    params: vec![("n".into(), "s64".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "to-float".into(),
+                    params: vec![("n".into(), "s64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "to-hex".into(),
+                    params: vec![("n".into(), "s64".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "to-binary".into(),
+                    params: vec![("n".into(), "s64".into())],
+                    result: Some("string".into()),
+                },
+            ],
+        },
+        WitInterface {
+            name: "float".into(),
+            ops: vec![
+                WitOp {
+                    name: "to-int".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("s64".into()),
+                },
+                WitOp {
+                    name: "to-string".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("string".into()),
+                },
+                WitOp {
+                    name: "sin".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "cos".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "tan".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "sqrt".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "log".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "exp".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "log2".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "log10".into(),
+                    params: vec![("x".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+                WitOp {
+                    name: "pow".into(),
+                    params: vec![("base".into(), "f64".into()), ("exp".into(), "f64".into())],
+                    result: Some("f64".into()),
+                },
+            ],
+        },
     ]
 }
 
@@ -224,6 +434,13 @@ pub fn extract_effects_from_source(source: &str) -> BTreeSet<String> {
                     "random" => "random",
                     "signal" => "signal",
                     "provider" | "inference" => "provider",
+                    "string" => "string",
+                    "fs" => "fs",
+                    "array" => "array",
+                    "http" => "http",
+                    "debug" => "debug",
+                    "int" => "int",
+                    "float" => "float",
                     _ => continue, // unknown effect, skip
                 };
                 effects.insert(wit_name.to_string());

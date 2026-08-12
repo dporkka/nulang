@@ -66,6 +66,7 @@ impl AotModule {
         // Set up Cranelift with the target ISA.
         let mut flag_builder = settings::builder();
         let _ = flag_builder.set("enable_simd", "true");
+        let _ = flag_builder.set("opt_level", "speed");
         let isa_builder = create_isa_builder(target)?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
@@ -389,6 +390,11 @@ impl AotModule {
 
     /// Execute the module entry point and return the result as a u64 value.
     ///
+    /// A module with no `__main`/`main` (e.g. only function definitions, a
+    /// library) has no entry expression; running it yields nil, matching the
+    /// interpreter. Do NOT fall back to function 0 — that could be a
+    /// parameterized function, and calling it with no args would return
+    /// garbage.
     pub fn run(&self) -> NuResult<u64> {
         // A module with no `__main`/`main` (e.g. only function definitions, a
         // library) has no entry expression; running it yields nil, matching the
@@ -421,12 +427,26 @@ impl AotModule {
         // their target's native entry point.
         set_aot_module_ctx(self);
 
+        // Install StandaloneVmCallbacks so perform_builtin_effect works
+        // (e.g., IO.print, String.length, etc.) in the native backend.
+        // This mirrors how the bytecode VM uses StandaloneVmCallbacks for
+        // top-level execution in `VM::run()`.
+        let callbacks = Box::new(crate::vm::StandaloneVmCallbacks::new());
+        let callbacks_ptr = Box::into_raw(callbacks) as *mut dyn crate::vm::ActorVmCallbacks;
+        unsafe {
+            crate::jit::runtime::set_jit_callbacks(callbacks_ptr);
+        }
+
         // Call the compiled function. Signature: extern "C" fn() -> u64
         // (for the entry point with no params).
         let func: extern "C" fn() -> u64 = unsafe { std::mem::transmute(*ptr) };
         let result = func();
 
-        // Clean up.
+        // Clean up: reconstruct Box to drop callbacks and free heap/GC.
+        unsafe {
+            crate::jit::runtime::clear_jit_callbacks();
+            let _ = Box::from_raw(callbacks_ptr as *mut crate::vm::StandaloneVmCallbacks);
+        }
         crate::jit::runtime::aot_clear_constants();
         clear_aot_module_ctx();
         let _ = crate::jit::runtime::aot_take_heap();
@@ -678,9 +698,14 @@ macro_rules! define_aot_perform {
                     .map(|cm| cm as *const crate::bytecode::CodeModule)
                     .unwrap_or(std::ptr::null())
             });
+            let constants = if module.is_null() {
+                crate::aot::aot_module_constants()
+            } else {
+                unsafe { &(*module).constants }
+            };
             crate::jit::runtime::try_with_callbacks(|cb| {
                 if module.is_null() {
-                    cb.perform_builtin_effect(&effect, Some(&op), &[], &regs)
+                    cb.perform_builtin_effect(&effect, Some(&op), constants, &regs)
                 } else {
                     cb.perform_builtin_effect_in_module(
                         &effect,

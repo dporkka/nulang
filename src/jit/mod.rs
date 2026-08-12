@@ -116,6 +116,7 @@ impl JitSession {
         let mut flag_builder = settings::builder();
         // Enable baseline SIMD support (SSE2 on x86_64, NEON on aarch64)
         let _ = flag_builder.set("enable_simd", "true");
+        let _ = flag_builder.set("opt_level", "speed");
         let isa_builder = match cranelift_native::builder() {
             Ok(b) => b,
             Err(msg) => {
