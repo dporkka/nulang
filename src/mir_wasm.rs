@@ -230,6 +230,9 @@ enum DispatchResultShape {
     /// by pool builtins whose handlers return envelope objects (e.g. the
     /// inference handler's `{"content": "...", ...}` response).
     JsonField(&'static str),
+    /// The result is discarded entirely (e.g. fire-and-forget writes).
+    /// Returns nil without parsing the ring buffer.
+    Discard,
 }
 
 /// A nulang language effect mapped to a pool EffectId + envelope.
@@ -242,12 +245,35 @@ struct PoolEffectContract {
     shape: DispatchResultShape,
 }
 
+/// JSON-quote a constant string arg (`None` when the arg is not a string
+/// constant — dynamic args are rejected earlier in the pre-scan).
+fn const_str_arg(consts: &[crate::bytecode::Constant], idx: usize) -> Option<String> {
+    match consts.get(idx) {
+        Some(crate::bytecode::Constant::String(s)) => Some(json_quote(s)),
+        _ => None,
+    }
+}
+
+/// A constant int arg as a JSON number literal.
+fn const_int_arg(consts: &[crate::bytecode::Constant], idx: usize) -> Option<String> {
+    match consts.get(idx) {
+        Some(crate::bytecode::Constant::Int(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// nulang builtin effects with a KNOWN nulang-cloud pool contract. These
 /// bypass the generic dotted-tag + positional-array contract so nulang
 /// programs can call the platform's built-in handlers by their language
 /// names (`perform Inference.ask("...")` → `nulang:inference/inference`
 /// with the chat envelope). Effects not listed here keep the generic
 /// contract (programs target handler-registered dotted tags directly).
+///
+/// The storage/queue/http builtins target the pool's STRING-contract tags
+/// (`nulang:storage/string` etc.) — the language-facing adapter handlers
+/// registered alongside the byte-contract WIT handlers in nulang-cloud's
+/// dev-server emulator. The nulang value type for these domains is the
+/// string, so the adapter speaks strings where the WIT world speaks bytes.
 fn pool_effect_contract(
     effect: &str,
     op: &str,
@@ -270,6 +296,81 @@ fn pool_effect_contract(
                     json_quote(&prompt)
                 ),
                 shape: DispatchResultShape::JsonField("content"),
+            })
+        }
+        ("Storage", "write") => {
+            // Storage.write(key, value) → string-contract storage handler.
+            let key = const_str_arg(consts, 0)?;
+            let value = const_str_arg(consts, 1)?;
+            Some(PoolEffectContract {
+                tag: "nulang:storage/string",
+                payload: format!(r#"{{"operation":"Write","key":{key},"value":{value}}}"#),
+                shape: DispatchResultShape::Discard,
+            })
+        }
+        ("Storage", "read") => {
+            // Storage.read(key) → String; the handler replies with
+            // `{"found": bool, "value": "..."}` — extract `value` (empty
+            // string when the key is absent).
+            let key = const_str_arg(consts, 0)?;
+            Some(PoolEffectContract {
+                tag: "nulang:storage/string",
+                payload: format!(r#"{{"operation":"Read","key":{key}}}"#),
+                shape: DispatchResultShape::JsonField("value"),
+            })
+        }
+        ("Storage", "delete") => {
+            let key = const_str_arg(consts, 0)?;
+            Some(PoolEffectContract {
+                tag: "nulang:storage/string",
+                payload: format!(r#"{{"operation":"Delete","key":{key}}}"#),
+                shape: DispatchResultShape::Discard,
+            })
+        }
+        ("Queue", "push") => {
+            // Queue.push(queue, message) → string-contract queue handler.
+            // (`send` is a reserved word in the nulang parser, so the
+            // language surface uses `push`; the handler envelope op is
+            // still `Send`.)
+            let name = const_str_arg(consts, 0)?;
+            let message = const_str_arg(consts, 1)?;
+            Some(PoolEffectContract {
+                tag: "nulang:queue/string",
+                payload: format!(
+                    r#"{{"operation":"Send","queue_name":{name},"message":{message}}}"#
+                ),
+                shape: DispatchResultShape::Discard,
+            })
+        }
+        ("Queue", "pop") => {
+            // Queue.pop(queue) → String; the handler replies with
+            // `{"message": "..."}` (empty string when the queue is empty).
+            let name = const_str_arg(consts, 0)?;
+            Some(PoolEffectContract {
+                tag: "nulang:queue/string",
+                payload: format!(r#"{{"operation":"Receive","queue_name":{name}}}"#),
+                shape: DispatchResultShape::JsonField("message"),
+            })
+        }
+        ("Http", "get") => {
+            // Http.get(url) → String body; the handler replies with
+            // `{"status": u16, "body": "..."}` — extract `body`.
+            let url = const_str_arg(consts, 0)?;
+            Some(PoolEffectContract {
+                tag: "nulang:http/string",
+                payload: format!(r#"{{"url":{url},"method":"GET","headers":{{}},"body":""}}"#),
+                shape: DispatchResultShape::JsonField("body"),
+            })
+        }
+        ("Timer", "sleep") => {
+            // Timer.sleep(ms) → nulang:timer/timer (the pool's timer
+            // handler); the result is discarded (nulang's sleep yields
+            // unit).
+            let ms = const_int_arg(consts, 0)?;
+            Some(PoolEffectContract {
+                tag: "nulang:timer/timer",
+                payload: format!(r#"{{"ms":{ms}}}"#),
+                shape: DispatchResultShape::Discard,
             })
         }
         _ => None,
@@ -2360,7 +2461,8 @@ impl WasmBackend {
     }
 
     /// Emit the dispatch-result read-back: the `nulang_dispatch` call left
-    /// the result LENGTH (i64) on the stack; 0 means no result (nil). For a
+    /// the result LENGTH (i64) on the stack; 0 means no result (nil).
+    /// `Discard` shapes skip the ring buffer entirely and yield nil. For a
     /// non-zero length the result is a JSON value at [`RING_BUFFER_BASE`]
     /// in linear memory. Parses:
     /// - `"..."`   → string (content copied to a bump-allocated buffer)
@@ -2526,6 +2628,12 @@ impl WasmBackend {
 
         // 252 = result length L (i64). If L == 0 → nil.
         body.instruction(&Instruction::LocalSet(252));
+        // Discard shapes never read the ring buffer: consume the length
+        // (above) and yield nil.
+        if shape == DispatchResultShape::Discard {
+            body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+            return;
+        }
         // For JsonField results, locate the field's JSON value first:
         // 253 = value-start byte offset (0 for a plain JSON value),
         // 252 = the value's byte length (0 = field not found → nil).
@@ -2536,6 +2644,10 @@ impl WasmBackend {
             }
             DispatchResultShape::JsonField(field) => {
                 self.emit_field_locate(body, field, base, &mem0);
+            }
+            // Discard short-circuits before this match (see above).
+            DispatchResultShape::Discard => {
+                unreachable!("Discard is handled before the read-back match")
             }
         }
         body.instruction(&Instruction::LocalGet(252));
@@ -3551,6 +3663,121 @@ mod tests {
             Some("hello back"),
             "content field must be extracted from the response object"
         );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_storage_read_maps_to_pool_builtin() {
+        // `perform Storage.read(key)` maps to the pool's string-contract
+        // storage tag; the handler's `{"found":..., "value": "..."}`
+        // response yields the stored string.
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Storage.read("greeting")"#,
+            Some(br#"{"found":true,"value":"hello"}"#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:storage/string", "string-contract storage tag");
+        assert_eq!(
+            payload, br#"{"operation":"Read","key":"greeting"}"#,
+            "read envelope payload"
+        );
+        assert!(
+            value.is_string(),
+            "value field must be extracted from the response object as a string"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_storage_write_maps_to_pool_builtin() {
+        // `perform Storage.write(key, value)` — fire-and-forget: the
+        // handler's `{"ok":true}` response is discarded → nil.
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Storage.write("greeting", "hello")"#,
+            Some(br#"{"ok":true}"#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:storage/string", "string-contract storage tag");
+        assert_eq!(
+            payload, br#"{"operation":"Write","key":"greeting","value":"hello"}"#,
+            "write envelope payload"
+        );
+        assert!(value.is_nil(), "write result must be discarded → nil");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_queue_receive_maps_to_pool_builtin() {
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Queue.pop("orders")"#,
+            Some(br#"{"message":"m1","count":1}"#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:queue/string", "string-contract queue tag");
+        assert_eq!(
+            payload, br#"{"operation":"Receive","queue_name":"orders"}"#,
+            "receive envelope payload"
+        );
+        assert!(
+            value.is_string(),
+            "message field must be extracted from the response object as a string"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_queue_send_maps_to_pool_builtin() {
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Queue.push("orders", "hello")"#,
+            Some(br#"{"ok":true}"#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:queue/string", "string-contract queue tag");
+        assert_eq!(
+            payload, br#"{"operation":"Send","queue_name":"orders","message":"hello"}"#,
+            "send envelope payload"
+        );
+        assert!(value.is_nil(), "send result must be discarded → nil");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_http_get_maps_to_pool_builtin() {
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Http.get("https://example.com/")"#,
+            Some(br#"{"status":200,"body":"<html>ok</html>"}"#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:http/string", "string-contract http tag");
+        assert_eq!(
+            payload, br#"{"url":"https://example.com/","method":"GET","headers":{},"body":""}"#,
+            "http get envelope payload"
+        );
+        assert!(
+            value.is_string(),
+            "body field must be extracted from the response object as a string"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_timer_sleep_maps_to_pool_builtin() {
+        // `perform Timer.sleep(ms)` lowers to PerformAsync; the pool's
+        // timer handler responds `{"scheduled":true}` — discarded → nil.
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Timer.sleep(1000)"#,
+            Some(br#"{"scheduled":true}"#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:timer/timer", "pool timer tag");
+        assert_eq!(payload, br#"{"ms":1000}"#, "timer envelope payload");
+        assert!(value.is_nil(), "sleep result must be discarded → nil");
     }
 
     #[test]
