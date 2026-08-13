@@ -8983,9 +8983,9 @@ match { a: 2, b: 9 } with {
         }
 
         #[test]
-        fn test_wasm_rejects_actor_ops() {
-            // Unsupported actor operations (e.g. `send`) must fail loudly at
-            // compile time instead of silently compiling to nil.
+        fn test_wasm_supports_send_and_rejects_remote_ops() {
+            // `send` now COMPILES via the guest-side actor emulation (it
+            // enqueues onto the module mailbox; the entry function drains it).
             let mut builder =
                 crate::mir::FunctionBuilder::new("main", Some(crate::types::Type::int()));
             let actor = builder.add_temp(crate::types::Type::int());
@@ -9021,8 +9021,43 @@ match { a: 2, b: 9 } with {
             };
             let mut backend = WasmBackend::new();
             assert!(
+                backend.compile(&module, "main").is_ok(),
+                "send must compile to a mailbox enqueue"
+            );
+
+            // Remote spawn (`spawn@node`) has no single-instance counterpart
+            // and must fail loudly at compile time, not silently compile.
+            let mut builder =
+                crate::mir::FunctionBuilder::new("main", Some(crate::types::Type::int()));
+            let node = builder.add_temp(crate::types::Type::int());
+            let out = builder.add_temp(crate::types::Type::int());
+            builder.assign(
+                node,
+                crate::mir::RValue::Const(crate::bytecode::Constant::Int(0)),
+            );
+            builder.assign(
+                out,
+                crate::mir::RValue::Spawn {
+                    behavior_idx: 0,
+                    init: vec![],
+                    target_node: Some(node),
+                },
+            );
+            builder.terminate(crate::mir::Terminator::Return(Some(out)));
+            let func = builder.build();
+            let module = crate::mir::Module {
+                name: "spawn".into(),
+                functions: vec![func],
+                behaviors: vec![],
+                actor_metadata: vec![],
+                compensation_of: vec![],
+                parallel_branches_of: vec![],
+                foreign_functions: vec![],
+            };
+            let mut backend = WasmBackend::new();
+            assert!(
                 backend.compile(&module, "main").is_err(),
-                "send must be rejected, not silently compiled"
+                "remote spawn must be rejected, not silently compiled"
             );
 
             // A user-defined effect (not IO.print/read or Array.length) now

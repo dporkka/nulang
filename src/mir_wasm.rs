@@ -65,6 +65,36 @@ const IMPORT_FFI_CALL_4: u32 = 20;
 /// Number of function imports. Module-defined functions start at this index.
 const FUNC_IMPORT_COUNT: u32 = 22;
 
+/// Module-global indices for the guest-side actor emulation (spawn/send/
+/// ask/state/receive all run inside one WASM instance — the pool delivers
+/// one `nulang_init` invocation per message and the module's own mailbox
+/// handles intra-program messaging).
+const GLOBAL_CURRENT_ACTOR: u32 = 0; // byte offset of the actor record whose
+                                     // behavior is executing (0 = none)
+const GLOBAL_MAILBOX_HEAD: u32 = 1; // head of the singly-linked message queue
+const GLOBAL_MAILBOX_TAIL: u32 = 2; // tail of the queue
+
+/// Scratch locals for the actor emulation (the function declares 256 i64
+/// locals; 251 is `state_local`, 252-255 are the dispatch/binop scratch —
+/// all transient within one statement, as here).
+const SCRATCH_NODE: u32 = 248; // message node / actor record pointer
+const SCRATCH_A: u32 = 249; // saved current-actor / prev pointer / target
+const SCRATCH_B: u32 = 250; // ask target pointer
+
+/// Actor record layout (a `nulang_alloc`'d block of i64 slots):
+/// slot 0 = the spawned actor's first behavior index; slots 1.. = state
+/// fields per `state_field_map`. The record's byte offset doubles as the
+/// actor handle carried in a `TAG_ACTOR` value's payload.
+const ACTOR_RECORD_SLOT_SIZE: i64 = 8;
+
+/// Message node layout (a `nulang_alloc`'d block of i64 slots):
+/// [next_ptr, target_record_ptr, behavior_idx, nargs, arg0..argN-1].
+const MSG_SLOT_NEXT: u32 = 0;
+const MSG_SLOT_TARGET: u32 = 1;
+const MSG_SLOT_BEHAVIOR: u32 = 2;
+const MSG_SLOT_NARGS: u32 = 3;
+const MSG_SLOT_ARGS: u32 = 4;
+
 const TY_VOID_TO_I64: u32 = 0;
 
 /// (i64, i64) -> i64 — used by `env.str_concat`.
@@ -83,6 +113,7 @@ pub struct WasmBackend {
     types: TypeSection,
     imports: ImportSection,
     functions: FunctionSection,
+    globals: GlobalSection,
     exports: ExportSection,
     codes: CodeSection,
     data: DataSection,
@@ -100,6 +131,24 @@ pub struct WasmBackend {
     field_map: HashMap<String, u8>,
     /// Foreign function declarations, indexed by `RValue::FFICall.idx`.
     foreign_functions: Vec<mir::ForeignFunction>,
+    /// True when the module contains actor machinery (spawn/send/ask/
+    /// receive/state) — gates the globals section + the entry-function
+    /// mailbox drain.
+    uses_actor_ops: bool,
+    /// Module-wide actor-state field name → slot index map (StateGet/
+    /// StateSet inside behavior bodies). Slots are 1-based within an actor
+    /// record (slot 0 = the spawned behavior index).
+    state_field_map: HashMap<String, u8>,
+    /// Declared state defaults per spawned actor: behavior_idx (the actor's
+    /// first behavior, from `RValue::Spawn`) → [(field name, default)].
+    actor_state_defaults: HashMap<usize, Vec<(String, crate::bytecode::Constant)>>,
+    /// Param counts of `Module::behaviors`, by behavior index — the mailbox
+    /// drain needs each behavior's arity to build its call.
+    behavior_param_counts: Vec<usize>,
+    /// Number of plain (non-behavior) module functions — behaviors are
+    /// compiled after them, so a behavior's wasm index =
+    /// FUNC_IMPORT_COUNT + module_function_count + behavior_idx.
+    module_function_count: usize,
 }
 
 /// Resolve a MIR local to its defining constant, if it is assigned exactly
@@ -171,6 +220,62 @@ fn json_quote(s: &str) -> String {
     out
 }
 
+/// How the guest parses a `nulang_dispatch` result out of the ring buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DispatchResultShape {
+    /// The result IS the JSON value (int/string/bool/null) — the generic
+    /// handler contract (handlers return JSON Nulang values directly).
+    JsonValue,
+    /// The result is a JSON object; extract the named field's value. Used
+    /// by pool builtins whose handlers return envelope objects (e.g. the
+    /// inference handler's `{"content": "...", ...}` response).
+    JsonField(&'static str),
+}
+
+/// A nulang language effect mapped to a pool EffectId + envelope.
+struct PoolEffectContract {
+    /// The exact EffectId the pool's `HandlerRegistry` serves.
+    tag: &'static str,
+    /// The JSON payload the pool handler expects (built from constant args).
+    payload: String,
+    /// How to parse the handler's JSON response.
+    shape: DispatchResultShape,
+}
+
+/// nulang builtin effects with a KNOWN nulang-cloud pool contract. These
+/// bypass the generic dotted-tag + positional-array contract so nulang
+/// programs can call the platform's built-in handlers by their language
+/// names (`perform Inference.ask("...")` → `nulang:inference/inference`
+/// with the chat envelope). Effects not listed here keep the generic
+/// contract (programs target handler-registered dotted tags directly).
+fn pool_effect_contract(
+    effect: &str,
+    op: &str,
+    consts: &[crate::bytecode::Constant],
+) -> Option<PoolEffectContract> {
+    use crate::bytecode::Constant;
+    match (effect, op) {
+        ("Inference", "ask") => {
+            // `perform Inference.ask(prompt)` → nulang:inference/inference
+            // with the chat envelope; the handler replies with
+            // `{"content": "...", ...}` — extract `content`.
+            let prompt = match consts.first() {
+                Some(Constant::String(s)) => s.clone(),
+                _ => return None,
+            };
+            Some(PoolEffectContract {
+                tag: "nulang:inference/inference",
+                payload: format!(
+                    "{{\"operation\":\"chat\",\"messages\":[{{\"role\":\"user\",\"content\":{}}}]}}",
+                    json_quote(&prompt)
+                ),
+                shape: DispatchResultShape::JsonField("content"),
+            })
+        }
+        _ => None,
+    }
+}
+
 impl WasmBackend {
     pub fn new() -> Self {
         let mut types = TypeSection::new();
@@ -216,6 +321,7 @@ impl WasmBackend {
             types,
             imports,
             functions: FunctionSection::new(),
+            globals: GlobalSection::new(),
             exports: ExportSection::new(),
             codes: CodeSection::new(),
             data: DataSection::new(),
@@ -227,6 +333,11 @@ impl WasmBackend {
             next_type_idx: TY_FIXED_COUNT,
             field_map: HashMap::new(),
             foreign_functions: Vec::new(),
+            uses_actor_ops: false,
+            state_field_map: HashMap::new(),
+            actor_state_defaults: HashMap::new(),
+            behavior_param_counts: Vec::new(),
+            module_function_count: 0,
         }
     }
 
@@ -265,8 +376,42 @@ impl WasmBackend {
         }
         self.field_map = field_map;
 
-        // Pre-scan: the WASM backend does not currently support closures (first-class functions).
-        // Return a compilation error so callers (like the differential fuzzer) know it's unsupported.
+        // Pre-scan: actor machinery. Collect state fields, actor state
+        // defaults, behavior arities, and mark the module as using actor
+        // ops (gates the globals section + entry mailbox drain).
+        self.state_field_map.clear();
+        self.actor_state_defaults.clear();
+        self.behavior_param_counts = mir.behaviors.iter().map(|b| b.params.len()).collect();
+        self.module_function_count = mir.functions.len();
+        let mut next_state_slot: u8 = 1;
+        fn collect_state(
+            map: &mut std::collections::HashMap<String, u8>,
+            next_slot: &mut u8,
+            name: &str,
+        ) {
+            map.entry(name.to_string()).or_insert_with(|| {
+                let s = *next_slot;
+                *next_slot = next_slot.saturating_add(1);
+                s
+            });
+        }
+        for meta in &mir.actor_metadata {
+            let first = meta.behavior_indices.first().copied();
+            let defaults: Vec<(String, crate::bytecode::Constant)> = meta
+                .state_defaults
+                .iter()
+                .map(|(n, c)| (n.clone(), c.clone()))
+                .collect();
+            if let Some(first) = first {
+                self.actor_state_defaults.insert(first, defaults);
+            }
+            for (name, _) in &meta.state_defaults {
+                collect_state(&mut self.state_field_map, &mut next_state_slot, name);
+            }
+        }
+        // Closure pre-scan: the WASM backend does not currently support
+        // closures (first-class functions). Return a compilation error so
+        // callers (like the differential fuzzer) know it's unsupported.
         for func in mir.functions.iter().chain(mir.behaviors.iter()) {
             for block in &func.blocks {
                 for stmt in &block.stmts {
@@ -283,20 +428,20 @@ impl WasmBackend {
                             });
                         }
                         // Reject RValues the standalone WASM runtime has no
-                        // actor/effect machinery for — they previously silently
-                        // compiled to nil. Fail loudly at compile time instead.
+                        // machinery for — they previously silently compiled
+                        // to nil. Fail loudly at compile time instead.
+                        // (Send/Spawn/Ask/Receive*/State are supported via
+                        // the guest-side actor emulation below.)
                         let unsupported = match op {
-                            RValue::Send { .. }
-                            | RValue::Spawn { .. }
-                            | RValue::Ask { .. }
-                            | RValue::Receive
-                            | RValue::ReceiveMatch { .. }
-                            | RValue::ReceiveWait { .. }
-                            | RValue::ReceiveCommit
-                            | RValue::Migrate { .. }
-                            | RValue::PerformAsync { .. }
+                            RValue::Migrate { .. }
                             | RValue::SignalWait { .. }
                             | RValue::Closure { .. } => true,
+                            // Remote spawn (`spawn@node`) has no counterpart
+                            // in a single-instance WASM module.
+                            RValue::Spawn {
+                                target_node: Some(_),
+                                ..
+                            } => true,
                             // The borrow (`&`) and dereference operators touch
                             // reference capabilities which are compile-time
                             // only (no runtime representation in the WASM VM).
@@ -307,6 +452,15 @@ impl WasmBackend {
                             // through nulang_dispatch (handled below — not
                             // unsupported).
                             RValue::Perform { .. } => false,
+                            // Actor machinery is supported (guest-side).
+                            RValue::Spawn { .. }
+                            | RValue::Send { .. }
+                            | RValue::Ask { .. }
+                            | RValue::Receive
+                            | RValue::ReceiveMatch { .. }
+                            | RValue::ReceiveWait { .. }
+                            | RValue::ReceiveCommit
+                            | RValue::StateGet { .. } => false,
                             _ => false,
                         };
                         if unsupported {
@@ -316,56 +470,51 @@ impl WasmBackend {
                                 span: crate::types::Span::default(),
                             });
                         }
-                        // Effect dispatch pre-scan: `perform Effect.op(args)`
-                        // lowers to `nulang_dispatch(tag, payload)` where the
-                        // payload is a compile-time JSON array of the args.
-                        // Constant args are interned here (intern_string needs
-                        // `&mut self`, compile_rvalue has only `&self`);
-                        // dynamic args are a loud compile error.
-                        if let RValue::Perform {
-                            effect, op, args, ..
-                        } = op
-                        {
-                            let dispatchable = !matches!(
-                                (effect.as_str(), op.as_str()),
-                                ("IO", "print")
-                                    | ("IO", "println")
-                                    | ("IO", "read")
-                                    | ("Array", "length")
-                            );
-                            if dispatchable {
-                                let consts = args
-                                    .iter()
-                                    .map(|l| resolve_const(func, *l))
-                                    .collect::<Option<Vec<_>>>();
-                                let Some(consts) = consts else {
-                                    return Err(crate::types::NuError::VMError {
-                                        msg: format!(
-                                            "WASM backend: effect {effect}.{op} requires constant \
-                                             args (dynamic effect args are not yet supported in \
-                                             the WASM backend)"
-                                        ),
-                                        span: crate::types::Span::default(),
-                                    });
-                                };
-                                let encoded =
-                                    consts.iter().map(json_arg).collect::<Option<Vec<_>>>();
-                                let Some(encoded) = encoded else {
-                                    return Err(crate::types::NuError::VMError {
-                                        msg: format!(
-                                            "WASM backend: effect {effect}.{op} has an arg that \
-                                             is not JSON-encodable (int/float/bool/string/nil \
-                                             only)"
-                                        ),
-                                        span: crate::types::Span::default(),
-                                    });
-                                };
-                                let tag = format!("{effect}.{op}");
-                                self.intern_string(&tag);
-                                self.intern_string(&format!("[{}]", encoded.join(",")));
+                        // Collect state fields (StateSet too — covered by the
+                        // fallthrough below).
+                        if let RValue::StateGet { field } = op {
+                            collect_state(&mut self.state_field_map, &mut next_state_slot, field);
+                            self.uses_actor_ops = true;
+                        }
+                        match op {
+                            RValue::Send { .. }
+                            | RValue::Spawn { .. }
+                            | RValue::Ask { .. }
+                            | RValue::Receive
+                            | RValue::ReceiveMatch { .. }
+                            | RValue::ReceiveWait { .. }
+                            | RValue::ReceiveCommit => {
+                                self.uses_actor_ops = true;
                             }
+                            _ => {}
+                        }
+                        // Effect dispatch pre-scan: `perform Effect.op(args)`
+                        // and async variants (`perform Inference.ask(prompt)`
+                        // lowers to PerformAsync) intern the nulang_dispatch
+                        // tag + compile-time JSON payload here (intern_string
+                        // needs `&mut self`, compile_rvalue has only `&self`);
+                        // dynamic args are a loud compile error.
+                        match op {
+                            RValue::Perform {
+                                effect, op, args, ..
+                            } => {
+                                self.intern_effect_dispatch(effect, op, args, func)?;
+                            }
+                            RValue::PerformAsync {
+                                effect_op, args, ..
+                            } => {
+                                let (effect, op) = effect_op
+                                    .split_once('.')
+                                    .unwrap_or((effect_op.as_str(), ""));
+                                self.intern_effect_dispatch(effect, op, args, func)?;
+                            }
+                            _ => {}
                         }
                         self.intern_const_strings(op);
+                    }
+                    if let Stmt::StateSet { field, .. } = stmt {
+                        collect_state(&mut self.state_field_map, &mut next_state_slot, field);
+                        self.uses_actor_ops = true;
                     }
                 }
             }
@@ -420,6 +569,23 @@ impl WasmBackend {
             }
         }
 
+        // Emit the actor-emulation globals (current actor + mailbox queue)
+        // only when the module actually uses actor machinery.
+        if self.uses_actor_ops {
+            let mut g = GlobalSection::new();
+            for _ in 0..3 {
+                g.global(
+                    GlobalType {
+                        val_type: ValType::I64,
+                        mutable: true,
+                        shared: false,
+                    },
+                    &ConstExpr::i64_const(0),
+                );
+            }
+            self.globals = g;
+        }
+
         // Emit data segment.
         if !self.string_data.is_empty() {
             self.data
@@ -431,6 +597,9 @@ impl WasmBackend {
         module.section(&self.types);
         module.section(&self.imports);
         module.section(&self.functions);
+        if self.uses_actor_ops {
+            module.section(&self.globals);
+        }
         module.section(&self.exports);
         module.section(&self.codes);
         module.section(&self.data);
@@ -441,6 +610,56 @@ impl WasmBackend {
         if let RValue::Const(crate::bytecode::Constant::String(s)) = rvalue {
             self.intern_string(s);
         }
+    }
+
+    /// Pre-scan interning for a dispatchable effect (`Perform` or the async
+    /// variant): validates constant args, computes the tag + JSON payload
+    /// (pool-builtin envelope or generic positional array), and interns both
+    /// so compile_rvalue can look them up by content.
+    fn intern_effect_dispatch(
+        &mut self,
+        effect: &str,
+        op: &str,
+        args: &[LocalId],
+        func: &mir::Function,
+    ) -> NuResult<()> {
+        let dispatchable = !matches!(
+            (effect, op),
+            ("IO", "print") | ("IO", "println") | ("IO", "read") | ("Array", "length")
+        );
+        if !dispatchable {
+            return Ok(());
+        }
+        let consts = args
+            .iter()
+            .map(|l| resolve_const(func, *l))
+            .collect::<Option<Vec<_>>>();
+        let Some(consts) = consts else {
+            return Err(crate::types::NuError::VMError {
+                msg: format!(
+                    "WASM backend: effect {effect}.{op} requires constant \
+                     args (dynamic effect args are not yet supported in \
+                     the WASM backend)"
+                ),
+                span: crate::types::Span::default(),
+            });
+        };
+        let encoded = consts.iter().map(json_arg).collect::<Option<Vec<_>>>();
+        let Some(encoded) = encoded else {
+            return Err(crate::types::NuError::VMError {
+                msg: format!(
+                    "WASM backend: effect {effect}.{op} has an arg that \
+                     is not JSON-encodable (int/float/bool/string/nil only)"
+                ),
+                span: crate::types::Span::default(),
+            });
+        };
+        let (tag, payload) = pool_effect_contract(effect, op, &consts)
+            .map(|c| (c.tag.to_string(), c.payload))
+            .unwrap_or_else(|| (format!("{effect}.{op}"), format!("[{}]", encoded.join(","))));
+        self.intern_string(&tag);
+        self.intern_string(&payload);
+        Ok(())
     }
 
     fn rebuild_imports(&mut self) {
@@ -606,10 +825,21 @@ impl WasmBackend {
 
             match &block.terminator {
                 Terminator::Return(Some(l)) => {
+                    // The entry function drains the mailbox on return so
+                    // fire-and-forget sends have their effects before the
+                    // program result is observed (any return point ends the
+                    // program — mirroring scheduler-driven mailbox processing
+                    // to quiescence).
+                    if self.uses_actor_ops && self.is_entry_function(func) {
+                        self.emit_mailbox_drain(&mut body);
+                    }
                     body.instruction(&Instruction::LocalGet(self.mir_local(l, func)));
                     body.instruction(&Instruction::Return);
                 }
                 Terminator::Return(None) => {
+                    if self.uses_actor_ops && self.is_entry_function(func) {
+                        self.emit_mailbox_drain(&mut body);
+                    }
                     body.instruction(&Instruction::I64Const(crate::value_layout::TAG_UNIT as i64));
                     body.instruction(&Instruction::Return);
                 }
@@ -894,8 +1124,31 @@ impl WasmBackend {
     fn compile_stmt(&mut self, body: &mut Function, stmt: &Stmt, func: &mir::Function) {
         match stmt {
             Stmt::Assign { dst, op } => {
-                self.compile_rvalue(body, op, func);
-                body.instruction(&Instruction::LocalSet(self.mir_local(dst, func)));
+                match op {
+                    // ReceiveMatch/ReceiveWait write dst AND the payload
+                    // temps — a single RValue can't express the register
+                    // range, so the emission takes the dst explicitly.
+                    RValue::ReceiveMatch {
+                        behavior_ids,
+                        max_params,
+                    } => {
+                        self.compile_receive_match_into(body, dst, behavior_ids, *max_params, func);
+                    }
+                    RValue::ReceiveWait {
+                        behavior_ids,
+                        max_params,
+                        timeout: _,
+                    } => {
+                        // Synchronous guest model: same scan (no suspension);
+                        // the no-match arm-count sentinel routes the MIR
+                        // compare chain to the `after`/timeout body.
+                        self.compile_receive_match_into(body, dst, behavior_ids, *max_params, func);
+                    }
+                    _ => {
+                        self.compile_rvalue(body, op, func);
+                        body.instruction(&Instruction::LocalSet(self.mir_local(dst, func)));
+                    }
+                }
             }
             Stmt::EnterHandle { .. } | Stmt::PopHandler => {
                 // User-defined effect handlers not yet supported.
@@ -909,10 +1162,31 @@ impl WasmBackend {
             Stmt::StoreFieldNamed { obj, field, src } => {
                 self.compile_field_store(body, obj, field, src, func);
             }
-            Stmt::Emit { .. } | Stmt::StateSet { .. } => {
-                // Effects and actor state are unsupported in the standalone
-                // WASM backend. These statements remain no-ops until the
-                // corresponding runtime machinery is implemented.
+            Stmt::StateSet { field, src } => {
+                // `self.field = src` — write the current actor's record slot.
+                // Outside any actor context the write is dropped (the
+                // interpreter's state set outside an actor is a no-op).
+                let slot = *self.state_field_map.get(field).unwrap_or(&1);
+                body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+                body.instruction(&Instruction::I64Eqz);
+                body.instruction(&Instruction::If(BlockType::Empty));
+                body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
+                body.instruction(&Instruction::Drop);
+                body.instruction(&Instruction::Else);
+                body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
+                body.instruction(&Instruction::I64Store(MemArg {
+                    offset: (slot as u64) * ACTOR_RECORD_SLOT_SIZE as u64,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::End);
+            }
+            Stmt::Emit { .. } => {
+                // Effect and actor-state statements without a WASM
+                // counterpart stay no-ops until the corresponding runtime
+                // machinery is implemented.
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
                 body.instruction(&Instruction::Drop);
             }
@@ -994,6 +1268,19 @@ impl WasmBackend {
             RValue::Perform {
                 effect, op, args, ..
             } => {
+                self.compile_perform(body, effect, op, args, func);
+            }
+            // `perform Inference.ask(prompt)` / `Timer.sleep(ms)` lower to
+            // PerformAsync (async effect dispatch). The WASM guest is
+            // synchronous, but the pool's dispatch adapter runs async
+            // handlers on its own runtime — so the lowering is identical to
+            // Perform (tag + payload → nulang_dispatch → read-back).
+            RValue::PerformAsync {
+                effect_op, args, ..
+            } => {
+                let (effect, op) = effect_op
+                    .split_once('.')
+                    .unwrap_or((effect_op.as_str(), ""));
                 self.compile_perform(body, effect, op, args, func);
             }
             RValue::ArrayLit(elems) => {
@@ -1267,6 +1554,68 @@ impl WasmBackend {
                 }
                 body.instruction(&Instruction::Call(import));
             }
+            // ── Guest-side actor emulation ────────────────────────────
+            // spawn/send/ask/receive/state run inside the module itself:
+            // spawned actors are records in linear memory, the mailbox is a
+            // singly-linked queue, and `ask` flushes pending messages to the
+            // target before dispatching (approximating the interpreter's
+            // FIFO mailbox). The entry function drains the queue on return.
+            RValue::StateGet { field } => {
+                self.compile_state_get(body, field);
+            }
+            RValue::SelfRef => {
+                // `self` used as an actor value (e.g. `send self.b(...)`):
+                // the current actor's record pointer, tagged as an actor
+                // ref; nil outside any actor context.
+                body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+                body.instruction(&Instruction::I64Eqz);
+                body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+                body.instruction(&Instruction::Else);
+                body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+                body.instruction(&Instruction::I64Const(value_layout::TAG_ACTOR as i64));
+                body.instruction(&Instruction::I64Or);
+                body.instruction(&Instruction::End);
+            }
+            RValue::Spawn {
+                behavior_idx,
+                init,
+                target_node: None,
+            } => {
+                self.compile_spawn(body, *behavior_idx, init, func);
+            }
+            RValue::Send {
+                actor,
+                behavior_idx,
+                args,
+                remote: _,
+            } => {
+                self.compile_send(body, *actor, *behavior_idx, args, func);
+            }
+            RValue::Ask {
+                actor,
+                behavior_idx,
+                args,
+                remote: _,
+                timeout_ms: _,
+            } => {
+                self.compile_ask(body, *actor, *behavior_idx, args, func);
+            }
+            RValue::Receive => {
+                self.compile_receive(body);
+            }
+            // ReceiveMatch/ReceiveWait are handled in compile_stmt (their
+            // dst + payload temps need the assignment target — the RValue
+            // carries no dst).
+            RValue::ReceiveMatch { .. } | RValue::ReceiveWait { .. } => {
+                body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+            }
+            RValue::ReceiveCommit => {
+                // The guest scan already unlinked the matched message; the
+                // commit is a no-op. Mirrors the VM (no register write — the
+                // temp keeps its 0-initialized value).
+                body.instruction(&Instruction::I64Const(0));
+            }
             _ => {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
             }
@@ -1290,6 +1639,553 @@ impl WasmBackend {
             align: 3,
             memory_index: 0,
         }));
+    }
+
+    // ── Guest-side actor emulation ──────────────────────────────────
+    //
+    // Model: one WASM instance hosts its own actor set. `spawn` allocates a
+    // state record (i64 slots: [behavior_idx, state...]) and returns a
+    // TAG_ACTOR value whose payload is the record's byte offset. `send`
+    // enqueues a message node onto a module-global singly-linked mailbox;
+    // `ask` flushes the mailbox (FIFO behavior processing) then calls the
+    // behavior directly; the entry function drains the mailbox on return.
+    // State accesses (StateGet/StateSet) address the CURRENT actor's record
+    // via the GLOBAL_CURRENT_ACTOR global.
+    //
+    // Memory discipline: record/node pointers are held as i64 (bump-allocator
+    // offsets widened with I64ExtendI32U), so every memory ADDRESS is wrapped
+    // with I32WrapI64 before an I64Load/I64Store; stored/loaded VALUES stay
+    // i64 untouched.
+
+    /// `self.field` — load state slot `field` of the current actor record;
+    /// nil outside any actor context (mirrors the VM's outside-actor nil).
+    fn compile_state_get(&self, body: &mut Function, field: &str) {
+        let slot = *self.state_field_map.get(field).unwrap_or(&1);
+        // outside any actor (current == 0) → nil
+        body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+        body.instruction(&Instruction::Else);
+        body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: (slot as u64) * ACTOR_RECORD_SLOT_SIZE as u64,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::End);
+    }
+
+    /// `spawn ActorName { overrides }` — allocate a state record for the
+    /// actor, initialize it from the declared defaults + spawn-site
+    /// overrides, and return `TAG_ACTOR | record_offset`.
+    fn compile_spawn(
+        &self,
+        body: &mut Function,
+        behavior_idx: usize,
+        init: &[(String, RValue)],
+        func: &mir::Function,
+    ) {
+        let nfields = self.state_field_map.len();
+        // record = nulang_alloc((nfields+1) * 8)
+        body.instruction(&Instruction::I32Const((((nfields as u32) + 1) * 8) as i32));
+        body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+        body.instruction(&Instruction::I64ExtendI32U);
+        body.instruction(&Instruction::LocalSet(SCRATCH_NODE));
+        // slot 0 = behavior_idx
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Const(behavior_idx as i64));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+        // defaults for this actor's declared state fields
+        let defaults: std::collections::HashMap<&str, &crate::bytecode::Constant> = self
+            .actor_state_defaults
+            .get(&behavior_idx)
+            .map(|d| d.iter().map(|(n, c)| (n.as_str(), c)).collect())
+            .unwrap_or_default();
+        for (name, slot) in &self.state_field_map {
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            match defaults.get(name.as_str()) {
+                Some(c) => self.compile_const(body, c),
+                None => {
+                    body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+                }
+            }
+            body.instruction(&Instruction::I64Store(MemArg {
+                offset: (*slot as u64) * ACTOR_RECORD_SLOT_SIZE as u64,
+                align: 3,
+                memory_index: 0,
+            }));
+        }
+        // spawn-site overrides
+        for (name, rv) in init {
+            let slot = *self.state_field_map.get(name).unwrap_or(&1);
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            self.compile_rvalue(body, rv, func);
+            body.instruction(&Instruction::I64Store(MemArg {
+                offset: (slot as u64) * ACTOR_RECORD_SLOT_SIZE as u64,
+                align: 3,
+                memory_index: 0,
+            }));
+        }
+        // TAG_ACTOR | record_offset
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_ACTOR as i64));
+        body.instruction(&Instruction::I64Or);
+    }
+
+    /// Enqueue a message node for `actor.behavior_idx(args...)`. Fire and
+    /// forget; evaluates to 0 (mirrors the VM, which writes no result).
+    /// Sends to a non-actor value are dropped (the interpreter's send to an
+    /// unknown actor id is a no-op).
+    fn compile_send(
+        &self,
+        body: &mut Function,
+        actor: LocalId,
+        behavior_idx: usize,
+        args: &[LocalId],
+        func: &mir::Function,
+    ) {
+        let n = args.len() as i64;
+        // Only TAG_ACTOR targets are addressable in this model.
+        body.instruction(&Instruction::LocalGet(self.mir_local(&actor, func)));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_MASK as i64));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_ACTOR as i64));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // node = nulang_alloc((4 + n) * 8)
+        body.instruction(&Instruction::I32Const((((4 + n) as u32) * 8) as i32));
+        body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+        body.instruction(&Instruction::I64ExtendI32U);
+        body.instruction(&Instruction::LocalSet(SCRATCH_NODE));
+        // node.next = 0
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        // node.target = actor & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(&actor, func)));
+        body.instruction(&Instruction::I64Const(value_layout::PAYLOAD_MASK as i64));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::LocalSet(SCRATCH_A));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::LocalGet(SCRATCH_A));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: MSG_SLOT_TARGET as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        // node.behavior_idx, node.nargs
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Const(behavior_idx as i64));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: MSG_SLOT_BEHAVIOR as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Const(n));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: MSG_SLOT_NARGS as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        // node.arg_i for each arg
+        for (i, a) in args.iter().enumerate() {
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+            body.instruction(&Instruction::I64Store(MemArg {
+                offset: (MSG_SLOT_ARGS as u64 + i as u64) * 8,
+                align: 3,
+                memory_index: 0,
+            }));
+        }
+        // link at tail: if tail == 0 { head = node } else { tail.next = node }
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::Else);
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::End); // end TAG_ACTOR check
+        body.instruction(&Instruction::I64Const(0));
+    }
+
+    /// `ask actor.behavior(args...)` — flush pending mailbox messages (FIFO
+    /// behavior processing, approximating the interpreter's synchronous
+    /// ask), then call the behavior directly with the target's record as
+    /// the current actor. Restores the caller's current actor afterwards.
+    fn compile_ask(
+        &self,
+        body: &mut Function,
+        actor: LocalId,
+        behavior_idx: usize,
+        args: &[LocalId],
+        func: &mir::Function,
+    ) {
+        body.instruction(&Instruction::LocalGet(self.mir_local(&actor, func)));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_MASK as i64));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_ACTOR as i64));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        // flush pending messages so FIFO ordering holds
+        self.emit_mailbox_drain(body);
+        // target = actor & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(&actor, func)));
+        body.instruction(&Instruction::I64Const(value_layout::PAYLOAD_MASK as i64));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::LocalSet(SCRATCH_B));
+        // save current actor, set target
+        body.instruction(&Instruction::GlobalGet(GLOBAL_CURRENT_ACTOR));
+        body.instruction(&Instruction::LocalSet(SCRATCH_A));
+        body.instruction(&Instruction::LocalGet(SCRATCH_B));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_CURRENT_ACTOR));
+        // evaluate args + call the behavior function
+        for a in args {
+            body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+        }
+        let wi = self.behavior_wasm_idx(behavior_idx);
+        body.instruction(&Instruction::Call(wi));
+        // restore current actor
+        body.instruction(&Instruction::LocalGet(SCRATCH_A));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_CURRENT_ACTOR));
+        body.instruction(&Instruction::Else);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+        body.instruction(&Instruction::End);
+    }
+
+    /// Legacy pop-any `receive`: pops the mailbox head, returns payload[0]
+    /// (or UNIT when the message has no payload); nil when the mailbox is
+    /// empty — mirroring `Mailbox::try_receive`.
+    fn compile_receive(&self, body: &mut Function) {
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+        body.instruction(&Instruction::Else);
+        // node = head; head = node.next
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::LocalSet(SCRATCH_NODE));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_HEAD));
+        // if tail == node: tail = 0
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::End);
+        // payload[0] if nargs > 0 else UNIT
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_NARGS as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_UNIT as i64));
+        body.instruction(&Instruction::Else);
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_ARGS as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    }
+
+    /// Selective receive: scan the mailbox FIFO for the first message whose
+    /// behavior id is in `behavior_ids`, unlink it, write the matched arm
+    /// index (tagged int) to `dst` and payload values to `dst+1..dst+
+    /// max_params` (missing → nil). On no match write the arm-count
+    /// sentinel (tagged `behavior_ids.len()`) to `dst` — the MIR compare
+    /// chain then routes to the legacy pop-any `Receive` (non-timed) or the
+    /// timeout body (timed), exactly like the bytecode
+    /// `ReceiveMatch`/`ReceiveWait`.
+    fn compile_receive_match_into(
+        &self,
+        body: &mut Function,
+        dst: &LocalId,
+        behavior_ids: &[u16],
+        max_params: usize,
+        func: &mir::Function,
+    ) {
+        let dst_local = self.mir_local(dst, func);
+        // prev = 0 (SCRATCH_A), node = head (SCRATCH_NODE), matched = 0 (253)
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(SCRATCH_A));
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::LocalSet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(253));
+        body.instruction(&Instruction::Block(BlockType::Empty)); // exit (depth 1)
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // depth 0
+                                                                // node == 0 → exit
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::BrIf(1));
+        // resolve arm: node.behavior_idx == behavior_ids[i] → arm = i
+        body.instruction(&Instruction::I64Const(-1));
+        body.instruction(&Instruction::LocalSet(252));
+        for (i, id) in behavior_ids.iter().enumerate() {
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I64Load(MemArg {
+                offset: MSG_SLOT_BEHAVIOR as u64 * 8,
+                align: 3,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I64Const(*id as i64));
+            body.instruction(&Instruction::I64Eq);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            body.instruction(&Instruction::I64Const(i as i64));
+            body.instruction(&Instruction::LocalSet(252));
+            body.instruction(&Instruction::End);
+        }
+        // matched? arm >= 0
+        body.instruction(&Instruction::LocalGet(252));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::I64GeS);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // unlink: if prev == 0 { head = node.next } else { prev.next = node.next }
+        body.instruction(&Instruction::LocalGet(SCRATCH_A));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::Else);
+        body.instruction(&Instruction::LocalGet(SCRATCH_A));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::End);
+        // if tail == node: tail = prev
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(SCRATCH_A));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::End);
+        // matched = 1; dst = tagged arm index
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::LocalSet(253));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
+        body.instruction(&Instruction::LocalGet(252));
+        body.instruction(&Instruction::I64Const(value_layout::PAYLOAD_MASK as i64));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Or);
+        body.instruction(&Instruction::LocalSet(dst_local));
+        // payloads: dst+1+i = node.arg_i (missing → nil), for i < max_params
+        for i in 0..max_params {
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I64Load(MemArg {
+                offset: MSG_SLOT_NARGS as u64 * 8,
+                align: 3,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I64Const(i as i64));
+            body.instruction(&Instruction::I64GtU);
+            body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I64Load(MemArg {
+                offset: (MSG_SLOT_ARGS as u64 + i as u64) * 8,
+                align: 3,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::Else);
+            body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+            body.instruction(&Instruction::End);
+            body.instruction(&Instruction::LocalSet(dst_local + 1 + i as u32));
+        }
+        // NOTE: this br is inside the matched `if` — wasm `if` pushes a
+        // label, so the scan-block exit is depth 2 (if=0, loop=1, block=2).
+        body.instruction(&Instruction::Br(2)); // matched → exit scan
+        body.instruction(&Instruction::End); // end matched
+                                             // advance: prev = node; node = node.next; continue
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::LocalSet(SCRATCH_A));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::LocalSet(SCRATCH_NODE));
+        body.instruction(&Instruction::Br(0)); // continue scan
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::End); // end Block
+                                             // if !matched: dst = tagged sentinel (behavior_ids.len())
+        body.instruction(&Instruction::LocalGet(253));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::I64Const(
+            value_layout::TAG_INT as i64
+                | (behavior_ids.len() as i64 & value_layout::PAYLOAD_MASK as i64),
+        ));
+        body.instruction(&Instruction::LocalSet(dst_local));
+        body.instruction(&Instruction::End);
+    }
+
+    /// Drain the mailbox: pop each message, run the target behavior with the
+    /// target record as current actor, until the queue is empty. Emitted at
+    /// every return of the entry function (and before `ask` dispatches) so
+    /// fire-and-forget sends have their effects before the program result is
+    /// observed — the WASM equivalent of the scheduler processing an actor's
+    /// mailbox to quiescence.
+    fn emit_mailbox_drain(&self, body: &mut Function) {
+        body.instruction(&Instruction::Block(BlockType::Empty)); // exit (depth 1)
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // depth 0
+                                                                // head == 0 → exit
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::BrIf(1));
+        // node = head; head = node.next
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_HEAD));
+        body.instruction(&Instruction::LocalSet(SCRATCH_NODE));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_NEXT as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_HEAD));
+        // if tail == node: tail = 0
+        body.instruction(&Instruction::GlobalGet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_MAILBOX_TAIL));
+        body.instruction(&Instruction::End);
+        // current_actor = node.target
+        body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: MSG_SLOT_TARGET as u64 * 8,
+            align: 3,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_CURRENT_ACTOR));
+        // dispatch on node.behavior_idx via a compare chain (behavior
+        // functions have different arities, so each arm pushes its own args)
+        self.emit_behavior_dispatch(body);
+        body.instruction(&Instruction::Br(0)); // continue
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::End); // end Block
+                                             // current_actor = 0 (no actor context after the drain)
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::GlobalSet(GLOBAL_CURRENT_ACTOR));
+    }
+
+    /// Compare-chain dispatch for the mailbox drain: node.behavior_idx == i
+    /// → push node's arg slots (per behavior i's arity) and call it.
+    fn emit_behavior_dispatch(&self, body: &mut Function) {
+        let behaviors = self.behavior_param_counts.len();
+        // if-chain: for each behavior index in order
+        for i in 0..behaviors {
+            body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I64Load(MemArg {
+                offset: MSG_SLOT_BEHAVIOR as u64 * 8,
+                align: 3,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I64Const(i as i64));
+            body.instruction(&Instruction::I64Eq);
+            body.instruction(&Instruction::If(BlockType::Empty));
+            let n = self.behavior_param_counts[i];
+            for a in 0..n {
+                body.instruction(&Instruction::LocalGet(SCRATCH_NODE));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I64Load(MemArg {
+                    offset: (MSG_SLOT_ARGS as u64 + a as u64) * 8,
+                    align: 3,
+                    memory_index: 0,
+                }));
+            }
+            body.instruction(&Instruction::Call(self.behavior_wasm_idx(i)));
+            body.instruction(&Instruction::Drop);
+            if i + 1 < behaviors {
+                body.instruction(&Instruction::Else);
+            }
+        }
+        // close all the Ifs
+        for _ in 0..behaviors {
+            body.instruction(&Instruction::End);
+        }
+    }
+
+    /// Wasm function index of behavior `behavior_idx` (mirroring
+    /// compile(): module functions first, then behaviors).
+    fn behavior_wasm_idx(&self, behavior_idx: usize) -> u32 {
+        FUNC_IMPORT_COUNT + (self.module_function_count as u32) + (behavior_idx as u32)
+    }
+
+    /// True for the module's entry function (`__main`/`main`) — the only
+    /// function that gets the mailbox drain (it is the `nulang_init` export
+    /// the host calls once per invocation).
+    fn is_entry_function(&self, func: &mir::Function) -> bool {
+        func.name == "__main" || func.name == "main"
     }
 
     fn compile_unary(
@@ -1423,24 +2319,34 @@ impl WasmBackend {
             _ => {
                 // Generic effect dispatch: `perform Effect.op(args)` →
                 // `nulang_dispatch(tag_ptr, tag_len, payload_ptr, payload_len)`
-                // where the tag is the dotted "Effect.op" path and the payload
-                // is a compile-time JSON array of the args (both interned in
-                // the pre-scan). The host writes the result to the ring buffer
-                // and returns its length; the read-back parses a JSON
-                // int/string/bool/null into a tagged Nulang value.
-                let tag = format!("{effect}.{op}");
-                let (tag_off, tag_len) = self.interned.get(&tag).copied().unwrap_or((0, 0));
+                // where the tag is the dotted "Effect.op" path (or a pool
+                // builtin's EffectId, see `pool_effect_contract`) and the
+                // payload is a compile-time JSON value built from the args
+                // (both interned in the pre-scan). The host writes the result
+                // to the ring buffer and returns its length; the read-back
+                // parses a JSON int/string/bool/null into a tagged Nulang
+                // value.
                 let consts = args
                     .iter()
                     .map(|l| resolve_const(func, *l))
                     .collect::<Option<Vec<_>>>()
                     .expect("pre-scan guaranteed constant effect args");
-                let encoded = consts
-                    .iter()
-                    .map(json_arg)
-                    .collect::<Option<Vec<_>>>()
-                    .expect("pre-scan guaranteed JSON-encodable effect args");
-                let payload = format!("[{}]", encoded.join(","));
+                let (tag, payload, shape) = match pool_effect_contract(effect, op, &consts) {
+                    Some(c) => (c.tag.to_string(), c.payload, c.shape),
+                    None => {
+                        let encoded = consts
+                            .iter()
+                            .map(json_arg)
+                            .collect::<Option<Vec<_>>>()
+                            .expect("pre-scan guaranteed JSON-encodable effect args");
+                        (
+                            format!("{effect}.{op}"),
+                            format!("[{}]", encoded.join(",")),
+                            DispatchResultShape::JsonValue,
+                        )
+                    }
+                };
+                let (tag_off, tag_len) = self.interned.get(&tag).copied().unwrap_or((0, 0));
                 let (pay_off, pay_len) = self.interned.get(&payload).copied().unwrap_or((0, 0));
 
                 body.instruction(&Instruction::I32Const(tag_off as i32));
@@ -1448,7 +2354,7 @@ impl WasmBackend {
                 body.instruction(&Instruction::I32Const(pay_off as i32));
                 body.instruction(&Instruction::I32Const(pay_len as i32));
                 body.instruction(&Instruction::Call(IMPORT_NULANG_DISPATCH));
-                self.compile_dispatch_readback(body);
+                self.compile_dispatch_readback(body, shape);
             }
         }
     }
@@ -1467,7 +2373,146 @@ impl WasmBackend {
     /// Scratch locals (all transient within this emission): 252 = result
     /// length / int accumulator, 253 = first byte / content length / sign,
     /// 254 = string dest ptr / int accumulator, 255 = loop index.
-    fn compile_dispatch_readback(&self, body: &mut Function) {
+    /// Locate a JSON object field's value inside the ring-buffer result:
+    /// sets 250 = value-start byte offset (relative to `base`) and
+    /// 252 = the value's byte length (including its surrounding quotes for
+    /// a string value). 250 = -1 / 252 = 0 when the field is absent.
+    ///
+    /// v1 limitation: the value must be a JSON string whose content contains
+    /// no unescaped `"` (the pool builtins this serves — e.g. the inference
+    /// chat response's `content` — are plain strings).
+    fn emit_field_locate(&self, body: &mut Function, field: &str, base: i32, mem0: &MemArg) {
+        let pat: Vec<u8> = format!("\"{field}\":").bytes().collect();
+        assert!(
+            field.is_ascii(),
+            "field extraction requires an ASCII field name"
+        );
+        // 250 = value start (-1 = not found); 255 = scan index i.
+        body.instruction(&Instruction::I64Const(-1));
+        body.instruction(&Instruction::LocalSet(250));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(255));
+        body.instruction(&Instruction::Block(BlockType::Empty)); // exit (depth 1)
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // depth 0
+                                                                // i >= L → exit
+        body.instruction(&Instruction::LocalGet(255));
+        body.instruction(&Instruction::LocalGet(252));
+        body.instruction(&Instruction::I64GeU);
+        body.instruction(&Instruction::BrIf(1));
+        // addr = base + i (held as i64; wrapped before each load below)
+        body.instruction(&Instruction::I32Const(base));
+        body.instruction(&Instruction::LocalGet(255));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::I64ExtendI32U);
+        body.instruction(&Instruction::LocalSet(254));
+        // pattern match: mem[addr + k] == pat[k] for all k (&& chain)
+        for (k, &b) in pat.iter().enumerate() {
+            body.instruction(&Instruction::LocalGet(254));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I32Load8U(MemArg {
+                offset: k as u64,
+                align: 0,
+                memory_index: 0,
+            }));
+            body.instruction(&Instruction::I32Const(b as i32));
+            body.instruction(&Instruction::I32Eq);
+            if k > 0 {
+                body.instruction(&Instruction::I32And);
+            }
+        }
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // value_start = i + pat.len()
+        body.instruction(&Instruction::LocalGet(255));
+        body.instruction(&Instruction::I64Const(pat.len() as i64));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalSet(250));
+        // require mem[base + value_start] == '"'
+        body.instruction(&Instruction::I32Const(base));
+        body.instruction(&Instruction::LocalGet(250));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::I32Load8U(*mem0));
+        body.instruction(&Instruction::I32Const(0x22));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // find the closing quote: j (253) from value_start+1
+        body.instruction(&Instruction::LocalGet(250));
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalSet(253));
+        body.instruction(&Instruction::Block(BlockType::Empty)); // close-exit (depth 1)
+        body.instruction(&Instruction::Loop(BlockType::Empty)); // depth 0
+                                                                // j >= L → no closing quote: treat as not found and exit the scan.
+                                                                // NOTE: this br is INSIDE the `if` below, and wasm `if` pushes a
+                                                                // branch label — so exiting the close BLOCK is depth 2 here
+                                                                // (if=0, loop=1, block=2).
+        body.instruction(&Instruction::LocalGet(253));
+        body.instruction(&Instruction::LocalGet(252));
+        body.instruction(&Instruction::I64GeU);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        // no closing quote: treat as not found
+        body.instruction(&Instruction::I64Const(-1));
+        body.instruction(&Instruction::LocalSet(250));
+        body.instruction(&Instruction::Br(2));
+        body.instruction(&Instruction::End);
+        // mem[base + j] == '"' → L' = j - value_start + 1; break
+        body.instruction(&Instruction::I32Const(base));
+        body.instruction(&Instruction::LocalGet(253));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::I32Load8U(*mem0));
+        body.instruction(&Instruction::I32Const(0x22));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(253));
+        body.instruction(&Instruction::LocalGet(250));
+        body.instruction(&Instruction::I64Sub);
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalSet(252));
+        body.instruction(&Instruction::Br(2));
+        body.instruction(&Instruction::End);
+        // j++
+        body.instruction(&Instruction::LocalGet(253));
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalSet(253));
+        body.instruction(&Instruction::Br(0));
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::End); // end Block
+        body.instruction(&Instruction::Else);
+        // mem[value_start] != '"' — not a string field value: not found
+        body.instruction(&Instruction::I64Const(-1));
+        body.instruction(&Instruction::LocalSet(250));
+        body.instruction(&Instruction::End);
+        // if value_start >= 0 → found → exit outer scan
+        body.instruction(&Instruction::LocalGet(250));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::I64GeS);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::Br(1)); // exit outer
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End); // end pattern-match If
+                                             // i++
+        body.instruction(&Instruction::LocalGet(255));
+        body.instruction(&Instruction::I64Const(1));
+        body.instruction(&Instruction::I64Add);
+        body.instruction(&Instruction::LocalSet(255));
+        body.instruction(&Instruction::Br(0));
+        body.instruction(&Instruction::End); // end Loop
+        body.instruction(&Instruction::End); // end Block
+                                             // not found (250 < 0) → 252 = 0 (nil)
+        body.instruction(&Instruction::LocalGet(250));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::I64LtS);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(252));
+        body.instruction(&Instruction::End);
+    }
+
+    fn compile_dispatch_readback(&self, body: &mut Function, shape: DispatchResultShape) {
         use wasm_encoder::{BlockType, MemArg, ValType};
         let mem0 = MemArg {
             offset: 0,
@@ -1481,13 +2526,28 @@ impl WasmBackend {
 
         // 252 = result length L (i64). If L == 0 → nil.
         body.instruction(&Instruction::LocalSet(252));
+        // For JsonField results, locate the field's JSON value first:
+        // 253 = value-start byte offset (0 for a plain JSON value),
+        // 252 = the value's byte length (0 = field not found → nil).
+        match shape {
+            DispatchResultShape::JsonValue => {
+                body.instruction(&Instruction::I64Const(0));
+                body.instruction(&Instruction::LocalSet(250));
+            }
+            DispatchResultShape::JsonField(field) => {
+                self.emit_field_locate(body, field, base, &mem0);
+            }
+        }
         body.instruction(&Instruction::LocalGet(252));
         body.instruction(&Instruction::I64Eqz);
         body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
         body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
         body.instruction(&Instruction::Else);
-        // 253 = first byte at [base] (i64).
+        // 253 = first byte at [base + 250] (i64).
         body.instruction(&Instruction::I32Const(base));
+        body.instruction(&Instruction::LocalGet(250));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I32Add);
         body.instruction(&Instruction::I32Load8U(mem0));
         body.instruction(&Instruction::I64ExtendI32U);
         body.instruction(&Instruction::LocalSet(253));
@@ -1527,8 +2587,11 @@ impl WasmBackend {
             body.instruction(&Instruction::LocalGet(255));
             body.instruction(&Instruction::I32WrapI64);
             body.instruction(&Instruction::I32Add);
-            // value = mem[base + 1 + i] (i32)
+            // value = mem[base + 250 + 1 + i] (i32)
             body.instruction(&Instruction::I32Const(base + 1));
+            body.instruction(&Instruction::LocalGet(250));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I32Add);
             body.instruction(&Instruction::LocalGet(255));
             body.instruction(&Instruction::I32WrapI64);
             body.instruction(&Instruction::I32Add);
@@ -1588,8 +2651,11 @@ impl WasmBackend {
                 body.instruction(&Instruction::LocalSet(254));
                 body.instruction(&Instruction::I64Const(0));
                 body.instruction(&Instruction::LocalSet(255));
-                // If mem[base] == '-' (0x2D): sign = -1, i = 1.
+                // If mem[base+250] == '-' (0x2D): sign = -1, i = 1.
                 body.instruction(&Instruction::I32Const(base));
+                body.instruction(&Instruction::LocalGet(250));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I32Add);
                 body.instruction(&Instruction::I32Load8U(mem0));
                 body.instruction(&Instruction::I32Const(0x2D));
                 body.instruction(&Instruction::I32Eq);
@@ -1609,6 +2675,9 @@ impl WasmBackend {
                 body.instruction(&Instruction::BrIf(1));
                 // (mem[base+i] - 0x30) < 10 (unsigned ⇒ digit check)?
                 body.instruction(&Instruction::I32Const(base));
+                body.instruction(&Instruction::LocalGet(250));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I32Add);
                 body.instruction(&Instruction::LocalGet(255));
                 body.instruction(&Instruction::I32WrapI64);
                 body.instruction(&Instruction::I32Add);
@@ -1624,6 +2693,9 @@ impl WasmBackend {
                 body.instruction(&Instruction::I64Const(10));
                 body.instruction(&Instruction::I64Mul);
                 body.instruction(&Instruction::I32Const(base));
+                body.instruction(&Instruction::LocalGet(250));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I32Add);
                 body.instruction(&Instruction::LocalGet(255));
                 body.instruction(&Instruction::I32WrapI64);
                 body.instruction(&Instruction::I32Add);
@@ -2321,6 +3393,163 @@ mod tests {
         assert!(
             err.to_string().contains("constant args"),
             "compile error must explain the constant-args requirement: {err}"
+        );
+    }
+
+    // ── Guest-side actor emulation ──────────────────────────────────
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_actor_spawn_send_ask_state() {
+        // spawn + send + ask with actor state: `ask` flushes the pending
+        // mailbox (FIFO behavior processing), so two `inc()` sends are
+        // applied before `get()` reads the state.
+        let value = run_source(
+            r#"actor Counter {
+                state n = 0
+                behavior inc() { self.n = self.n + 1; self.n }
+                behavior get() { self.n }
+            }
+            let c = spawn Counter { n = 0 } in {
+                send c inc()
+                send c inc()
+                ask c get()
+            }"#,
+        )
+        .expect("run");
+        assert_eq!(value.as_int(), Some(2), "two inc() sends then get() → 2");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_actor_state_isolated_per_instance() {
+        // Two spawned actors of the same type keep independent state.
+        let value = run_source(
+            r#"actor Counter {
+                state n = 0
+                behavior inc() { self.n = self.n + 1; self.n }
+                behavior get() { self.n }
+            }
+            let a = spawn Counter { n = 0 } in
+            let b = spawn Counter { n = 0 } in {
+                send a inc()
+                send b inc()
+                send b inc()
+                ask a get()
+            }"#,
+        )
+        .expect("run");
+        assert_eq!(
+            value.as_int(),
+            Some(1),
+            "a got one inc; b's two are separate"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_actor_receive_pops_mailbox() {
+        // Mirrors the interpreter's mailbox e2e test: `drain` runs first,
+        // its `receive` pops the still-pending `feed(7)` message (via the
+        // legacy pop-any fallback — the `Msg` arm has no matching behavior),
+        // then `get()` observes the stored value.
+        let value = run_source(
+            r#"actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive { | Msg(x) => x }
+                    self.seen
+                }
+                behavior feed(n: Int) { n }
+                behavior get() { self.seen }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                send c feed(7)
+                ask c get()
+            }"#,
+        )
+        .expect("run");
+        assert_eq!(
+            value.as_int(),
+            Some(7),
+            "receive should have popped the pending feed(7) message"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_actor_send_to_self_from_behavior_drains() {
+        // A behavior that sends to itself: the drain loop keeps processing
+        // until the mailbox is empty (n accumulations applied before the
+        // final ask).
+        let value = run_source(
+            r#"actor Ticker {
+                state n = 0
+                behavior tick(k: Int) {
+                    if k > 0 then {
+                        send self tick(k - 1)
+                    };
+                    self.n = self.n + 1;
+                    self.n
+                }
+                behavior get() { self.n }
+            }
+            let c = spawn Ticker { n = 0 } in {
+                send c tick(3)
+                ask c get()
+            }"#,
+        )
+        .expect("run");
+        assert_eq!(
+            value.as_int(),
+            Some(4),
+            "tick(3) + drain re-sends → 4 ticks"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_actor_remote_spawn_rejected() {
+        // `spawn@node` has no single-instance WASM counterpart — loud error.
+        let err = compile_source(
+            r#"actor Foo { behavior bar() { 0 } }
+            spawn@0 Foo()"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("actor/effect operation"),
+            "remote spawn must be rejected: {err}"
+        );
+    }
+
+    // ── Pool builtin tag mapping (nulang:… EffectIds) ──────────────
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_inference_ask_maps_to_pool_builtin() {
+        // `perform Inference.ask("hi there")` maps to the pool's
+        // `nulang:inference/inference` EffectId with the chat envelope; the
+        // handler's `{"content": ...}` response yields the reply string.
+        let response = br#"{"content":"hello back","model":"m","provider":"p","input_tokens":1,"output_tokens":1,"finish_reason":null,"cached":false,"latency_ms":5,"fallback_used":false}"#;
+        let wasm = compile_source(r#"perform Inference.ask("hi there")"#).expect("compile");
+        let mut rt = crate::wasm_runtime::WasmRuntime::new(&wasm, None).unwrap();
+        rt.set_dispatch_result(Some(response.to_vec()));
+        let value = rt.run().expect("run");
+        let (tag, payload) = rt
+            .take_last_dispatch()
+            .expect("dispatch must have been called");
+        assert_eq!(tag, b"nulang:inference/inference", "pool EffectId tag");
+        assert_eq!(
+            payload, br#"{"operation":"chat","messages":[{"role":"user","content":"hi there"}]}"#,
+            "chat envelope payload"
+        );
+        // The `content` field must be extracted and returned as a Nulang
+        // string.
+        assert_eq!(
+            rt.string_value(&value).as_deref(),
+            Some("hello back"),
+            "content field must be extracted from the response object"
         );
     }
 
