@@ -9025,8 +9025,10 @@ match { a: 2, b: 9 } with {
                 "send must be rejected, not silently compiled"
             );
 
-            // A user-defined effect (not IO.print/read or Array.length) must
-            // also be rejected, not silently compiled to nil.
+            // A user-defined effect (not IO.print/read or Array.length) now
+            // COMPILES — it lowers to nulang_dispatch (constant args are
+            // JSON-marshaled; the host routes by the dotted "Custom.effect"
+            // tag). This was previously rejected as unsupported.
             let mut builder =
                 crate::mir::FunctionBuilder::new("main", Some(crate::types::Type::int()));
             let out = builder.add_temp(crate::types::Type::int());
@@ -9052,8 +9054,8 @@ match { a: 2, b: 9 } with {
             };
             let mut backend = WasmBackend::new();
             assert!(
-                backend.compile(&module, "main").is_err(),
-                "unknown effect must be rejected, not silently compiled"
+                backend.compile(&module, "main").is_ok(),
+                "user-defined effect must compile to a nulang_dispatch call"
             );
         }
 
