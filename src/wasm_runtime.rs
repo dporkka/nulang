@@ -700,11 +700,15 @@ fn host_pow(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
     Ok(value_layout::tag_int(result) as i64)
 }
 
-/// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)`
+/// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32) -> i64`
 ///
 /// Stub: effect dispatch through the actor runtime is not yet wired.
-fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: i32) {
-    // No-op for now.
+/// Returns 0 (no result bytes), matching the length-return contract the
+/// pool's `host_dispatch` implements — the wasmtime-actor-pool bridges
+/// the real dispatch to `EffectRuntimePool`.
+fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: i32) -> i64 {
+    // No-op for now: no effect result.
+    0
 }
 
 /// Helper: retrieve linear memory from the HostState.
@@ -879,7 +883,7 @@ mod tests {
         let wasm = br#"(module
             (import "env" "memory" (memory 1))
             (import "env" "nulang_alloc" (func $alloc (param i32) (result i32)))
-            (import "env" "nulang_dispatch" (func $dispatch (param i32 i32 i32 i32)))
+            (import "env" "nulang_dispatch" (func $dispatch (param i32 i32 i32 i32) (result i64)))
             (import "env" "log" (func $log (param i32 i32) (result i64)))
             (import "env" "io_print" (func $print (param i32 i32) (result i64)))
             (import "env" "io_read" (func $read (result i64)))
