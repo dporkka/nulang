@@ -29,7 +29,7 @@
 //! version does not match [`crate::format::constants::WIRE_VERSION`] is
 //! refused, never silently reinterpreted. See `SPEC2.md` §"Format Stability".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1627,6 +1627,13 @@ pub trait NetworkTransport: Send {
     fn shutdown(&mut self);
     fn connection_count(&self) -> usize;
     fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr>;
+    /// Simulate a network partition: silently drop every outbound packet
+    /// to the given peers (as if a firewall dropped them in flight).
+    /// Clearing the set (empty) restores normal delivery. Transports that
+    /// cannot inject partitions leave this a no-op.
+    fn set_partition(&mut self, peers: HashSet<NodeId>) {
+        let _ = peers;
+    }
 }
 
 impl NetworkTransport for Box<dyn NetworkTransport> {
@@ -1657,6 +1664,9 @@ impl NetworkTransport for Box<dyn NetworkTransport> {
     fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr> {
         (**self).connection_addr(node_id)
     }
+    fn set_partition(&mut self, peers: HashSet<NodeId>) {
+        (**self).set_partition(peers)
+    }
 }
 pub struct TcpTransport {
     node_id: NodeId,
@@ -1676,6 +1686,9 @@ pub struct TcpTransport {
     shutdown_flag: Arc<AtomicBool>,
     /// TLS configuration. `PlaintextInsecure` means no encryption.
     tls_config: TlsConfig,
+    /// Peers whose outbound packets are silently dropped (simulated
+    /// network partition, see [`NetworkTransport::set_partition`]).
+    partition: HashSet<NodeId>,
 }
 
 impl TcpTransport {
@@ -1755,6 +1768,7 @@ impl TcpTransport {
             threads: Arc::new(Mutex::new(handles)),
             shutdown_flag,
             tls_config,
+            partition: HashSet::new(),
         })
     }
 
@@ -1865,6 +1879,12 @@ impl TcpTransport {
                 "nulang-net: dropping packet to node {:?} (addr {}): payload value cannot cross the wire (heap pointer, nil, or string without content)",
                 to_node, to_addr
             );
+            return;
+        }
+        // Simulated partition: silently drop the packet exactly like a
+        // firewall between the two nodes would. The peer sees the link
+        // go quiet and the failure detector handles it from there.
+        if self.partition.contains(&to_node) {
             return;
         }
         let outgoing = OutgoingPacket {
@@ -3203,6 +3223,9 @@ impl NetworkTransport for TcpTransport {
     fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr> {
         self.connection_addr(node_id)
     }
+    fn set_partition(&mut self, peers: HashSet<NodeId>) {
+        self.partition = peers;
+    }
 }
 
 /// In-memory deterministic network transport for DST.
@@ -3227,6 +3250,9 @@ pub struct DeterministicNetworkTransport {
         >,
     >,
     shutdown_flag: Arc<AtomicBool>,
+    /// Peers whose outbound packets are silently dropped (simulated
+    /// partition, see [`NetworkTransport::set_partition`]).
+    partition: HashSet<NodeId>,
 }
 
 impl Clone for DeterministicNetworkTransport {
@@ -3238,6 +3264,7 @@ impl Clone for DeterministicNetworkTransport {
             incoming_tx: self.incoming_tx.clone(),
             shared_bus: self.shared_bus.clone(),
             shutdown_flag: self.shutdown_flag.clone(),
+            partition: HashSet::new(),
         }
     }
 }
@@ -3275,6 +3302,7 @@ impl DeterministicNetworkTransport {
             incoming_tx,
             shared_bus,
             shutdown_flag,
+            partition: HashSet::new(),
         })
     }
 
@@ -3302,6 +3330,10 @@ impl NetworkTransport for DeterministicNetworkTransport {
     }
 
     fn send(&mut self, to_node: NodeId, _to_addr: SocketAddr, packet: Packet) {
+        // Simulated partition: silently drop (see set_partition).
+        if self.partition.contains(&to_node) {
+            return;
+        }
         if let Some(sender) = self.get_incoming_sender(to_node) {
             let incoming = IncomingPacket {
                 from_node: self.node_id,
@@ -3344,6 +3376,9 @@ impl NetworkTransport for DeterministicNetworkTransport {
         } else {
             None
         }
+    }
+    fn set_partition(&mut self, peers: HashSet<NodeId>) {
+        self.partition = peers;
     }
 }
 

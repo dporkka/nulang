@@ -7,6 +7,7 @@ use super::*;
 use crate::runtime::gc::OrcaGc;
 use crate::runtime::heap::{ActorHeap, TypeTag};
 use crate::vm::Frame;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -4232,6 +4233,493 @@ fn test_three_node_cluster_survives_rolling_restart_of_every_node() {
     );
 
     shutdown_nodes(&mut [&mut rt_c2, &mut rt_b2, &mut rt_a2]);
+}
+
+/// Start a distributed node with a virtual clock installed AFTER
+/// distribution is enabled (the cluster's real-time stamps predate the
+/// clock base, so `Instant::duration_since` never underflows). All time
+/// queries — heartbeat cadence, failure detection, suspicion, probes —
+/// then run on the virtual clock, which the test advances in lockstep
+/// across nodes via [`advance_all`].
+fn start_virtual_clock_node() -> Runtime {
+    let mut rt = start_distributed_node();
+    rt.install_virtual_clock();
+    rt
+}
+
+/// Advance every node's virtual clock by `step`, then pump network
+/// processing on each (cluster tick + packet delivery). Advancing first
+/// means the tick sees the new virtual time, so heartbeats, suspicion
+/// transitions, failure detection, and probes all fire on schedule.
+fn advance_all(nodes: &mut [&mut Runtime], step: Duration) {
+    for rt in nodes.iter_mut() {
+        rt.advance_time(step);
+    }
+    for rt in nodes.iter_mut() {
+        rt.process_network();
+    }
+    // Let the real loopback TCP threads deliver packets written this
+    // round before the next round reads them.
+    sleep(Duration::from_millis(2));
+}
+
+/// The status of `node` in `rt`'s cluster view, if known.
+fn cluster_status(rt: &Runtime, node: NodeId) -> Option<NodeStatus> {
+    rt.distributed
+        .cluster
+        .as_ref()
+        .and_then(|c| c.get_node(node))
+        .map(|info| info.status)
+}
+
+/// True once every node has every OTHER node in its ACTIVE view. The
+/// failure detector watches only the active view, so this — not
+/// `healthy_node_count` — is the real "failure detection is armed"
+/// convergence condition. Membership (gossip) converges in ~1 s virtual,
+/// but active views fill only through the 5 s repair cycle + reciprocal
+/// heartbeat confirmation.
+fn active_views_converged(nodes: &[&Runtime], ids: &[NodeId]) -> bool {
+    nodes.iter().all(|rt| {
+        let c = rt.distributed.cluster.as_ref().unwrap();
+        let active: Vec<NodeId> = c.active_view().to_vec();
+        let local = rt.distributed.node_id.unwrap();
+        ids.iter().all(|id| *id == local || active.contains(id))
+    })
+}
+
+/// PLAN.md Phase 1 bullet 4 (chaos suite): split-brain — two mutually
+/// invisible healthy sub-clusters, NOT one node dying. Three real
+/// `Runtime`s over real loopback TCP, driven by per-node virtual clocks
+/// advanced in lockstep so failure detection is deterministic (no real
+/// 7 s wall-clock wait). A network partition is injected via
+/// [`NetworkTransport::set_partition`] (outbound packets to the other
+/// side silently dropped, exactly like a firewall): A and B lose C and
+/// vice versa, while A and B keep talking. Asserts both sides detect the
+/// other side as `Failed` through the REAL heartbeat-timeout/suspicion
+/// machine, that each sub-cluster stays internally `Healthy`, that
+/// healing the partition reconverges all three to `Healthy` via the
+/// probe/self-healing path (no external rejoin), and that a remote
+/// message then delivers across the former partition boundary.
+#[test]
+fn test_three_node_cluster_split_brain_detects_and_heals() {
+    let mut rt_a = start_virtual_clock_node();
+    let mut rt_b = start_virtual_clock_node();
+    let mut rt_c = start_virtual_clock_node();
+
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    let node_c = rt_c.distributed.node_id.unwrap();
+
+    // Form a full 3-node cluster (chain-seeded so gossip converges
+    // transitively).
+    rt_a.join_cluster(addr_b);
+    rt_c.join_cluster(addr_b);
+    let step = Duration::from_millis(100);
+    let mut converged = false;
+    for _ in 0..200 {
+        advance_all(&mut [&mut rt_a, &mut rt_b, &mut rt_c], step);
+        if active_views_converged(&[&rt_a, &rt_b, &rt_c], &[node_a, node_b, node_c]) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "cluster did not converge to fully-armed failure detection (active views)"
+    );
+
+    // Inject the partition: {A,B} | {C}. A and B keep talking to each
+    // other; nobody can reach C and C can't reach anyone.
+    let ab_partition: HashSet<NodeId> = HashSet::from([node_c]);
+    let c_partition: HashSet<NodeId> = HashSet::from([node_a, node_b]);
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(ab_partition.clone());
+    rt_b.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(ab_partition.clone());
+    rt_c.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(c_partition);
+
+    // Advance virtual time past heartbeat timeout (2 s) + suspicion
+    // window (5 s): both sides must mark the other side Failed, while
+    // each sub-cluster stays internally Healthy.
+    let mut detected = false;
+    for _ in 0..200 {
+        advance_all(&mut [&mut rt_a, &mut rt_b, &mut rt_c], step);
+        let a_sees_c_failed = cluster_status(&rt_a, node_c) == Some(NodeStatus::Failed);
+        let b_sees_c_failed = cluster_status(&rt_b, node_c) == Some(NodeStatus::Failed);
+        let c_sees_a_failed = cluster_status(&rt_c, node_a) == Some(NodeStatus::Failed);
+        let c_sees_b_failed = cluster_status(&rt_c, node_b) == Some(NodeStatus::Failed);
+        let a_sees_b_healthy = cluster_status(&rt_a, node_b) == Some(NodeStatus::Healthy);
+        let b_sees_a_healthy = cluster_status(&rt_b, node_a) == Some(NodeStatus::Healthy);
+        if a_sees_c_failed
+            && b_sees_c_failed
+            && c_sees_a_failed
+            && c_sees_b_failed
+            && a_sees_b_healthy
+            && b_sees_a_healthy
+        {
+            detected = true;
+            break;
+        }
+    }
+    assert!(
+        detected,
+        "split-brain not detected: A->C={:?} B->C={:?} C->A={:?} C->B={:?} A->B={:?} B->A={:?}",
+        cluster_status(&rt_a, node_c),
+        cluster_status(&rt_b, node_c),
+        cluster_status(&rt_c, node_a),
+        cluster_status(&rt_c, node_b),
+        cluster_status(&rt_a, node_b),
+        cluster_status(&rt_b, node_a),
+    );
+
+    // Heal the partition: clear every node's drop set. The probe path
+    // (every 5 s virtual) re-reaches the other side, `handle_heartbeat`
+    // re-promotes Failed -> Healthy, and the cluster reconverges with no
+    // external rejoin.
+    for rt in [&mut rt_a, &mut rt_b, &mut rt_c] {
+        rt.distributed
+            .transport
+            .as_mut()
+            .unwrap()
+            .set_partition(HashSet::new());
+    }
+    let mut healed = false;
+    for _ in 0..300 {
+        advance_all(&mut [&mut rt_a, &mut rt_b, &mut rt_c], step);
+        if active_views_converged(&[&rt_a, &rt_b, &rt_c], &[node_a, node_b, node_c]) {
+            healed = true;
+            break;
+        }
+    }
+    assert!(
+        healed,
+        "cluster did not heal after the partition was lifted"
+    );
+
+    // Prove the healed cluster does real cross-boundary work: C sends a
+    // remote message to an actor on A, across the former partition line.
+    let actor_id = rt_a.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = rt_a.actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+    let target = ActorAddress::remote(node_a, actor_id);
+    rt_c.send_distributed(target, "store", &[Value::int(33)]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_c.process_network();
+        rt_a.run_scheduler();
+        let got = rt_a
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(33) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "remote delivery across the healed split-brain boundary failed"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
+}
+
+/// PLAN.md Phase 1 bullet 4 (chaos suite): asymmetric partition — A sees
+/// B but B can't see A. Only A's outbound packets to B are dropped, so B
+/// stops hearing A and must mark A `Failed` through the real failure
+/// detector, while A keeps receiving B's heartbeats and keeps B
+/// `Healthy`. Asserts the one-directional visibility, then heals and
+/// confirms a remote message flows both ways afterward.
+#[test]
+fn test_three_node_cluster_asymmetric_partition_detects_and_heals() {
+    let mut rt_a = start_virtual_clock_node();
+    let mut rt_b = start_virtual_clock_node();
+
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+
+    rt_b.join_cluster(addr_a);
+    let step = Duration::from_millis(100);
+    let mut converged = false;
+    for _ in 0..200 {
+        advance_all(&mut [&mut rt_a, &mut rt_b], step);
+        if active_views_converged(&[&rt_a, &rt_b], &[node_a, node_b]) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "cluster did not converge to fully-armed failure detection (active views)"
+    );
+
+    // Asymmetric partition: A cannot reach B, but B can reach A.
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(HashSet::from([node_b]));
+
+    // B must mark A Failed (it hears nothing from A) while A keeps B
+    // Healthy (B's heartbeats still arrive).
+    let mut detected = false;
+    for _ in 0..200 {
+        advance_all(&mut [&mut rt_a, &mut rt_b], step);
+        if cluster_status(&rt_b, node_a) == Some(NodeStatus::Failed)
+            && cluster_status(&rt_a, node_b) == Some(NodeStatus::Healthy)
+        {
+            detected = true;
+            break;
+        }
+    }
+    assert!(
+        detected,
+        "asymmetric partition not detected: B->A={:?} A->B={:?}",
+        cluster_status(&rt_b, node_a),
+        cluster_status(&rt_a, node_b),
+    );
+
+    // Heal and reconverge.
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(HashSet::new());
+    let mut healed = false;
+    for _ in 0..300 {
+        advance_all(&mut [&mut rt_a, &mut rt_b], step);
+        if active_views_converged(&[&rt_a, &rt_b], &[node_a, node_b]) {
+            healed = true;
+            break;
+        }
+    }
+    assert!(
+        healed,
+        "cluster did not heal after the asymmetric partition"
+    );
+
+    // Both directions deliver after healing.
+    for (want, spawn_on_a) in [(11, true), (22, false)] {
+        let target_node = if spawn_on_a { node_a } else { node_b };
+        let actor_id = if spawn_on_a {
+            rt_a.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]))
+        } else {
+            rt_b.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]))
+        };
+        {
+            let actor = if spawn_on_a {
+                rt_a.actors.get_mut(&actor_id).unwrap()
+            } else {
+                rt_b.actors.get_mut(&actor_id).unwrap()
+            };
+            actor.register_behavior("store", |actor, args| {
+                let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+                actor.set_state_field("received", Value::int(n));
+            });
+        }
+        let target = ActorAddress::remote(target_node, actor_id);
+        if spawn_on_a {
+            rt_b.send_distributed(target, "store", &[Value::int(want)]);
+        } else {
+            rt_a.send_distributed(target, "store", &[Value::int(want)]);
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let delivered = loop {
+            rt_a.process_network();
+            rt_b.process_network();
+            if spawn_on_a {
+                rt_a.run_scheduler();
+            } else {
+                rt_b.run_scheduler();
+            }
+            let got = if spawn_on_a {
+                rt_a.actors
+                    .get(&actor_id)
+                    .and_then(|a| a.get_state_field("received"))
+                    .and_then(|v| v.as_int())
+            } else {
+                rt_b.actors
+                    .get(&actor_id)
+                    .and_then(|a| a.get_state_field("received"))
+                    .and_then(|v| v.as_int())
+            };
+            if got == Some(want) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            sleep(Duration::from_millis(50));
+        };
+        assert!(delivered, "remote delivery failed after heal (want {want})");
+    }
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
+/// PLAN.md Phase 1 bullet 4 (chaos suite): 5-node split-brain, the
+/// "5-node topologies" item. Five real `Runtime`s over real loopback
+/// TCP, split {A,B} | {C,D,E} via transport-level packet drops. Asserts
+/// every cross-side pair is marked `Failed` on both sides, every
+/// intra-side pair stays `Healthy` throughout, healing reconverges all
+/// five, and a remote message delivers across the healed boundary.
+#[test]
+fn test_five_node_cluster_split_brain_detects_and_heals() {
+    let mut nodes: Vec<Runtime> = (0..5).map(|_| start_virtual_clock_node()).collect();
+    let addrs: Vec<SocketAddr> = nodes
+        .iter()
+        .map(|rt| rt.distributed.transport.as_ref().unwrap().listen_addr())
+        .collect();
+    let ids: Vec<NodeId> = nodes
+        .iter()
+        .map(|rt| rt.distributed.node_id.unwrap())
+        .collect();
+
+    // Chain-seed: everyone joins through node 0, so gossip converges
+    // transitively.
+    for i in 1..5 {
+        nodes[i].join_cluster(addrs[0]);
+    }
+    let step = Duration::from_millis(100);
+    let mut converged = false;
+    for _ in 0..300 {
+        advance_all(&mut nodes.iter_mut().collect::<Vec<_>>(), step);
+        if active_views_converged(&nodes.iter().collect::<Vec<_>>(), &ids) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "5-node cluster did not converge to fully-armed failure detection (active views)"
+    );
+
+    // Split {A,B} | {C,D,E}.
+    let ab_side: HashSet<NodeId> = HashSet::from([ids[2], ids[3], ids[4]]);
+    let cde_side: HashSet<NodeId> = HashSet::from([ids[0], ids[1]]);
+    for i in 0..2 {
+        nodes[i]
+            .distributed
+            .transport
+            .as_mut()
+            .unwrap()
+            .set_partition(ab_side.clone());
+    }
+    for i in 2..5 {
+        nodes[i]
+            .distributed
+            .transport
+            .as_mut()
+            .unwrap()
+            .set_partition(cde_side.clone());
+    }
+
+    // Every cross-side pair fails on both sides; every intra-side pair
+    // stays healthy.
+    let mut detected = false;
+    for _ in 0..300 {
+        advance_all(&mut nodes.iter_mut().collect::<Vec<_>>(), step);
+        let cross_failed = (0..2)
+            .flat_map(|i| (2..5).map(move |j| (i, j)))
+            .all(|(i, j)| {
+                cluster_status(&nodes[i], ids[j]) == Some(NodeStatus::Failed)
+                    && cluster_status(&nodes[j], ids[i]) == Some(NodeStatus::Failed)
+            });
+        let intra_healthy = (0..2)
+            .flat_map(|i| (0..2).map(move |j| (i, j)))
+            .chain((2..5).flat_map(|i| (2..5).map(move |j| (i, j))))
+            .filter(|(i, j)| i != j)
+            .all(|(i, j)| cluster_status(&nodes[i], ids[j]) == Some(NodeStatus::Healthy));
+        if cross_failed && intra_healthy {
+            detected = true;
+            break;
+        }
+    }
+    assert!(
+        detected,
+        "5-node split-brain not detected: A->C={:?} C->A={:?} A->B={:?} C->D={:?}",
+        cluster_status(&nodes[0], ids[2]),
+        cluster_status(&nodes[2], ids[0]),
+        cluster_status(&nodes[0], ids[1]),
+        cluster_status(&nodes[2], ids[3]),
+    );
+
+    // Heal and reconverge all five.
+    for node in nodes.iter_mut() {
+        node.distributed
+            .transport
+            .as_mut()
+            .unwrap()
+            .set_partition(HashSet::new());
+    }
+    let mut healed = false;
+    for _ in 0..400 {
+        advance_all(&mut nodes.iter_mut().collect::<Vec<_>>(), step);
+        if active_views_converged(&nodes.iter().collect::<Vec<_>>(), &ids) {
+            healed = true;
+            break;
+        }
+    }
+    assert!(healed, "5-node cluster did not heal after the split-brain");
+
+    // Cross-boundary delivery after healing: E (node 4) -> actor on A
+    // (node 0).
+    let actor_id = nodes[0].spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = nodes[0].actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+    let target = ActorAddress::remote(ids[0], actor_id);
+    nodes[4].send_distributed(target, "store", &[Value::int(44)]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        nodes[0].process_network();
+        nodes[4].process_network();
+        nodes[0].run_scheduler();
+        let got = nodes[0]
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(44) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "remote delivery across the healed 5-node split-brain boundary failed"
+    );
+
+    shutdown_nodes(&mut nodes.iter_mut().collect::<Vec<_>>());
 }
 
 /// End-to-end coverage of PLAN.md Phase 5 deliverable 7 parts (a)+(b)
