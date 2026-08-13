@@ -5171,11 +5171,11 @@ impl Parser {
                 self.advance();
                 Ok(Capability::Tag)
             }
-            TokenKind::Ident(s) if s == "lineariso" => {
+            TokenKind::LinearIso => {
                 self.advance();
                 Ok(Capability::LinearIso)
             }
-            TokenKind::Ident(s) if s == "linear" => {
+            TokenKind::Linear => {
                 self.advance();
                 Ok(Capability::Linear)
             }
@@ -6531,6 +6531,24 @@ mod tests {
                 assert_eq!(cap, Capability::Iso);
             }
             _ => panic!("Expected capability annotation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_capability_annotation_lineariso_linear() {
+        // Regression: the lexer emits dedicated LinearIso/Linear tokens
+        // (not Idents), so the `:cap` annotation path must match the
+        // tokens directly. These previously failed with
+        // "Expected capability (...), found lineariso".
+        for (src, want) in [
+            ("x :cap lineariso", Capability::LinearIso),
+            ("x :cap linear", Capability::Linear),
+        ] {
+            let expr = parse_expr(src).unwrap();
+            match expr {
+                Expr::CapAnnotate { cap, .. } => assert_eq!(cap, want),
+                _ => panic!("Expected capability annotation for {src:?}"),
+            }
         }
     }
 

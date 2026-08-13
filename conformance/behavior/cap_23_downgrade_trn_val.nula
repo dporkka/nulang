@@ -1,0 +1,10 @@
+// Capability downgrade trn -> val: writable-transferable to read-only.
+// The other end of the lattice from cap_22 (which stops at ref): val is
+// a valid downgrade target of trn, and the value is still readable.
+// SPEC2.md reference capabilities: iso <: trn <: ref <: val <: box
+// <: tag permits downgrades.
+fn main() {
+    let x = 10 :cap trn
+    let y = x :cap val
+    perform IO.print(perform Int.to_string(y))
+}

@@ -1,0 +1,12 @@
+// Capability downgrade iso -> trn -> ref, each a valid one-way
+// transition (iso is writable+unique, trn is writable transferable, ref
+// is writable shared). Pins that the downgrade lattice is accepted and
+// the value remains usable at the final (weakest) capability. SPEC2.md
+// reference capabilities: the lattice iso <: trn <: ref <: val <: box
+// <: tag permits downgrades.
+fn main() {
+    let x = 42 :cap iso
+    let y = x :cap trn
+    let z = y :cap ref
+    perform IO.print(perform Int.to_string(z))
+}
