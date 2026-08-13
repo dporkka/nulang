@@ -494,10 +494,11 @@ session.
   hollow-helper call sites throughout the rest of the codebase are
   still hollow — this session fixed the two highest-traffic ones
   (general call arity, event arity), not an exhaustive sweep.
-- **[~] Bullet 2 (DST) — single-node message-passing wired, cluster/timer
-  determinism not started.** `src/dst.rs` was not even part of the
-  compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
-  tests had never run). Fixed that first, then added
+- **[~] Bullet 2 (DST) — single-node message-passing wired + seed-sweep
+  invariant test landed; cluster/timer determinism still not started.**
+  `src/dst.rs` was not even part of the compiled crate (`mod dst;` was
+  missing from `src/lib.rs` — its 4 tests had never run). Fixed that
+  first, then added
   `Runtime::run_scheduler_deterministic`/`pick_ready_actor_deterministic`:
   actor selection driven by a seeded RNG over the sorted ready-set,
   reusing `step_actor` unchanged (same VM/GC/persistence machinery the
@@ -506,7 +507,21 @@ session.
   messages, or LLM completions, all of which key off wall-clock reads.
   3 new tests verify same-seed same-sequence selection, real
   quiescence with correct final actor state, and step-limit-exceeded
-  reporting for a run that hasn't settled.
+  reporting for a run that hasn't settled. Then (2026-08-13) landed the
+  seed-sweep invariant test, the core "N seeds, fail on any invariant
+  violation" deliverable at CI scale:
+  `test_dst_seed_sweep_at_most_once_delivery` runs a counter+decoy
+  program under 2000 seeds (200 interleaved messages each) asserting
+  EVERY run (a) reaches quiescence — never `StepLimitExceeded`
+  (deadlock/livelock signal) — and (b) the counter reaches exactly 200
+  (AtMostOnce: no lost or double-delivered messages). Validated the
+  test has teeth by injecting a message-drop into the counter behavior
+  and confirming it fails; ~21s for the full sweep because the
+  deterministic path never sleeps. Not done: cluster/timer determinism
+  (the timer wheel and cross-shard channels still key off wall-clock
+  reads) and the 10⁴-seeds-per-commit CI job (the sweep is a single
+  in-suite test, not a nightly job; scaling the seed count to 10⁴ is a
+  constant-factor change of `SEEDS`).
 - **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
   determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
   open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
