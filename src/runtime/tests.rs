@@ -5797,8 +5797,9 @@ fn test_dst_deterministic_network_transport_delivers() {
 ///  2. AtMostOnce delivery — the counter reaches exactly `MESSAGES`,
 ///     never more (double-delivery) and never fewer (a lost message).
 ///
-/// 2000 seeds × a 200-message batch runs in a couple of seconds because
-/// the deterministic path never sleeps on wall-clock.
+/// 2000 seeds × a 200-message batch runs in ~21s (measured) because
+/// the deterministic path never sleeps on wall-clock; the rest of the
+/// suite runs in parallel threads underneath it.
 #[test]
 fn test_dst_seed_sweep_at_most_once_delivery() {
     const MESSAGES: i64 = 200;
