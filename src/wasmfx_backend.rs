@@ -340,7 +340,7 @@ impl WasmFxBackend {
     fn rebuild_imports(&mut self) {
         // Function import types.
         let ty_alloc = self.ensure_type(vec![ValType::I32], vec![ValType::I32]);
-        let ty_dispatch = self.ensure_type(vec![ValType::I32; 4], vec![]);
+        let ty_dispatch = self.ensure_type(vec![ValType::I32; 4], vec![ValType::I64]);
         let ty_emit = self.ensure_type(vec![ValType::I32, ValType::I32], vec![ValType::I64]);
 
         let mut imports = ImportSection::new();

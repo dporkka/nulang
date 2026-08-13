@@ -216,8 +216,10 @@ fn host_alloc(mut caller: Caller<'_, HostState>, size: i32) -> Result<i32, Error
     Ok(offset as i32)
 }
 
-/// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)` — stub.
-fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: i32) {}
+/// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32) -> i64` — stub.
+fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: i32) -> i64 {
+    0
+}
 
 /// `env.nulang_emit(frame_ptr: i32, arg_count: i32) -> i64` — stub.
 ///

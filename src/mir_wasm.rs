@@ -324,8 +324,11 @@ impl WasmBackend {
         use wasm_encoder::ValType;
         // Alloc: (i32) -> i32
         let ty_alloc = self.ensure_type(vec![ValType::I32], vec![ValType::I32]);
-        // Dispatch: (i32, i32, i32, i32) -> ()
-        let ty_dispatch = self.ensure_type(vec![ValType::I32; 4], vec![]);
+        // Dispatch: (i32, i32, i32, i32) -> i64 (bytes of effect result
+        // written to the ring buffer; 0 = no result/no handler). Mirrors
+        // io_read's length-return contract so the compiler lowering can
+        // read the result back from linear memory.
+        let ty_dispatch = self.ensure_type(vec![ValType::I32; 4], vec![ValType::I64]);
 
         let mut imports = ImportSection::new();
         imports.import(
