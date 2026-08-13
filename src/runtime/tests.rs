@@ -1081,6 +1081,35 @@ fn test_distributed_send_local_fallback() {
 }
 
 #[test]
+fn test_distributed_remote_address_local_fallback() {
+    // A REMOTE address whose node is the local node (or a runtime with
+    // distributed disabled) must deliver locally instead of silently
+    // dropping — the single-node case of the SPEC2 known-issue list
+    // (send/ask remote). `Runtime::send_distributed` resolves through
+    // the distribution wrapper: distributed disabled → local delivery.
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![("val".to_string(), Value::int(0))]));
+
+    // Distributed is disabled by default: a remote address still delivers.
+    let remote_addr = ActorAddress::remote(NodeId::LOCAL, actor_id);
+    rt.send_distributed(remote_addr, "test", &[Value::int(42)]);
+    assert!(
+        !rt.actors[&actor_id].mailbox.is_empty(),
+        "remote-address send must fall back to local delivery"
+    );
+
+    // Same when the address names this node explicitly.
+    let local_node = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+    let remote_addr = ActorAddress::remote(local_node, actor_id);
+    rt.send_distributed(remote_addr, "test", &[Value::int(7)]);
+    assert_eq!(
+        rt.actors[&actor_id].mailbox.len(),
+        2,
+        "both remote-address sends must deliver locally"
+    );
+}
+
+#[test]
 fn test_crdt_merge_grow_only_counter() {
     let mut a = GCounter::new(1);
     a.increment_by(5);

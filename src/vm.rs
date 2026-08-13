@@ -6312,6 +6312,7 @@ mod vm_tests {
         // Move the RAsk result from r1 (actor reg, now overwritten with result) to r4.
         module.emit(Instruction::new2(OpCode::Move, 1, 4));
         module.emit(Instruction::new3(OpCode::Gossip, msg_const as u8, 0, 5)); // r5 = gossip
+        module.emit(Instruction::new1(OpCode::RetVal, 4)); // return the RAsk result
         module.emit(Instruction::new0(OpCode::Halt));
         module.entry_point = Some(0);
 
@@ -6331,6 +6332,14 @@ mod vm_tests {
             result.is_ok(),
             "Callbacks should not fail: {:?}",
             result.err()
+        );
+        // The RAsk result must be the callback's value (not nil, not the
+        // target actor ref) — regression for the RAsk register-convention
+        // mismatch where the remote ask returned the wrong value.
+        assert_eq!(
+            result.unwrap(),
+            Value::int(123),
+            "RAsk must surface the remote_ask callback's value"
         );
 
         let cb = (vm.distributed_callbacks.as_ref().unwrap().as_ref() as &dyn std::any::Any)
