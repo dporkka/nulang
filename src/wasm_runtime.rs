@@ -55,6 +55,16 @@ struct HostState {
     /// Testable input source for `IO.read`. When non-empty, `host_read` reads
     /// lines from here instead of stdin.
     input: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
+    /// Injectable effect-dispatch result. When `Some`, `host_dispatch` writes
+    /// these bytes to the ring buffer at [`crate::mir_wasm::RING_BUFFER_BASE`]
+    /// and returns their length — mirroring the pool's `host_dispatch`
+    /// contract so the compiler's dispatch read-back is testable without a
+    /// real effect runtime. `None` (the default) = no result (length 0).
+    dispatch_result: std::sync::Arc<parking_lot::Mutex<Option<Vec<u8>>>>,
+    /// Last (tag, payload) pair passed to `nulang_dispatch`, recorded for
+    /// tests to verify the compiler's marshaling. Cleared by
+    /// [`WasmRuntime::take_last_dispatch`].
+    last_dispatch: std::sync::Arc<parking_lot::Mutex<Option<(Vec<u8>, Vec<u8>)>>>,
 }
 
 impl Default for HostState {
@@ -63,6 +73,8 @@ impl Default for HostState {
             alloc_offset: 0,
             memory: None,
             input: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            dispatch_result: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            last_dispatch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 }
@@ -196,6 +208,20 @@ impl WasmRuntime {
     pub fn set_input(&mut self, input: &str) {
         let input_arc = self.store.data().input.clone();
         *input_arc.lock() = input.as_bytes().to_vec();
+    }
+
+    /// Set the effect-dispatch result (used by tests). The next
+    /// `nulang_dispatch` call returns these bytes as the result written to
+    /// the ring buffer; `None` (the default) returns length 0.
+    pub fn set_dispatch_result(&mut self, result: Option<Vec<u8>>) {
+        let arc = self.store.data().dispatch_result.clone();
+        *arc.lock() = result;
+    }
+
+    /// Take the (tag, payload) pair from the last `nulang_dispatch` call,
+    /// clearing it. Returns `None` if dispatch was never called.
+    pub fn take_last_dispatch(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.store.data().last_dispatch.clone().lock().take()
     }
 
     pub fn run(&mut self) -> NuResult<crate::vm::Value> {
@@ -702,13 +728,54 @@ fn host_pow(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
 
 /// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32) -> i64`
 ///
-/// Stub: effect dispatch through the actor runtime is not yet wired.
-/// Returns 0 (no result bytes), matching the length-return contract the
-/// pool's `host_dispatch` implements — the wasmtime-actor-pool bridges
-/// the real dispatch to `EffectRuntimePool`.
-fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: i32) -> i64 {
-    // No-op for now: no effect result.
-    0
+/// Effect dispatch stub: writes the injectable [`HostState::dispatch_result`]
+/// (if any) to the ring buffer at [`crate::mir_wasm::RING_BUFFER_BASE`] and
+/// returns its length — matching the length-return contract the pool's
+/// `host_dispatch` implements (the wasmtime-actor-pool bridges the real
+/// dispatch to `EffectRuntimePool`). Returns 0 when no result is injected.
+fn host_dispatch(mut caller: Caller<'_, HostState>, a: i32, b: i32, c: i32, d: i32) -> i64 {
+    // Record the (tag, payload) pair for test verification of the
+    // compiler's marshaling. Scoped to release the memory borrow before the
+    // result write-back below takes `&mut caller`.
+    {
+        let mem = match get_memory(&mut caller) {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+        let data = mem.data(&caller);
+        let read = |off: i32, len: i32| -> Vec<u8> {
+            if off < 0 || len <= 0 {
+                return Vec::new();
+            }
+            let (off, len) = (off as usize, len as usize);
+            data.get(off..off.saturating_add(len))
+                .unwrap_or(&[])
+                .to_vec()
+        };
+        *caller.data().last_dispatch.lock() = Some((read(a, b), read(c, d)));
+    }
+    let result = {
+        let guard = caller.data().dispatch_result.lock();
+        guard.clone()
+    };
+    let Some(result) = result else {
+        return 0;
+    };
+    if result.is_empty() {
+        return 0;
+    }
+    let base = crate::mir_wasm::RING_BUFFER_BASE as usize;
+    let write_len = result.len().min(0x1000); // ring buffer is 4 KiB
+    let mem = match get_memory(&mut caller) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    let data = mem.data_mut(&mut caller);
+    if base + write_len > data.len() {
+        return 0;
+    }
+    data[base..base + write_len].copy_from_slice(&result[..write_len]);
+    write_len as i64
 }
 
 /// Helper: retrieve linear memory from the HostState.

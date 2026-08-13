@@ -21,6 +21,16 @@ use wasm_encoder::*;
 
 const IMPORT_ALLOC_IDX: u32 = 0; // function index of nulang_alloc
 
+/// Function index of `env.nulang_dispatch` — generic effect dispatch
+/// (i32, i32, i32, i32) -> i64 (result-length return).
+const IMPORT_NULANG_DISPATCH: u32 = 1;
+
+/// Linear-memory base of the host's effect-result ring buffer. Must match
+/// `ActorCtx::ring_buffer_base` in nulang-cloud's wasmtime-actor-pool
+/// (0x1000). The host writes the dispatch result here and returns its
+/// length; the guest reads it back from this fixed address.
+pub(crate) const RING_BUFFER_BASE: u32 = 0x1000;
+
 /// Function index of `env.io_print` — used in `Call` instructions.
 const IMPORT_IO_PRINT: u32 = 3;
 /// Function index of `env.io_read` — used in `Call` instructions.
@@ -90,6 +100,75 @@ pub struct WasmBackend {
     field_map: HashMap<String, u8>,
     /// Foreign function declarations, indexed by `RValue::FFICall.idx`.
     foreign_functions: Vec<mir::ForeignFunction>,
+}
+
+/// Resolve a MIR local to its defining constant, if it is assigned exactly
+/// once from `RValue::Const`. Used to pre-compute effect-dispatch JSON at
+/// compile time — the WASM backend requires constant effect args (dynamic
+/// args are a loud compile error, not a silent nil).
+fn resolve_const(func: &mir::Function, local: mir::LocalId) -> Option<crate::bytecode::Constant> {
+    use crate::mir::Stmt;
+    let mut found = None;
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Assign { dst, op } = stmt {
+                if *dst == local {
+                    // Multiple assignments (a `var` mutated along the way)
+                    // mean the value is not a compile-time constant.
+                    if found.is_some() {
+                        return None;
+                    }
+                    if let RValue::Const(c) = op {
+                        found = Some(c.clone());
+                    } else {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// JSON-encode one constant for an effect-dispatch payload.
+fn json_arg(c: &crate::bytecode::Constant) -> Option<String> {
+    use crate::bytecode::Constant;
+    match c {
+        Constant::Int(n) => Some(n.to_string()),
+        Constant::Float(f) => {
+            let mut s = f.to_string();
+            // JSON requires a float-looking literal; Rust prints 42.0 as
+            // "42", which is a valid JSON int but the WRONG type.
+            if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                s.push_str(".0");
+            }
+            Some(s)
+        }
+        Constant::Bool(true) => Some("true".into()),
+        Constant::Bool(false) => Some("false".into()),
+        Constant::String(s) => Some(json_quote(s)),
+        Constant::Nil | Constant::Unit => Some("null".into()),
+        _ => None, // TypeDescriptor, FunctionRef, BehaviorRef
+    }
+}
+
+/// JSON-quote a string (escape `"`, `\`, and control characters).
+fn json_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl WasmBackend {
@@ -223,16 +302,11 @@ impl WasmBackend {
                             // only (no runtime representation in the WASM VM).
                             RValue::Unary(crate::ast::UnOp::Ref(_), _)
                             | RValue::Unary(crate::ast::UnOp::Deref, _) => true,
-                            // Only the IO.print/println/read and Array.length
-                            // builtins are handled; any user-defined effect
-                            // previously compiled to nil.
-                            RValue::Perform { effect, op, .. } => !matches!(
-                                (effect.as_str(), op.as_str()),
-                                ("IO", "print")
-                                    | ("IO", "println")
-                                    | ("IO", "read")
-                                    | ("Array", "length")
-                            ),
+                            // IO.print/println/read and Array.length keep
+                            // dedicated imports; every OTHER effect dispatches
+                            // through nulang_dispatch (handled below — not
+                            // unsupported).
+                            RValue::Perform { .. } => false,
                             _ => false,
                         };
                         if unsupported {
@@ -241,6 +315,55 @@ impl WasmBackend {
                                     .into(),
                                 span: crate::types::Span::default(),
                             });
+                        }
+                        // Effect dispatch pre-scan: `perform Effect.op(args)`
+                        // lowers to `nulang_dispatch(tag, payload)` where the
+                        // payload is a compile-time JSON array of the args.
+                        // Constant args are interned here (intern_string needs
+                        // `&mut self`, compile_rvalue has only `&self`);
+                        // dynamic args are a loud compile error.
+                        if let RValue::Perform {
+                            effect, op, args, ..
+                        } = op
+                        {
+                            let dispatchable = !matches!(
+                                (effect.as_str(), op.as_str()),
+                                ("IO", "print")
+                                    | ("IO", "println")
+                                    | ("IO", "read")
+                                    | ("Array", "length")
+                            );
+                            if dispatchable {
+                                let consts = args
+                                    .iter()
+                                    .map(|l| resolve_const(func, *l))
+                                    .collect::<Option<Vec<_>>>();
+                                let Some(consts) = consts else {
+                                    return Err(crate::types::NuError::VMError {
+                                        msg: format!(
+                                            "WASM backend: effect {effect}.{op} requires constant \
+                                             args (dynamic effect args are not yet supported in \
+                                             the WASM backend)"
+                                        ),
+                                        span: crate::types::Span::default(),
+                                    });
+                                };
+                                let encoded =
+                                    consts.iter().map(json_arg).collect::<Option<Vec<_>>>();
+                                let Some(encoded) = encoded else {
+                                    return Err(crate::types::NuError::VMError {
+                                        msg: format!(
+                                            "WASM backend: effect {effect}.{op} has an arg that \
+                                             is not JSON-encodable (int/float/bool/string/nil \
+                                             only)"
+                                        ),
+                                        span: crate::types::Span::default(),
+                                    });
+                                };
+                                let tag = format!("{effect}.{op}");
+                                self.intern_string(&tag);
+                                self.intern_string(&format!("[{}]", encoded.join(",")));
+                            }
                         }
                         self.intern_const_strings(op);
                     }
@@ -1298,10 +1421,241 @@ impl WasmBackend {
                 }
             }
             _ => {
-                // Unknown effect: return nil.
-                body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+                // Generic effect dispatch: `perform Effect.op(args)` →
+                // `nulang_dispatch(tag_ptr, tag_len, payload_ptr, payload_len)`
+                // where the tag is the dotted "Effect.op" path and the payload
+                // is a compile-time JSON array of the args (both interned in
+                // the pre-scan). The host writes the result to the ring buffer
+                // and returns its length; the read-back parses a JSON
+                // int/string/bool/null into a tagged Nulang value.
+                let tag = format!("{effect}.{op}");
+                let (tag_off, tag_len) = self.interned.get(&tag).copied().unwrap_or((0, 0));
+                let consts = args
+                    .iter()
+                    .map(|l| resolve_const(func, *l))
+                    .collect::<Option<Vec<_>>>()
+                    .expect("pre-scan guaranteed constant effect args");
+                let encoded = consts
+                    .iter()
+                    .map(json_arg)
+                    .collect::<Option<Vec<_>>>()
+                    .expect("pre-scan guaranteed JSON-encodable effect args");
+                let payload = format!("[{}]", encoded.join(","));
+                let (pay_off, pay_len) = self.interned.get(&payload).copied().unwrap_or((0, 0));
+
+                body.instruction(&Instruction::I32Const(tag_off as i32));
+                body.instruction(&Instruction::I32Const(tag_len as i32));
+                body.instruction(&Instruction::I32Const(pay_off as i32));
+                body.instruction(&Instruction::I32Const(pay_len as i32));
+                body.instruction(&Instruction::Call(IMPORT_NULANG_DISPATCH));
+                self.compile_dispatch_readback(body);
             }
         }
+    }
+
+    /// Emit the dispatch-result read-back: the `nulang_dispatch` call left
+    /// the result LENGTH (i64) on the stack; 0 means no result (nil). For a
+    /// non-zero length the result is a JSON value at [`RING_BUFFER_BASE`]
+    /// in linear memory. Parses:
+    /// - `"..."`   → string (content copied to a bump-allocated buffer)
+    /// - `true`    → bool true
+    /// - `false`   → bool false
+    /// - `null`    → nil
+    /// - integer   → int (decimal parse; non-integer JSON falls back to nil)
+    /// - anything else → nil (defensive)
+    ///
+    /// Scratch locals (all transient within this emission): 252 = result
+    /// length / int accumulator, 253 = first byte / content length / sign,
+    /// 254 = string dest ptr / int accumulator, 255 = loop index.
+    fn compile_dispatch_readback(&self, body: &mut Function) {
+        use wasm_encoder::{BlockType, MemArg, ValType};
+        let mem0 = MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        };
+        let base = RING_BUFFER_BASE as i32;
+        // All WASM locals in this backend are i64 (the function declares
+        // 256 i64 locals), so every i32 value stored to a local is
+        // sign-extended on the way in and wrapped on the way out.
+
+        // 252 = result length L (i64). If L == 0 → nil.
+        body.instruction(&Instruction::LocalSet(252));
+        body.instruction(&Instruction::LocalGet(252));
+        body.instruction(&Instruction::I64Eqz);
+        body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+        body.instruction(&Instruction::Else);
+        // 253 = first byte at [base] (i64).
+        body.instruction(&Instruction::I32Const(base));
+        body.instruction(&Instruction::I32Load8U(mem0));
+        body.instruction(&Instruction::I64ExtendI32U);
+        body.instruction(&Instruction::LocalSet(253));
+
+        // String: first byte '"' (0x22).
+        body.instruction(&Instruction::LocalGet(253));
+        body.instruction(&Instruction::I64Const(0x22));
+        body.instruction(&Instruction::I64Eq);
+        body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        {
+            // content_len = L - 2 (drop the surrounding quotes).
+            body.instruction(&Instruction::LocalGet(252));
+            body.instruction(&Instruction::I64Const(2));
+            body.instruction(&Instruction::I64Sub);
+            body.instruction(&Instruction::LocalSet(253)); // 253 = content_len
+                                                           // dest = nulang_alloc(content_len + 1) — +1 for the NUL.
+            body.instruction(&Instruction::LocalGet(253));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32Add);
+            body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+            body.instruction(&Instruction::I64ExtendI32U);
+            body.instruction(&Instruction::LocalSet(254)); // 254 = dest (i64)
+
+            // Copy loop: dest[i] = mem[base + 1 + i] for i in 0..content_len.
+            body.instruction(&Instruction::I64Const(0));
+            body.instruction(&Instruction::LocalSet(255)); // 255 = i (i64)
+            body.instruction(&Instruction::Block(BlockType::Empty)); // exit (depth 1)
+            body.instruction(&Instruction::Loop(BlockType::Empty)); // depth 0
+            body.instruction(&Instruction::LocalGet(255));
+            body.instruction(&Instruction::LocalGet(253));
+            body.instruction(&Instruction::I64GeU);
+            body.instruction(&Instruction::BrIf(1)); // i >= content_len → exit
+                                                     // addr = dest + i (i32)
+            body.instruction(&Instruction::LocalGet(254));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::LocalGet(255));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I32Add);
+            // value = mem[base + 1 + i] (i32)
+            body.instruction(&Instruction::I32Const(base + 1));
+            body.instruction(&Instruction::LocalGet(255));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I32Add);
+            body.instruction(&Instruction::I32Load8U(mem0));
+            // store (pops value, then addr — value must be on top).
+            body.instruction(&Instruction::I32Store8(mem0));
+            // i += 1
+            body.instruction(&Instruction::LocalGet(255));
+            body.instruction(&Instruction::I64Const(1));
+            body.instruction(&Instruction::I64Add);
+            body.instruction(&Instruction::LocalSet(255));
+            body.instruction(&Instruction::Br(0));
+            body.instruction(&Instruction::End); // end Loop
+            body.instruction(&Instruction::End); // end Block
+                                                 // dest[content_len] = 0 (null terminator).
+            body.instruction(&Instruction::LocalGet(254));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::LocalGet(253));
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I32Add);
+            body.instruction(&Instruction::I32Const(0));
+            body.instruction(&Instruction::I32Store8(mem0));
+            // TAG_STRING | dest
+            body.instruction(&Instruction::I64Const(value_layout::TAG_STRING as i64));
+            body.instruction(&Instruction::LocalGet(254));
+            body.instruction(&Instruction::I64Or);
+        }
+        body.instruction(&Instruction::Else);
+        {
+            // true?
+            body.instruction(&Instruction::LocalGet(253));
+            body.instruction(&Instruction::I64Const(b't' as i64));
+            body.instruction(&Instruction::I64Eq);
+            body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+            body.instruction(&Instruction::I64Const(value_layout::tag_bool(true) as i64));
+            body.instruction(&Instruction::Else);
+            // false?
+            body.instruction(&Instruction::LocalGet(253));
+            body.instruction(&Instruction::I64Const(b'f' as i64));
+            body.instruction(&Instruction::I64Eq);
+            body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+            body.instruction(&Instruction::I64Const(value_layout::tag_bool(false) as i64));
+            body.instruction(&Instruction::Else);
+            // null?
+            body.instruction(&Instruction::LocalGet(253));
+            body.instruction(&Instruction::I64Const(b'n' as i64));
+            body.instruction(&Instruction::I64Eq);
+            body.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+            body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+            body.instruction(&Instruction::Else);
+            {
+                // Integer parse: optional '-', then digits. 253 = sign,
+                // 254 = accumulator, 255 = index (all i64).
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::LocalSet(253));
+                body.instruction(&Instruction::I64Const(0));
+                body.instruction(&Instruction::LocalSet(254));
+                body.instruction(&Instruction::I64Const(0));
+                body.instruction(&Instruction::LocalSet(255));
+                // If mem[base] == '-' (0x2D): sign = -1, i = 1.
+                body.instruction(&Instruction::I32Const(base));
+                body.instruction(&Instruction::I32Load8U(mem0));
+                body.instruction(&Instruction::I32Const(0x2D));
+                body.instruction(&Instruction::I32Eq);
+                body.instruction(&Instruction::If(BlockType::Empty));
+                body.instruction(&Instruction::I64Const(-1));
+                body.instruction(&Instruction::LocalSet(253));
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::LocalSet(255));
+                body.instruction(&Instruction::End);
+                // Digit loop: while i < L && mem[base+i] is a digit.
+                body.instruction(&Instruction::Block(BlockType::Empty)); // exit (depth 1)
+                body.instruction(&Instruction::Loop(BlockType::Empty)); // depth 0
+                                                                        // i >= L → exit
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::LocalGet(252));
+                body.instruction(&Instruction::I64GeU);
+                body.instruction(&Instruction::BrIf(1));
+                // (mem[base+i] - 0x30) < 10 (unsigned ⇒ digit check)?
+                body.instruction(&Instruction::I32Const(base));
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I32Add);
+                body.instruction(&Instruction::I32Load8U(mem0));
+                body.instruction(&Instruction::I32Const(0x30));
+                body.instruction(&Instruction::I32Sub);
+                body.instruction(&Instruction::I32Const(10));
+                body.instruction(&Instruction::I32LtU);
+                body.instruction(&Instruction::I32Eqz);
+                body.instruction(&Instruction::BrIf(1)); // not a digit → exit
+                                                         // acc = acc * 10 + (mem[base+i] - 0x30)
+                body.instruction(&Instruction::LocalGet(254));
+                body.instruction(&Instruction::I64Const(10));
+                body.instruction(&Instruction::I64Mul);
+                body.instruction(&Instruction::I32Const(base));
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::I32WrapI64);
+                body.instruction(&Instruction::I32Add);
+                body.instruction(&Instruction::I32Load8U(mem0));
+                body.instruction(&Instruction::I32Const(0x30));
+                body.instruction(&Instruction::I32Sub);
+                body.instruction(&Instruction::I64ExtendI32U);
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::LocalSet(254));
+                // i += 1
+                body.instruction(&Instruction::LocalGet(255));
+                body.instruction(&Instruction::I64Const(1));
+                body.instruction(&Instruction::I64Add);
+                body.instruction(&Instruction::LocalSet(255));
+                body.instruction(&Instruction::Br(0));
+                body.instruction(&Instruction::End); // end Loop
+                body.instruction(&Instruction::End); // end Block
+                                                     // result = sign * acc, tagged int.
+                body.instruction(&Instruction::LocalGet(253));
+                body.instruction(&Instruction::LocalGet(254));
+                body.instruction(&Instruction::I64Mul);
+                body.instruction(&Instruction::I64Const(value_layout::PAYLOAD_MASK as i64));
+                body.instruction(&Instruction::I64And);
+                body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
+                body.instruction(&Instruction::I64Or);
+            }
+            body.instruction(&Instruction::End); // end null-check If
+            body.instruction(&Instruction::End); // end false-check If
+            body.instruction(&Instruction::End); // end true-check If
+        }
+        body.instruction(&Instruction::End); // end string-check If
+        body.instruction(&Instruction::End); // end L==0 If
     }
 
     // ── Binary ops ─────────────────────────────────────────────────
@@ -1837,6 +2191,19 @@ mod tests {
         runtime.run()
     }
 
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn run_source_with_dispatch(
+        source: &str,
+        dispatch_result: Option<Vec<u8>>,
+    ) -> NuResult<(crate::vm::Value, Option<(Vec<u8>, Vec<u8>)>)> {
+        let wasm = compile_source(source)?;
+        let mut runtime = crate::wasm_runtime::WasmRuntime::new(&wasm, None)?;
+        runtime.set_dispatch_result(dispatch_result);
+        let value = runtime.run()?;
+        let last = runtime.take_last_dispatch();
+        Ok((value, last))
+    }
+
     #[test]
     #[cfg(all(test, feature = "wasm-backend"))]
     fn test_wasm_array_index() {
@@ -1856,6 +2223,105 @@ mod tests {
     fn test_wasm_array_length() {
         let value = run_source("let a = [5, 6]; perform Array.length(a)").expect("run");
         assert_eq!(value.as_int(), Some(2), "Array.length should be 2");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_effect_dispatch_marshals_tag_and_json_payload() {
+        // A generic effect with constant args must lower to
+        // nulang_dispatch(tag="Test.echo", payload="[42,\"x\",true]").
+        // The host records the (tag, payload) pair and injects a string
+        // result, which the read-back must parse back into a Nulang string.
+        let (value, last) = run_source_with_dispatch(
+            r#"perform Test.echo(42, "x", true)"#,
+            Some(br#""ok""#.to_vec()),
+        )
+        .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"Test.echo", "tag is the dotted effect path");
+        assert_eq!(payload, br#"[42,"x",true]"#, "payload is JSON-encoded args");
+        // Read-back: the JSON string result must become a Nulang string.
+        assert_eq!(
+            value.as_raw() as u64 & crate::value_layout::TAG_MASK,
+            crate::value_layout::TAG_STRING,
+            "JSON string result must parse to a string value"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_effect_dispatch_int_result() {
+        let (value, last) =
+            run_source_with_dispatch(r#"perform Test.echo(1, 2, 3)"#, Some(b"42".to_vec()))
+                .expect("run");
+        let (tag, payload) = last.expect("dispatch must have been called");
+        assert_eq!(tag, b"Test.echo");
+        assert_eq!(payload, b"[1,2,3]", "ints marshal as JSON numbers");
+        assert_eq!(
+            value.as_int(),
+            Some(42),
+            "JSON int result must parse to a Nulang int"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_effect_dispatch_string_result() {
+        let mut runtime = {
+            let wasm = compile_source(r#"perform Greet.say("hi")"#).expect("compile");
+            let mut runtime = crate::wasm_runtime::WasmRuntime::new(&wasm, None).unwrap();
+            runtime.set_dispatch_result(Some(br#""hello world""#.to_vec()));
+            runtime
+        };
+        let value = runtime.run().expect("run");
+        assert_eq!(
+            runtime.string_value(&value).as_deref(),
+            Some("hello world"),
+            "JSON string result must parse to a Nulang string"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_effect_dispatch_bool_result() {
+        let (value, _) = run_source_with_dispatch(r#"perform Test.flag()"#, Some(b"true".to_vec()))
+            .expect("run");
+        assert_eq!(
+            value.as_bool(),
+            Some(true),
+            "JSON true must parse to a Nulang bool"
+        );
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_effect_dispatch_nil_when_no_result() {
+        // No handler / no result: dispatch returns length 0 → nil.
+        let (value, last) =
+            run_source_with_dispatch(r#"perform Test.nothing()"#, None).expect("run");
+        assert!(last.is_some(), "dispatch must still have been called");
+        assert_eq!(
+            value.as_raw() as u64,
+            crate::value_layout::TAG_NIL as u64,
+            "length-0 dispatch must yield nil"
+        );
+        // JSON null also parses to nil.
+        let (value, _) =
+            run_source_with_dispatch(r#"perform Test.nothing()"#, Some(b"null".to_vec()))
+                .expect("run");
+        assert_eq!(value.as_raw() as u64, crate::value_layout::TAG_NIL as u64);
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_effect_dispatch_dynamic_args_rejected() {
+        // Dynamic (non-constant) effect args are a loud compile error, not
+        // a silent nil.
+        let err = compile_source(r#"let x = 1 + 2; perform Test.echo(x)"#).unwrap_err();
+        assert!(
+            err.to_string().contains("constant args"),
+            "compile error must explain the constant-args requirement: {err}"
+        );
     }
 
     #[test]
