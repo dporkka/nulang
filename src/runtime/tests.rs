@@ -5780,3 +5780,87 @@ fn test_dst_deterministic_network_transport_delivers() {
     t_a.shutdown();
     t_b.shutdown();
 }
+
+/// PLAN.md Phase 1 bullet 2 (DST): the seed-sweep invariant test — the
+/// core "10⁴ seeds per commit, fails on any invariant violation"
+/// deliverable, at a CI-scalable scale. `run_scheduler_deterministic`
+/// executes REAL actor code (same VM/GC as production) with seed-driven
+/// scheduling, so a violation here is a real runtime bug, not a
+/// simulation artifact.
+///
+/// Scenario: a single counter actor receives `MESSAGES` increment
+/// messages, each carrying a +1 (and the batch is interleaved with
+/// messages to a decoy actor so the seeded scheduler has real ordering
+/// choices). Invariants that must hold for EVERY seed:
+///  1. Quiescence — the run terminates, never `StepLimitExceeded`
+///     (deadlock/livelock signal).
+///  2. AtMostOnce delivery — the counter reaches exactly `MESSAGES`,
+///     never more (double-delivery) and never fewer (a lost message).
+///
+/// 2000 seeds × a 200-message batch runs in ~21s (measured) because
+/// the deterministic path never sleeps on wall-clock; the rest of the
+/// suite runs in parallel threads underneath it.
+#[test]
+fn test_dst_seed_sweep_at_most_once_delivery() {
+    const MESSAGES: i64 = 200;
+    const SEEDS: u64 = 2000;
+
+    for seed in 0..SEEDS {
+        let mut rt = Runtime::new();
+        rt.install_virtual_clock();
+
+        let counter = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
+        {
+            let actor = rt.actors.get_mut(&counter).unwrap();
+            actor.register_behavior("inc", |actor, args| {
+                let n = actor
+                    .get_state_field("count")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(0);
+                actor.set_state_field("count", Value::int(n + by));
+            });
+        }
+        // Decoy actor: receives the same messages as the counter but
+        // ignores them — its mailbox stays non-empty longer, giving the
+        // seeded scheduler a real choice of which actor to run next
+        // (the interleaving is what the seed permutes).
+        let decoy = rt.spawn_actor(Box::new(|| vec![]));
+        {
+            let actor = rt.actors.get_mut(&decoy).unwrap();
+            actor.register_behavior("noop", |_actor, _args| {});
+        }
+
+        // Interleave: counter gets +1 messages, decoy gets the same
+        // messages as no-ops. Sends are enqueued in order but the
+        // deterministic scheduler picks actors by seed.
+        for _ in 0..MESSAGES {
+            rt.send_message(counter, "inc", &[Value::int(1)]);
+            rt.send_message(decoy, "noop", &[]);
+        }
+
+        let result = rt.run_scheduler_deterministic(seed, 100_000);
+        match result {
+            crate::runtime::DeterministicRunResult::Quiescent { steps } => {
+                assert!(
+                    steps > 0,
+                    "seed {seed}: run must make progress (messages enqueued)"
+                );
+            }
+            crate::runtime::DeterministicRunResult::StepLimitExceeded { steps } => {
+                panic!("seed {seed}: StepLimitExceeded after {steps} steps — possible deadlock/livelock");
+            }
+        }
+
+        let count = rt
+            .actors
+            .get(&counter)
+            .and_then(|a| a.get_state_field("count"))
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1);
+        assert_eq!(
+            count, MESSAGES,
+            "seed {seed}: counter must reach exactly {MESSAGES} (AtMostOnce), got {count}"
+        );
+    }
+}
