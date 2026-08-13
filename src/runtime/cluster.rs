@@ -390,6 +390,13 @@ pub struct ClusterState {
     last_probe_sent: Option<Instant>,
     /// True once the resolver decided the local node should leave.
     local_down: bool,
+    /// True once this node has ever received a heartbeat from another
+    /// node — i.e. it has been part of a live cluster at some point.
+    /// Guards the split-brain resolver: a node that has never contacted
+    /// any peer is still bootstrapping (its join handshakes haven't
+    /// completed), not a partition minority, and must not down itself
+    /// before the cluster can form.
+    has_seen_peer: bool,
 
     /// Active view: members we heartbeat directly. A member joins the
     /// active view by heartbeating us (symmetric by construction), so
@@ -453,6 +460,7 @@ impl ClusterState {
             probe_interval: DEFAULT_PROBE_INTERVAL,
             last_probe_sent: None,
             local_down: false,
+            has_seen_peer: false,
             active_view: Vec::new(),
             probationary: Vec::new(),
             passive_view: Vec::new(),
@@ -538,6 +546,9 @@ impl ClusterState {
     /// the active view.
     pub fn handle_heartbeat(&mut self, from: NodeId, addr: SocketAddr) {
         let now = self.now();
+        if from != self.local_node {
+            self.has_seen_peer = true;
+        }
 
         match self.members.get_mut(&from) {
             Some(info) => {
@@ -797,38 +808,46 @@ impl ClusterState {
             // Already down: no heartbeats, gossip, or probes.
             return actions;
         }
-        if let Some(resolver) = &self.split_brain {
-            // Passive members' liveness is gossip-derived, and their
-            // table status can be a frozen snapshot of the last gossip
-            // we received. The resolver must not count them as
-            // reachable once that evidence is stale: demote
-            // stale-status passives to Suspicious in the view only
-            // (the table is untouched).
-            let view_members: Vec<NodeInfo> = self
-                .members
-                .values()
-                .map(|info| {
-                    let mut info = info.clone();
-                    if info.node_id != self.local_node
-                        && !self.active_view.contains(&info.node_id)
-                        && now.duration_since(info.last_heartbeat) > self.heartbeat_timeout
-                        && matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
-                    {
-                        info.status = NodeStatus::Suspicious;
-                    }
-                    info
-                })
-                .collect();
-            let view = MembershipView {
-                local: self.local_node,
-                members: view_members,
-            };
-            if matches!(resolver.decide(&view), ResolverDecision::DownSelf) {
-                self.local_down = true;
-                actions.push(ClusterAction::Down {
-                    node: self.local_node,
-                });
-                return actions;
+        // Cold-bootstrap guard: before this node has ever received a
+        // heartbeat from any peer, it is still forming (join handshakes
+        // in flight), not a partition minority. Consulting the resolver
+        // now would down a fresh seed — it sees only itself, below
+        // quorum — and the cluster could never form. Skip the resolver
+        // until the first peer contact.
+        if self.has_seen_peer {
+            if let Some(resolver) = &self.split_brain {
+                // Passive members' liveness is gossip-derived, and their
+                // table status can be a frozen snapshot of the last gossip
+                // we received. The resolver must not count them as
+                // reachable once that evidence is stale: demote
+                // stale-status passives to Suspicious in the view only
+                // (the table is untouched).
+                let view_members: Vec<NodeInfo> = self
+                    .members
+                    .values()
+                    .map(|info| {
+                        let mut info = info.clone();
+                        if info.node_id != self.local_node
+                            && !self.active_view.contains(&info.node_id)
+                            && now.duration_since(info.last_heartbeat) > self.heartbeat_timeout
+                            && matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
+                        {
+                            info.status = NodeStatus::Suspicious;
+                        }
+                        info
+                    })
+                    .collect();
+                let view = MembershipView {
+                    local: self.local_node,
+                    members: view_members,
+                };
+                if matches!(resolver.decide(&view), ResolverDecision::DownSelf) {
+                    self.local_down = true;
+                    actions.push(ClusterAction::Down {
+                        node: self.local_node,
+                    });
+                    return actions;
+                }
             }
         }
 

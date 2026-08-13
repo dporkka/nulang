@@ -494,24 +494,60 @@ session.
   3 new tests verify same-seed same-sequence selection, real
   quiescence with correct final actor state, and step-limit-exceeded
   reporting for a run that hasn't settled.
-- **[~] Bullet 4 (chaos suite) — one real test landed, not the full
-  target.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
+- **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
+  determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
+  open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
   (`src/runtime/tests.rs`, extended session) drives 3 real `Runtime`
   instances over real loopback TCP: kills a node's transport hard (no
   graceful leave), confirms the survivors detect the failure via the
   real heartbeat-timeout/suspicion state machine, confirms they keep
   doing real cross-node work together (not just membership-table
-  bookkeeping), then confirms a fresh node can rejoin. Investigated
-  wiring `Runtime::install_virtual_clock`/`advance_time` to avoid the
-  ~9s of real wall-clock waiting this needs, but found `ClusterState`
-  keeps its own, separate `clock` field, unlinked from
-  `Runtime.virtual_clock` — genuine determinism needs per-node
-  `VirtualClock` instances kept in manual sync, left as follow-up.
-  Not done: 5-node topologies, split-brain (mutually-invisible healthy
-  sub-clusters, not one node dying), asymmetric partition, rolling
-  restart of every node, and running any of this across many seeds in
-  CI — the 10³-seeds-per-commit target needs the above determinism
-  work first (a real-TCP, real-wall-clock test can't scale to that).
+  bookkeeping), then confirms a fresh node can rejoin.
+  `test_three_node_cluster_survives_rolling_restart_of_every_node` (the
+  `fix/distribution-address-discovery` branch) extends the shape to a
+  full rolling restart of every node, gated on address convergence.
+  Then this extended session added the partition-injection primitive
+  (`NetworkTransport::set_partition`, real drop in `TcpTransport::send`
+  and the DST transport — outbound packets to the listed peers silently
+  vanish exactly like a firewall) plus **virtual-clock determinism**:
+  per-node `VirtualClock`s advanced in lockstep (`Runtime::advance_time`
+  re-syncs `ClusterState`'s clock every call, so the PLAN's earlier
+  "cluster clock unlinked from runtime clock" note is stale — the two
+  were wired together). `test_three_node_cluster_split_brain_detects_and_heals`
+  partitions {A,B}|{C}, asserts both sides mark the other `Failed`
+  through the REAL failure detector while each sub-cluster stays
+  internally `Healthy`, then heals via the probe path and delivers a
+  remote message across the former boundary. `test_three_node_cluster_asymmetric_partition_detects_and_heals`
+  asserts one-directional visibility (A sees B, B can't see A) with
+  exactly the expected asymmetric `Failed`/`Healthy` outcome, then
+  heals. `test_five_node_cluster_split_brain_detects_and_heals` covers
+  the 5-node topology item. All three run in ~0.4 s total (vs ~25 s
+  per real-wall-clock test) because failure detection fires in virtual
+  time. Key harness lesson: membership converges via gossip in ~1 s
+  virtual, but the failure detector only watches the ACTIVE view, which
+  fills through the 5 s repair cycle — tests that inject a partition
+  must first pump until `active_view` contains every peer
+  (`active_views_converged`), or the partitioned side never watches the
+  other side at all. The split-brain RESOLVER down-self path is now also
+  covered end-to-end: `test_three_node_cluster_static_quorum_downs_minority`
+  partitions {A}|{B,C} with `StaticQuorum{3}` (quorum 2) and asserts the
+  isolated minority downs itself through the REAL runtime — the
+  `ClusterAction::Down` handler shuts the transport down while local
+  actors keep running — the majority stays up and keeps delivering
+  remote messages, and healing does NOT resurrect the downed node
+  (operator restart is the recovery path). Writing that test surfaced a
+  REAL cold-bootstrap bug: `ClusterState::tick` consulted the resolver
+  from the very first tick, so a fresh seed node (which sees only
+  itself, 1 < quorum) downed itself before join handshakes completed —
+  the cluster-sim masked this by pre-seeding a full mesh and the unit
+  tests by calling `handle_heartbeat` before `tick`. Fixed with a
+  `has_seen_peer` gate: the resolver is consulted only after the node
+  has ever received a heartbeat from any peer, so a node that has never
+  contacted anyone is treated as bootstrapping, never as a partition
+  minority. Not done: running any of this across many seeds in CI — the
+  10³-seeds-per-commit target still needs a seed-driven loop over the
+  deterministic harness (the virtual-clock pump is the piece that makes
+  that feasible; the loop itself is not wired).
 - **[~] Bullet 8 (persistence recovery correctness) — one real bug
   found and fixed, one real gap found and documented, not the full
   "repeat for every StateModel" sweep.** `Runtime::recover_actor` never
