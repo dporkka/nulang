@@ -494,11 +494,11 @@ session.
   hollow-helper call sites throughout the rest of the codebase are
   still hollow — this session fixed the two highest-traffic ones
   (general call arity, event arity), not an exhaustive sweep.
-- **[~] Bullet 2 (DST) — single-node message-passing wired + seed-sweep
-  invariant test landed; cluster/timer determinism still not started.**
-  `src/dst.rs` was not even part of the compiled crate (`mod dst;` was
-  missing from `src/lib.rs` — its 4 tests had never run). Fixed that
-  first, then added
+- **[~] Bullet 2 (DST) — single-node message-passing + timer determinism
+  landed, seed-sweep invariant test landed; cluster/network determinism
+  still not started.** `src/dst.rs` was not even part of the
+  compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
+  tests had never run). Fixed that first, then added
   `Runtime::run_scheduler_deterministic`/`pick_ready_actor_deterministic`:
   actor selection driven by a seeded RNG over the sorted ready-set,
   reusing `step_actor` unchanged (same VM/GC/persistence machinery the
@@ -517,11 +517,20 @@ session.
   (AtMostOnce: no lost or double-delivered messages). Validated the
   test has teeth by injecting a message-drop into the counter behavior
   and confirming it fails; ~21s for the full sweep because the
-  deterministic path never sleeps. Not done: cluster/timer determinism
-  (the timer wheel and cross-shard channels still key off wall-clock
-  reads) and the 10⁴-seeds-per-commit CI job (the sweep is a single
-  in-suite test, not a nightly job; scaling the seed count to 10⁴ is a
-  constant-factor change of `SEEDS`).
+  deterministic path never sleeps. Timer determinism (same session):
+  when no actor is ready but the timer wheel is non-empty and a virtual
+  clock is installed, `run_scheduler_deterministic` advances the clock
+  to the next deadline and re-ticks, so timer-armed programs (send_after,
+  timed receive-waits) make deterministic progress instead of Quiescing
+  forever with their timers pending; clock advances count toward
+  `max_steps` so timer-rearming loops stay bounded. WITHOUT a virtual
+  clock the old contract holds (timer programs Quiesce with timers
+  pending). `test_dst_timer_fires_under_virtual_clock` asserts both
+  sides. Not done: cluster/network determinism (cross-shard channels
+  and the real transport still key off wall-clock reads) and the
+  10⁴-seeds-per-commit CI job (the sweep is a single in-suite test,
+  not a nightly job; scaling the seed count to 10⁴ is a constant-factor
+  change of `SEEDS`).
 - **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
   determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
   open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`

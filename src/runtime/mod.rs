@@ -2146,25 +2146,24 @@ impl Runtime {
     /// production scheduler drives -- so a bug caught here is a bug in
     /// the real actor runtime, not a simulated stand-in.
     ///
-    /// Scope (PLAN.md Phase 1 bullet 2, first step): pure message-passing
+    /// Scope (PLAN.md Phase 1 bullet 2): pure message-passing + timer
     /// determinism. Does NOT drive `self.scheduler` (the crossbeam
-    /// queue), `tick_timers`, cross-shard messages, or LLM completions --
-    /// a program that spawns/sends/asks/links/monitors between actors
-    /// with no timers, no distribution, and no LLM calls executes
-    /// byte-identically for the same seed. Timer- and network-driven
-    /// determinism are tracked as follow-up work, not attempted here:
-    /// the timer wheel and cross-shard channels both key off wall-clock
-    /// reads (`self.now()`), which this method deliberately never
-    /// touches -- a timer-armed program simply stops making progress
-    /// once its timer-waiting actor's mailbox empties, which surfaces
-    /// correctly as `Quiescent` (not a hang), just without exercising
-    /// the timer firing itself.
-    ///
-    /// Returns `Quiescent` once no actor has a non-empty mailbox, or
-    /// `StepLimitExceeded` if `max_steps` is hit first (the DST
-    /// framework's deadlock/livelock signal -- a real invariant
-    /// violation, not a simulation artifact, since every step here
-    /// executes real actor code).
+    /// queue), cross-shard messages, or LLM completions -- a program that
+    /// spawns/sends/asks/links/monitors between actors, arms timers
+    /// (`send_after`), or uses timed receive-waits executes
+    /// byte-identically for the same seed, provided a virtual clock is
+    /// installed. Timer determinism (2026-08-13): when no actor is ready
+    /// but the timer wheel is non-empty, the scheduler advances the
+    /// virtual clock to the next deadline and re-ticks, so a
+    /// timer-armed program's timers actually fire instead of the run
+    /// Quiescing forever with them pending (the pre-extension behavior).
+    /// Clock advances count toward `max_steps` so a program that keeps
+    /// re-arming timers cannot spin past the bound. WITHOUT a virtual
+    /// clock the old contract holds: a timer-armed program stops making
+    /// progress once its timer-waiting actor's mailbox empties and
+    /// surfaces as `Quiescent` (timers are wall-clock-based and cannot be
+    /// driven deterministically). Network-driven determinism remains
+    /// tracked as follow-up work.
     pub fn run_scheduler_deterministic(
         &mut self,
         seed: u64,
@@ -2183,7 +2182,32 @@ impl Runtime {
                     self.step_actor(actor_id);
                     steps += 1;
                 }
-                None => return DeterministicRunResult::Quiescent { steps },
+                None => {
+                    // No actor is ready. With a virtual clock installed and
+                    // timers pending, advance the clock to the next
+                    // deadline and re-tick — the fired timer re-enqueues
+                    // its target, so the next iteration makes progress.
+                    // Without a virtual clock (or with an empty wheel)
+                    // there is nothing deterministic left to do: Quiesce.
+                    if self.virtual_clock.is_none() || self.timer_wheel.is_empty() {
+                        return DeterministicRunResult::Quiescent { steps };
+                    }
+                    let deadline = self
+                        .timer_wheel
+                        .next_deadline()
+                        .expect("timer wheel non-empty implies a deadline");
+                    let delta = deadline.saturating_duration_since(self.now());
+                    if delta.is_zero() {
+                        // Deadline already at/behind the clock but the tick
+                        // at loop top didn't fire it (deadline raced the
+                        // advance): nudge a minimal quantum to force the
+                        // next tick to see it. Bounded by max_steps.
+                        self.advance_time(std::time::Duration::from_millis(1));
+                    } else {
+                        self.advance_time(delta);
+                    }
+                    steps += 1;
+                }
             }
         }
     }
