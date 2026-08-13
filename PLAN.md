@@ -75,7 +75,7 @@ among Phases 1-4's broader production-readiness work.
 | Direct deps | 72 |
 | Transitive deps | 468 (was 504 before a 2026-08-02 libsql feature trim dropped the unused tonic/axum gRPC stack; was documented as 483, already stale before that) |
 | Formal proofs (Lean 4) | Core type soundness NOT proved (`progress`/`preservation`/`type_soundness` all `sorry`, regressed 2026-07-26, undocumented until 2026-08-02); capability lattice genuinely proved (5/6 theorems); effects are vacuous `True` stubs, not proofs |
-| Conformance suite | 52 behavior cases + grammar cases |
+| Conformance suite | 300 behavior cases + grammar cases |
 | Bootstrap self-hosting | Stage 13; not yet self-compiling |
 | Benchmarks | `benches/` uses criterion (7 files, 404 lines); no CI regression tracking |
 | DST | `src/dst.rs` seed present (265 lines); not integrated into CI |
@@ -288,8 +288,8 @@ session.
   spread (correctly not flagged), and both sparse-history cases
   (correctly skipped rather than false-positiving). See
   `benchmarks/README.md` for the full methodology.
-- **[~] Bullet 5 (conformance suite expansion) — 26 → 239 of 300
-  target.** Corrected from this doc's original "52" (that was a file
+- **[X] Bullet 5 (conformance suite expansion) — 26 → 300 of 300
+  target, DONE.** Corrected from this doc's original "52" (that was a file
   count — `.nula`+`.json` pairs — not a case count; the actual starting
   case count was 26). Five waves of parallel agents:
   - Wave 1 (7 agents): capabilities, effect-handler resume, effect rows,
@@ -327,13 +327,26 @@ session.
     collide) — both documented, not fixed given the blast radius
     (`send_message` is called pervasively).
   Every value captured from the real compiled binary, never guessed.
-  Still short of 300 — the remaining ~61 would need to cover
-  progressively narrower surfaces (the AI runtime's `agent`/Pipeline/
-  Supervisor/Debate declarations need a mock LLM provider the CLI
-  binary doesn't expose, so that surface is appropriately tested at
-  the Rust integration-test layer instead — not reachable by
-  CLI-driven conformance cases at all, not a coverage gap in the same
-  sense as the others).
+  **Closed out 2026-08-13:** the final push to 300 landed the remaining
+  cases and surfaced a real parser bug. Running the suite against the
+  binary showed 8 of the lineariso cases failing with
+  "Expected capability (iso, trn, ref, val, box, tag, lineariso,
+  linear), found lineariso" — `parse_capability` (the `:cap`
+  annotation path) matched `lineariso`/`linear` as `TokenKind::Ident`
+  even though the lexer emits dedicated `LinearIso`/`Linear` tokens
+  (the parameter-capability path `try_parse_param_capability` had the
+  correct match; the annotation path never did). Fixed by matching the
+  tokens directly; all 8 cases pass. Then added two final cases to
+  cross 300: `cap_22_downgrade_iso_trn_ref` (iso → trn → ref lattice
+  accepted, value usable at the weakest capability) and
+  `cap_23_downgrade_trn_val` (the read-only end of the lattice) —
+  both captured from real binary output. Suite is 300/300 passing,
+  `./conformance/run.py` green. The AI-runtime surface (agent/
+  Pipeline/Supervisor/Debate) remains appropriately covered at the
+  Rust integration-test layer instead — those declarations need a mock
+  LLM provider the CLI binary doesn't expose, so they are not
+  reachable by CLI-driven conformance cases (not a coverage gap in the
+  same sense as the others).
 - **Real bugs found and FIXED this session (not from a numbered
   bullet, but squarely "correctness floor" — every one of these was
   found by an agent whose actual assignment was writing conformance

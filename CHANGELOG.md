@@ -45,6 +45,28 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-13
+
+- **`lineariso`/`linear` capability annotations now parse.** The lexer emits
+  dedicated `LinearIso`/`Linear` tokens, but `parse_capability` (the `:cap`
+  annotation path, `src/parser.rs`) only matched them as identifiers, so
+  `:cap lineariso` and `:cap linear` always failed to parse. Fixed by
+  matching the dedicated tokens directly; pinned by a Rust regression test
+  and 8 conformance cases. (The parameter-capability path had the correct
+  match all along.)
+- **Conformance suite reached 300 behavior cases** (Phase 1 acceptance
+  criterion). `conformance/run.py` is green 300/300, including two new
+  cases pinning the capability downgrade lattice (`cap_22` iso→trn→ref,
+  `cap_23` trn→val).
+- **WASM effect-dispatch ABI: `nulang_dispatch` returns the effect-result
+  length.** The host import is now `(i32,i32,i32,i32) -> i64` (bytes of the
+  effect result written to the ring buffer; 0 = no result), mirroring
+  `io_read`'s length-return contract so a guest lowering can read the
+  result back from linear memory. Mirrors the pool host side in
+  `wasmtime-actor-pool` and the parallel `wasmfx` backend. No compiler
+  lowering emits the call yet — effects other than IO.print/println/read
+  and `Array.length` are still rejected at compile time.
+
 ### Unchanged at 1.0.0-frozen
 
 The following are classified Stable as of 1.0.0-frozen. They have not changed
