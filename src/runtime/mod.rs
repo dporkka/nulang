@@ -349,6 +349,34 @@ pub struct Runtime {
     // (`Some(actor_id)` = spawned, `None` = rejected).
     pub spawnable_behaviors: HashMap<String, fn(&mut Actor, &[Value])>,
     pub pending_spawn_responses: HashMap<u64, Option<u64>>,
+    /// Bare actor id → hosting node for every remote actor this runtime
+    /// can address BY VALUE (RFC-0007 cross-node routing): spawn@node
+    /// placeholders (request id → target node, recorded at spawn time)
+    /// and inbound senders recorded for reply-by-ref. Actor-ref Values
+    /// carry only a 48-bit id — no node — so `send`/`ask` on a bare ref
+    /// consult this index to decide wire vs local routing. Scheduler-
+    /// thread confined like the rest of the distributed state. Bounded
+    /// at `REMOTE_REFS_MAX`; when full, new entries are dropped (the
+    /// forward `RemoteActorCache` still covers explicit
+    /// `ActorAddress::remote` sends).
+    pub(crate) remote_refs: HashMap<u64, NodeId>,
+    /// Messages sent to a spawn@node placeholder before its SpawnResponse
+    /// arrived, pre-resolved to wire form (string payloads rewritten to
+    /// table indices + contents captured in `string_table`) so the flush
+    /// on SpawnResponse doesn't need the sender's module-pool context.
+    pub(crate) pending_spawn_messages: HashMap<u64, Vec<distribution::PendingSpawnMessage>>,
+    /// Value ids that are spawn@node PLACEHOLDERS (request ids) whose
+    /// SpawnResponse has not arrived. Distinct from `remote_refs`: a
+    /// placeholder must QUEUE messages until its real actor id is known,
+    /// while an ordinary remote ref (inbound sender, real spawned id)
+    /// sends directly. Removed on SpawnResponse (success or failure).
+    pub(crate) spawn_placeholders: HashSet<u64>,
+    /// Placeholder VALUE id → real remote actor id, recorded on a
+    /// successful SpawnResponse. Independent of `pending_spawn_responses`
+    /// (consumed by `take_spawn_response`): the placeholder ref the
+    /// program holds must keep routing to the real actor even after the
+    /// response was observed (or not) by application code.
+    pub(crate) spawn_translations: HashMap<u64, u64>,
     /// AOT-compiled modules registered for native behavior dispatch, keyed by
     /// actor type name → module pointer. Ownership lives in
     /// `aot_module_storage`; the pointers are stable (each module is Boxed).
@@ -489,6 +517,10 @@ impl Runtime {
             #[cfg(feature = "tls")]
             tls_provider: Box::new(crate::backends::DefaultTlsProvider::new()),
             pending_spawn_responses: HashMap::new(),
+            remote_refs: HashMap::new(),
+            pending_spawn_messages: HashMap::new(),
+            spawn_placeholders: HashSet::new(),
+            spawn_translations: HashMap::new(),
             dlq_actor_id: None,
             http_server: None,
             test_handlers: HashMap::new(),
@@ -1346,8 +1378,56 @@ impl Runtime {
     /// of erroring or being ignored. See SPEC2.md Chapter 8 (message
     /// passing) and `conformance/behavior/lifecycle_03/04_*.nula`.
     pub fn send_message(&mut self, target_id: u64, behavior: &str, args: &[Value]) {
+        // Name-based sends already carry the wire behavior name, so route
+        // remote refs directly (same local-existence guard as
+        // `send_message_by_id`; see RFC-0007 note there).
+        if !self.actors.contains_key(&target_id) {
+            if let Some(node) = self.remote_refs.get(&target_id).copied() {
+                self.route_ref_send(target_id, node, behavior, args);
+                return;
+            }
+        }
         let behavior_id = self.behavior_id_for(target_id, behavior).unwrap_or(0);
         self.send_message_by_id(target_id, behavior_id, args);
+    }
+
+    /// Route a message to a KNOWN remote ref (hosting node already
+    /// resolved via `remote_refs`): queue while the spawn placeholder is
+    /// still pending, otherwise translate the placeholder to the real
+    /// actor id (if applicable) and send over the wire.
+    fn route_ref_send(&mut self, target_id: u64, node: NodeId, behavior: &str, args: &[Value]) {
+        if self.spawn_placeholders.contains(&target_id)
+            && !self.pending_spawn_responses.contains_key(&target_id)
+        {
+            // SpawnResponse still in flight: queue the pre-resolved wire
+            // form; it flushes when the real actor id arrives.
+            distribution::queue_spawn_message(self, target_id, node, behavior, args);
+        } else {
+            let real_id = self
+                .spawn_translations
+                .get(&target_id)
+                .copied()
+                .unwrap_or(target_id);
+            self.send_distributed(ActorAddress::remote(node, real_id), behavior, args);
+        }
+    }
+
+    /// Full (wire) behavior name for a behavior index in the given actor's
+    /// module — the name the receiving node resolves against ITS behavior
+    /// table. Unlike `step_name_for` this does NOT strip the dotted
+    /// workflow prefix: remote resolution matches the full entry name.
+    fn behavior_wire_name_for(&self, actor: Option<u64>, behavior_id: u16) -> Option<String> {
+        let actor = self.actors.get(&actor?)?;
+        if let Some(entry) = actor.behavior_table.get(behavior_id as usize) {
+            if !entry.name.is_empty() {
+                return Some(entry.name.clone());
+            }
+        }
+        let module = actor.bytecode_module.as_ref()?;
+        module
+            .behaviors
+            .get(behavior_id as usize)
+            .map(|b| b.name.clone())
     }
 
     /// Synchronously run a single behavior on an actor and return its result.
@@ -1670,6 +1750,34 @@ impl Runtime {
         // receiving side derives its own child. When no message is being
         // handled, the outgoing message starts a fresh trace on its own.
         let out_trace = self.current_trace.as_ref().map(|t| t.to_traceparent());
+        // Cross-node routing by bare actor-ref value (RFC-0007 gap): a
+        // spawn@node placeholder or reply-by-ref id whose hosting node we
+        // know routes over the wire instead of the local mailbox. The
+        // local-existence guard prefers local actors on id collision —
+        // `fresh_actor_id` starts at 1 on EVERY node, so a remote id
+        // numerically equal to a local actor must never hijack local
+        // sends (a colliding remote ref is unreachable by bare value, an
+        // inherent limit of the 48-bit actor-ref payload; explicit
+        // `ActorAddress::remote` still works).
+        if !self.actors.contains_key(&target_id) {
+            if let Some(node) = self.remote_refs.get(&target_id).copied() {
+                // The behavior name must cross the wire (the receiver
+                // resolves it against ITS behavior table). Recover it from
+                // the sender's module — the same table the VM's `Send`
+                // opcode indexed.
+                let Some(behavior_name) =
+                    self.behavior_wire_name_for(self.current_actor, behavior_id)
+                else {
+                    warn!(
+                        "nulang-net: dropping message to remote actor {} on node {:?}: cannot resolve behavior name (no sender module context)",
+                        target_id, node
+                    );
+                    return;
+                };
+                self.route_ref_send(target_id, node, &behavior_name, args);
+                return;
+            }
+        }
         // Forwarding for migrated actors: if this actor has been relocated
         // to another node, route the message there instead of bouncing it.
         if let Some(&(target_node, _migrated_at)) = self.migrated_actors.get(&target_id) {

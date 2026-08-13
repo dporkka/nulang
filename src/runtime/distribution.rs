@@ -10,6 +10,77 @@ use crate::runtime::{
 };
 use tracing::warn;
 
+/// Cap on the bare-id → node reverse index (`Runtime::remote_refs`). The
+/// forward `RemoteActorCache` (10k, TTL-bounded) still covers explicit
+/// `ActorAddress::remote` sends; the reverse index is best-effort on top.
+const REMOTE_REFS_MAX: usize = 10_000;
+
+/// A message sent to a spawn@node placeholder before its SpawnResponse
+/// arrived. The payload is ALREADY in wire form — string ids rewritten to
+/// table indices, contents captured in `string_table` — so the flush on
+/// SpawnResponse doesn't need the sender's module-pool context (the
+/// sender may have been re-entered by then).
+pub(crate) struct PendingSpawnMessage {
+    pub behavior_name: String,
+    pub payload: Vec<Value>,
+    pub string_table: Vec<String>,
+    pub sender: u64,
+    pub trace_id: Option<String>,
+}
+
+/// Queue a message for a spawn@node placeholder whose SpawnResponse has
+/// not arrived yet. Resolves string payloads to content NOW (the sender
+/// context is valid at send time); the SpawnResponse handler flushes the
+/// queued messages to the real actor id.
+pub(crate) fn queue_spawn_message(
+    rt: &mut Runtime,
+    request_id: u64,
+    _node: NodeId,
+    behavior: &str,
+    args: &[Value],
+) {
+    let (payload, string_table) = match distributed::resolve_wire_strings(rt, args) {
+        Some(resolved) => resolved,
+        None => {
+            warn!(
+                "nulang-net: dropping message to spawn placeholder {}: string payload cannot be resolved to content (no sender module context)",
+                request_id
+            );
+            let sender = rt.current_actor.unwrap_or(0);
+            crate::runtime::distributed::notify_delivery_failed(
+                rt,
+                sender,
+                "string payload unresolvable",
+            );
+            return;
+        }
+    };
+    let sender = rt.current_actor.unwrap_or(0);
+    let trace_id = rt.current_trace.as_ref().map(|t| t.to_traceparent());
+    rt.pending_spawn_messages
+        .entry(request_id)
+        .or_default()
+        .push(PendingSpawnMessage {
+            behavior_name: behavior.to_string(),
+            payload,
+            string_table,
+            sender,
+            trace_id,
+        });
+}
+
+/// Record `actor_id → node` in the reverse index (bounded; drops new
+/// entries when full rather than growing without limit).
+pub(crate) fn record_remote_ref(rt: &mut Runtime, node: NodeId, actor_id: u64) {
+    if actor_id == 0 {
+        return;
+    }
+    if rt.remote_refs.len() >= REMOTE_REFS_MAX && !rt.remote_refs.contains_key(&actor_id) {
+        return;
+    }
+    rt.remote_refs.insert(actor_id, node);
+}
+
 /// Enable the distributed actor system, binding to `bind_addr` for incoming
 /// connections and advertising ourselves under this address.
 pub(crate) fn enable_distribution(

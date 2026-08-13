@@ -1754,9 +1754,20 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
         // the actor until the reply or timeout.
         unsafe {
             let rt = &mut *self.runtime;
-            let node_id = rt.distributed.node_id.map(|n| n.0).unwrap_or(0);
-            let target = ActorAddress::remote(crate::runtime::NodeId(node_id), target_actor);
-            rt.send_distributed(target, behavior, args);
+            // Cross-node routing by bare actor-ref value: if the target id
+            // is a known remote ref (spawn@node placeholder or inbound
+            // sender), route to ITS node; otherwise fall back to the
+            // local-node path (single-node `ask remote` local delivery).
+            match rt.remote_refs.get(&target_actor).copied() {
+                Some(node) => {
+                    rt.route_ref_send(target_actor, node, behavior, args);
+                }
+                None => {
+                    let node_id = rt.distributed.node_id.map(|n| n.0).unwrap_or(0);
+                    let target = ActorAddress::remote(crate::runtime::NodeId(node_id), target_actor);
+                    rt.send_distributed(target, behavior, args);
+                }
+            }
         }
         crate::vm::Value::nil()
     }

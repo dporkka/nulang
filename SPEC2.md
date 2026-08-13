@@ -2585,10 +2585,21 @@ result-register convention as the local `Ask` opcode (the previous
 register-write mismatch returned the wrong value). Pinned by
 `test_distributed_remote_address_local_fallback` and
 `test_distributed_callbacks_invoked` (which now asserts the RAsk
-result value). Remote delivery to genuinely foreign nodes remains an
-implementation gap (RFC 0007): the node id is not yet carried in
-actor-reference values, so `spawn@node` references cannot be re-routed
-cross-node by `send`/`ask`.
+result value). **Cross-node routing of `spawn@node` references is now
+implemented (2026-08-13):** the node id is still not carried in the
+actor-ref VALUE itself, but the runtime keeps a bare id → node reverse
+index (`Runtime.remote_refs`, populated at remote spawn, on
+SpawnResponse, on wire sends, and on inbound messages for reply-by-ref)
+so `send`/`ask` on any actor-ref value routes over the wire to the
+right node. A spawn@node placeholder queues messages while the
+SpawnResponse is in flight and translates to the real actor id
+afterwards. Pinned by `test_remote_ref_send_by_bare_id_routes_wire`,
+`test_remote_ref_pending_spawn_queue_flushes`, and
+`test_remote_ref_local_collision_prefers_local`. Known limits: an id
+collision with a local actor prefers local delivery (the remote ref is
+then unreachable by bare value — use an explicit
+`ActorAddress::remote`), and the reverse index is best-effort bounded
+(10k, no TTL) on top of the TTL-bounded forward cache.
 
 Actors move between nodes explicitly with `migrate` (the `to` here is contextual syntax, not a keyword):
 

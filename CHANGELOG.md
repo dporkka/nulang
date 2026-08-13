@@ -78,6 +78,21 @@ two major versions.*
   state after a normal finish, so a blind re-capture re-stalled the
   actor (the residual hang this fix closes). Pinned by
   `test_workflow_timer_sleep_single_arg_resumes`.
+- **`spawn@node` references route cross-node by bare actor-ref value.**
+  Actor-ref Values carry only a 48-bit id (no node), so a remote-spawn
+  handle used to fall into the local mailbox path — messages were
+  silently misdelivered/dropped and `ask remote` hardcoded the local
+  node. The runtime now keeps a bare id → node reverse index
+  (populated at remote spawn, on SpawnResponse, on wire sends, and on
+  inbound messages for reply-by-ref), and `send`/`ask` on any known
+  remote ref routes over the wire. Messages sent to a spawn@node
+  placeholder before its SpawnResponse arrives are queued in wire form
+  and flushed to the real actor id; the placeholder value keeps routing
+  even after `take_spawn_response` consumes the response. Local actors
+  win on id collision (`fresh_actor_id` starts at 1 on every node), and
+  `RAsk` now accepts actor-ref targets and stages behavior args like the
+  local `Ask` opcode (both were broken). Pinned by three cross-node TCP
+  tests plus a strengthened RAsk unit test.
 - **`send remote`/`ask remote` now fall back to local delivery
   single-node instead of silently dropping messages, and `ask remote`
   returns the callback's value.** The distribution wrapper resolves a
@@ -87,9 +102,10 @@ two major versions.*
   mismatch returned the wrong value). Pinned by
   `test_distributed_remote_address_local_fallback` and the strengthened
   `test_distributed_callbacks_invoked` (which now asserts the RAsk
-  result value). Cross-node routing of `spawn@node` references remains
-  an RFC 0007 implementation gap (the node id is not yet carried in
-  actor-reference values).
+  result value). Cross-node routing of `spawn@node` references is the
+  companion change above (2026-08-13); the node id is not carried in
+  actor-ref values, so routing goes through the runtime's reverse
+  index.
 
 ### Unchanged at 1.0.0-frozen
 

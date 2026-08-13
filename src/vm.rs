@@ -4676,21 +4676,33 @@ impl VM {
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::unit();
             }
             OpCode::RAsk => {
+                // The target register holds an actor-ref VALUE (TAG_ACTOR)
+                // when the actor expression is a real ref (e.g. a spawn@node
+                // handle); accept the payload directly, with a plain-int
+                // fallback for hand-assembled modules.
                 let target_actor = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0) as u64;
+                    .as_actor_id()
+                    .or_else(|| {
+                        self.frames[frame_idx].regs[instr.op1 as usize]
+                            .as_int()
+                            .map(|v| v as u64)
+                    })
+                    .unwrap_or(0);
                 // behavior_idx is a 16-bit behavior table index split across
                 // op2 (high) + op3 (low), same encoding as OpCode::Ask.
                 let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
-                let behavior_name = self
+                let (param_count, behavior_name) = self
                     .modules
                     .get(module_idx)
                     .and_then(|m| m.behaviors.get(behavior_idx))
-                    .map(|b| b.name.clone())
-                    .unwrap_or_default();
+                    .map(|b| (b.param_count, b.name.clone()))
+                    .unwrap_or((0, String::new()));
+                let args: Vec<Value> = (0..param_count)
+                    .map(|i| self.frames[frame_idx].regs[i])
+                    .collect();
                 let timeout_ms = self.frames[frame_idx].regs[12].as_int().unwrap_or(5_000) as u64;
                 let result = if let Some(ref mut cb) = self.distributed_callbacks {
-                    cb.remote_ask(target_actor, &behavior_name, &[], timeout_ms)
+                    cb.remote_ask(target_actor, &behavior_name, &args, timeout_ms)
                 } else {
                     Value::nil()
                 };
@@ -6242,7 +6254,7 @@ mod vm_tests {
         struct MockCallbacks {
             node_id: u64,
             migrations: Vec<(u64, u64)>,
-            asks: Vec<(u64, String)>,
+            asks: Vec<(u64, String, Vec<Value>)>,
             gossips: Vec<String>,
         }
         impl DistributedVmCallbacks for MockCallbacks {
@@ -6256,10 +6268,10 @@ mod vm_tests {
                 &mut self,
                 target_actor: u64,
                 behavior: &str,
-                _args: &[Value],
+                args: &[Value],
                 _timeout_ms: u64,
             ) -> Value {
-                self.asks.push((target_actor, behavior.to_string()));
+                self.asks.push((target_actor, behavior.to_string(), args.to_vec()));
                 Value::int(123)
             }
             fn gossip(&mut self, message: &str) -> Value {
@@ -6276,7 +6288,7 @@ mod vm_tests {
         // Add a behavior so RAsk can look up the name from the behavior table.
         module.add_behavior(BehaviorTableEntry {
             name: "echo".to_string(),
-            param_count: 0,
+            param_count: 2,
             code_offset: 0,
             local_count: 0,
             effect_mask: 0,
@@ -6293,7 +6305,13 @@ mod vm_tests {
             ((actor_const >> 8) & 0xFF) as u8,
             (actor_const & 0xFF) as u8,
             1,
-        )); // r1 = 5
+        )); // r1 = 5 (target; also lands as arg1 per the Ask staging convention)
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((actor_const >> 8) & 0xFF) as u8,
+            (actor_const & 0xFF) as u8,
+            0,
+        )); // r0 = 5 (arg0)
         module.emit(Instruction::new3(
             OpCode::ConstU,
             ((node_const >> 8) & 0xFF) as u8,
@@ -6347,7 +6365,15 @@ mod vm_tests {
             .unwrap();
         assert_eq!(cb.node_id, expected_node_id);
         assert_eq!(cb.migrations, &[(5, 11)]);
-        assert_eq!(cb.asks, &[(5, "echo".to_string())]);
+        assert_eq!(
+            cb.asks,
+            &[(
+                5,
+                "echo".to_string(),
+                vec![Value::int(5), Value::int(5)]
+            )],
+            "RAsk must stage behavior args (regs 0..param_count) like local Ask"
+        );
         assert_eq!(cb.gossips, &["sync".to_string()]);
     }
 
