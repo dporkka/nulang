@@ -3214,11 +3214,42 @@ impl Runtime {
             vm.restore_suspended_state(suspended.vm_state);
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            // Re-capture if the behavior re-suspended (e.g. chained Timer.sleep).
+            // Distinguish completion from re-suspension by the resume
+            // RESULT, not `take_suspended_state`: after a normal
+            // completion the frame is still live, so take_suspended_state
+            // returns the completed state and a blind re-capture would
+            // re-install it as a fresh suspension (permanent stall).
+            // Mirrors resume_suspended_llm_step.
             match result {
                 Ok(_) => {
-                    // Behavior completed or re-suspended; if it re-suspended,
-                    // take_suspended_state captures the new state.
+                    // The sleeping step ran to completion. For workflow
+                    // actors record the completion the same way the other
+                    // resume paths do: advance step_index, append
+                    // StepCompleted, and checkpoint. Without this the
+                    // step's body finishes but the workflow never advances
+                    // — SPEC2 known-issue #4's permanent stall.
+                    if (*self_ptr).actor_is_workflow(actor_id) {
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            if let Some(n) =
+                                actor.get_state_field("step_index").and_then(|v| v.as_int())
+                            {
+                                actor.set_state_field("step_index", Value::int(n + 1));
+                            }
+                        }
+                        let seq = (*self_ptr).next_sequence(actor_id);
+                        let _ = (*self_ptr).persistence.append_workflow_event(
+                            actor_id,
+                            crate::runtime::WorkflowEvent::StepCompleted {
+                                sequence: seq,
+                                step_name: suspended.step_name.clone(),
+                            },
+                        );
+                        (*self_ptr).checkpoint_actor(actor_id);
+                    }
+                }
+                Err(crate::types::NuError::Suspended(_)) => {
+                    // Re-suspended (e.g. a chained Timer.sleep): re-capture
+                    // the VM state so the next timer fire can resume it.
                     if let Some(vm_state) = vm.take_suspended_state() {
                         if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
                             actor.suspended_execution =

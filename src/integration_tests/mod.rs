@@ -3520,6 +3520,76 @@ match { a: 2, b: 9 } with {
     }
 
     #[test]
+    fn test_workflow_timer_sleep_single_arg_resumes() {
+        // Regression for the SPEC2 known-issue list (#4): a single-arg
+        // `perform Timer.sleep(ms)` in a workflow step used to suspend
+        // forever (a permanent hang — only the two-arg durable form
+        // worked). `fire_timer_sleep_wake` now resumes the suspended
+        // PerformAsync; the re-executed opcode sees the fired flag and
+        // completes the step.
+        let source = r#"
+            workflow TimerWorkflow {
+                step wait { perform Timer.sleep(50) }
+            }
+            spawn TimerWorkflow {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        rt.borrow_mut().install_virtual_clock();
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().step_actor(actor_id);
+
+        // The single-arg sleep must suspend the step (not complete inline).
+        assert!(
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .suspended_execution
+                .is_some(),
+            "single-arg Timer.sleep must suspend the step"
+        );
+
+        // Fire the timer wheel: the wake resumes the suspended PerformAsync
+        // and the step body runs to completion.
+        rt.borrow_mut()
+            .advance_time(std::time::Duration::from_millis(100));
+        rt.borrow_mut().tick_timers();
+        rt.borrow_mut().step_actor(actor_id);
+
+        let events = store.read_workflow_events(actor_id);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::StepCompleted { .. })),
+            "the step must complete after the timer fires, got {:?}",
+            events
+        );
+        assert_eq!(
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
+            Some(1),
+            "the workflow must advance past the sleeping step"
+        );
+    }
+
+    #[test]
     fn test_workflow_parallel_branches_normal() {
         // A simple parallel block with no suspension: both branches run in one
         // synthetic step and the workflow continues to the next sequential step.

@@ -244,7 +244,15 @@ corrected in SPEC2.md), 12 more found and documented for follow-up
 (including a real compiler SIGABRT on large functions and two
 behavior-dispatch surprises), plus a dozen SPEC2.md/GOVERNANCE.md/
 CHANGELOG.md truth-in-advertising corrections. 42 commits this
-session.
+session. **Update 2026-08-13 (follow-up sweep):** three of the
+documented follow-up bugs closed with regression tests — the
+single-arg `perform Timer.sleep(ms)` workflow hang (the wake resumed
+the PerformAsync but re-installed the completed frame state as a fresh
+suspension; now the resume result decides completion vs re-suspension,
+mirroring the LLM path), and the `send remote`/`ask remote`
+local-delivery fallback + `RAsk` result-register convention (both
+pinned at the runtime/VM level). SPEC2.md and CHANGELOG.md updated;
+see their entries for evidence.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it

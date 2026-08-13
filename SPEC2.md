@@ -2256,10 +2256,19 @@ in this pass beyond the first):**
    shifts which step's compensation runs, with no error.
 3. A workflow-level `compensate { }` block (as opposed to a per-step
    one) parses but is silently dropped during lowering and never runs.
-4. The single-argument `perform Timer.sleep(ms)` form suspends a step
+4. ~~The single-argument `perform Timer.sleep(ms)` form suspends a step
    and never resumes it in a plain invocation (permanent hang, not an
    error) — only the two-argument durable form, `Timer.sleep(name, ms)`,
-   works. `ms = 0` hangs too.
+   works. `ms = 0` hangs too.~~ **Fixed 2026-08-13:** the timer-wheel
+   wake now resumes the suspended `PerformAsync` via a full VM resume
+   (`fire_timer_sleep_wake`), the re-executed opcode sees the fired flag
+   and completes, and the workflow completion bookkeeping (step_index
+   advance, `StepCompleted` event, checkpoint) runs exactly like the
+   signal-wait/LLM resume paths. The resume distinguishes completion from
+   re-suspension by the VM result, not `take_suspended_state` (which
+   returns the completed frame state after a normal finish — a blind
+   re-capture re-stalled the actor). Pinned by
+   `test_workflow_timer_sleep_single_arg_resumes`.
 5. A step failing (e.g. a non-exhaustive match) produces no diagnostic
    at all — no stderr, exit 0 — only a difference in which
    compensations ran (if any) reveals it happened.
@@ -2566,15 +2575,20 @@ send cart add_item(42)
 This example's `send` is ordinary single-node actor messaging (§8.5) —
 it works today, but doesn't exercise any routing decision since there's
 only ever one node to route to. `send remote <actor> <behavior>(args)`
-and `ask remote <actor> <behavior>(args)` are also accepted syntax, but
-single-node their messages are silently dropped rather than
-locally-delivered (a real bug, not just a doc gap: the local-delivery
-fallback these should use already exists and works for other distributed
-paths — `send remote`/`ask remote` just aren't wired to call it).
-`ask remote` additionally returns the wrong value (the target's own
-actor reference) due to a register-write mismatch between the local and
-remote `Ask` opcodes. Tracked as an implementation gap, not fixed in
-this documentation pass.
+and `ask remote <actor> <behavior>(args)` are also accepted syntax.
+**Fixed 2026-08-13:** single-node (or distributed-disabled) remote
+sends/asks now fall back to local delivery instead of silently
+dropping — the distribution wrapper resolves a remote address to local
+delivery when the node is local or the transport is unwired, and
+`RAsk` surfaces the `remote_ask` callback's value via the same
+result-register convention as the local `Ask` opcode (the previous
+register-write mismatch returned the wrong value). Pinned by
+`test_distributed_remote_address_local_fallback` and
+`test_distributed_callbacks_invoked` (which now asserts the RAsk
+result value). Remote delivery to genuinely foreign nodes remains an
+implementation gap (RFC 0007): the node id is not yet carried in
+actor-reference values, so `spawn@node` references cannot be re-routed
+cross-node by `send`/`ask`.
 
 Actors move between nodes explicitly with `migrate` (the `to` here is contextual syntax, not a keyword):
 

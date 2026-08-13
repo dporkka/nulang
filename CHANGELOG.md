@@ -67,6 +67,30 @@ two major versions.*
   lowering emits the call yet — effects other than IO.print/println/read
   and `Array.length` are still rejected at compile time.
 
+- **Single-argument `perform Timer.sleep(ms)` in a workflow step no longer
+  hangs.** The step used to suspend forever (only the two-argument durable
+  form `Timer.sleep(name, ms)` worked). The timer-wheel wake now resumes
+  the suspended `PerformAsync` with a full VM resume, and the completion
+  bookkeeping (step_index advance, `StepCompleted` event, checkpoint)
+  runs exactly like the signal-wait/LLM resume paths. The resume
+  distinguishes completion from re-suspension by the VM result, not
+  `take_suspended_state` — that accessor returns the completed frame
+  state after a normal finish, so a blind re-capture re-stalled the
+  actor (the residual hang this fix closes). Pinned by
+  `test_workflow_timer_sleep_single_arg_resumes`.
+- **`send remote`/`ask remote` now fall back to local delivery
+  single-node instead of silently dropping messages, and `ask remote`
+  returns the callback's value.** The distribution wrapper resolves a
+  remote address to local delivery when the node is local or the
+  transport is unwired, and `RAsk` uses the same result-register
+  convention as the local `Ask` opcode (previously a register-write
+  mismatch returned the wrong value). Pinned by
+  `test_distributed_remote_address_local_fallback` and the strengthened
+  `test_distributed_callbacks_invoked` (which now asserts the RAsk
+  result value). Cross-node routing of `spawn@node` references remains
+  an RFC 0007 implementation gap (the node id is not yet carried in
+  actor-reference values).
+
 ### Unchanged at 1.0.0-frozen
 
 The following are classified Stable as of 1.0.0-frozen. They have not changed
