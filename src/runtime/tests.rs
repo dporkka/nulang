@@ -5781,6 +5781,70 @@ fn test_dst_deterministic_network_transport_delivers() {
     t_b.shutdown();
 }
 
+/// PLAN.md Phase 1 bullet 2 (DST): timer determinism. A program whose
+/// actor arms a timer (via the runtime timer wheel) must make progress
+/// under `run_scheduler_deterministic` when a virtual clock is
+/// installed: the scheduler advances the virtual clock to the deadline,
+/// the timer fires, the message is delivered, and the run Quiesces with
+/// the timer's side effect applied. Without a virtual clock the old
+/// contract holds — the run Quiesces with the timer still pending.
+#[test]
+fn test_dst_timer_fires_under_virtual_clock() {
+    use std::time::Duration;
+
+    let run_with = |virtual_clock: bool| -> i64 {
+        let mut rt = Runtime::new();
+        if virtual_clock {
+            rt.install_virtual_clock();
+        }
+        let actor_id = rt.spawn_actor(Box::new(|| vec![("fired".to_string(), Value::int(0))]));
+        let behavior_id = {
+            let actor = rt.actors.get_mut(&actor_id).unwrap();
+            actor.register_behavior("__timer_fired", |actor, _args| {
+                let n = actor
+                    .get_state_field("fired")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                actor.set_state_field("fired", Value::int(n + 1));
+            });
+            // The registered behavior's table index is what the timer
+            // wheel delivers (mirrors rearm_timer's behavior_id lookup).
+            actor.behavior_table.len() as u16 - 1
+        };
+
+        // Arm a 50ms timer at the actor.
+        rt.timer_wheel.send_after_with_context(
+            Duration::from_millis(50),
+            actor_id,
+            behavior_id,
+            vec![],
+            "dst-timer-test".to_string(),
+        );
+
+        rt.run_scheduler_deterministic(0, 1000);
+
+        rt.actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("fired"))
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1)
+    };
+
+    // With a virtual clock the timer fires: counter reaches 1.
+    assert_eq!(
+        run_with(true),
+        1,
+        "virtual clock: armed timer must fire and deliver its message"
+    );
+    // Without a virtual clock the timer cannot be driven: the run
+    // Quiesces with the timer still pending (fired stays 0).
+    assert_eq!(
+        run_with(false),
+        0,
+        "no virtual clock: timer must stay pending (old contract)"
+    );
+}
+
 /// PLAN.md Phase 1 bullet 2 (DST): the seed-sweep invariant test — the
 /// core "10⁴ seeds per commit, fails on any invariant violation"
 /// deliverable, at a CI-scalable scale. `run_scheduler_deterministic`
