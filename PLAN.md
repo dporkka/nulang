@@ -528,12 +528,26 @@ session.
   fills through the 5 s repair cycle — tests that inject a partition
   must first pump until `active_view` contains every peer
   (`active_views_converged`), or the partitioned side never watches the
-  other side at all. Not done: split-brain **resolver** behavior (the
-  `SplitBrainResolver` down-self path), and running any of this across
-  many seeds in CI — the 10³-seeds-per-commit target still needs a
-  seed-driven loop over the deterministic harness (the virtual-clock
-  pump is the piece that makes that feasible; the loop itself is not
-  wired).
+  other side at all. The split-brain RESOLVER down-self path is now also
+  covered end-to-end: `test_three_node_cluster_static_quorum_downs_minority`
+  partitions {A}|{B,C} with `StaticQuorum{3}` (quorum 2) and asserts the
+  isolated minority downs itself through the REAL runtime — the
+  `ClusterAction::Down` handler shuts the transport down while local
+  actors keep running — the majority stays up and keeps delivering
+  remote messages, and healing does NOT resurrect the downed node
+  (operator restart is the recovery path). Writing that test surfaced a
+  REAL cold-bootstrap bug: `ClusterState::tick` consulted the resolver
+  from the very first tick, so a fresh seed node (which sees only
+  itself, 1 < quorum) downed itself before join handshakes completed —
+  the cluster-sim masked this by pre-seeding a full mesh and the unit
+  tests by calling `handle_heartbeat` before `tick`. Fixed with a
+  `has_seen_peer` gate: the resolver is consulted only after the node
+  has ever received a heartbeat from any peer, so a node that has never
+  contacted anyone is treated as bootstrapping, never as a partition
+  minority. Not done: running any of this across many seeds in CI — the
+  10³-seeds-per-commit target still needs a seed-driven loop over the
+  deterministic harness (the virtual-clock pump is the piece that makes
+  that feasible; the loop itself is not wired).
 - **[~] Bullet 8 (persistence recovery correctness) — one real bug
   found and fixed, one real gap found and documented, not the full
   "repeat for every StateModel" sweep.** `Runtime::recover_actor` never

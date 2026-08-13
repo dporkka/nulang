@@ -4722,6 +4722,221 @@ fn test_five_node_cluster_split_brain_detects_and_heals() {
     shutdown_nodes(&mut nodes.iter_mut().collect::<Vec<_>>());
 }
 
+/// PLAN.md Phase 1 bullet 4 (chaos suite): split-brain RESOLVER behavior
+/// end-to-end — the `StaticQuorumResolver` down-self path through the
+/// REAL runtime, not the cluster-sim unit tests. Three real `Runtime`s
+/// over real loopback TCP, configured with `StaticQuorum{3}` (quorum =
+/// 3/2 + 1 = 2), driven by per-node virtual clocks advanced in lockstep
+/// so the failure detection + resolver decision happen in virtual time.
+/// A clean partition isolates A from {B,C}: A sees only itself (1 < 2
+/// reachable) so the resolver downs A — the transport shuts down and
+/// local actors keep running — while B and C see each other (2 >= 2)
+/// and stay up. Healing the partition does NOT resurrect A (its
+/// transport is gone; operator restart is the recovery path), and the
+/// surviving majority keeps working.
+#[test]
+fn test_three_node_cluster_static_quorum_downs_minority() {
+    let quorum_config = ClusterConfig {
+        split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
+        probe_interval: Duration::from_secs(5),
+    };
+
+    // Set the config BEFORE enable_distribution so `apply_config` picks
+    // up the resolver at enable time.
+    let mut rt_a = start_distributed_node();
+    rt_a.set_cluster_config(quorum_config.clone());
+    rt_a.install_virtual_clock();
+    let mut rt_b = start_distributed_node();
+    rt_b.set_cluster_config(quorum_config.clone());
+    rt_b.install_virtual_clock();
+    let mut rt_c = start_distributed_node();
+    rt_c.set_cluster_config(quorum_config.clone());
+    rt_c.install_virtual_clock();
+
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    let node_c = rt_c.distributed.node_id.unwrap();
+
+    rt_a.join_cluster(addr_b);
+    rt_c.join_cluster(addr_b);
+
+    // A local actor on A before the partition, so we can prove it keeps
+    // running after A is downed.
+    let actor_id = rt_a.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = rt_a.actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+
+    let step = Duration::from_millis(100);
+    let mut converged = false;
+    for _ in 0..200 {
+        advance_all(&mut [&mut rt_a, &mut rt_b, &mut rt_c], step);
+        if active_views_converged(&[&rt_a, &rt_b, &rt_c], &[node_a, node_b, node_c]) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "cluster did not converge to fully-armed failure detection (active views)"
+    );
+
+    // Clean partition: isolate A from {B,C} in both directions. B and C
+    // keep talking.
+    let a_side: HashSet<NodeId> = HashSet::from([node_b, node_c]);
+    let bc_side: HashSet<NodeId> = HashSet::from([node_a]);
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(a_side.clone());
+    rt_b.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(bc_side.clone());
+    rt_c.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(bc_side.clone());
+
+    // A must down itself (1 < 2 reachable) once its detector marks B and
+    // C Failed; B and C must stay up (2 >= 2 reachable).
+    let mut downed = false;
+    for _ in 0..200 {
+        advance_all(&mut [&mut rt_a, &mut rt_b, &mut rt_c], step);
+        let a_down = rt_a.distributed.cluster.as_ref().unwrap().is_down();
+        let b_up = !rt_b.distributed.cluster.as_ref().unwrap().is_down();
+        let c_up = !rt_c.distributed.cluster.as_ref().unwrap().is_down();
+        if a_down && b_up && c_up {
+            downed = true;
+            break;
+        }
+    }
+    assert!(
+        downed,
+        "static quorum 3 did not down the isolated minority: A_down={} B_up={} C_up={}",
+        rt_a.distributed.cluster.as_ref().unwrap().is_down(),
+        !rt_b.distributed.cluster.as_ref().unwrap().is_down(),
+        !rt_c.distributed.cluster.as_ref().unwrap().is_down(),
+    );
+
+    // The Down action shut A's transport down (threads joined, streams
+    // closed) — A no longer participates. The durable observable is the
+    // cluster's `local_down` flag, already asserted; A's frozen view must
+    // no longer count the majority as reachable (it stopped ticking once
+    // down, so B/C are Suspicious at worst — they stopped being counted
+    // as reachable the moment the detector flagged them).
+    let a_view_b = cluster_status(&rt_a, node_b).unwrap_or(NodeStatus::Failed);
+    assert_ne!(
+        a_view_b,
+        NodeStatus::Healthy,
+        "downed node's view must no longer count the majority as reachable"
+    );
+    // B and C still see each other healthy.
+    assert_eq!(
+        cluster_status(&rt_b, node_c),
+        Some(NodeStatus::Healthy),
+        "majority members must stay healthy to each other"
+    );
+    assert_eq!(
+        cluster_status(&rt_c, node_b),
+        Some(NodeStatus::Healthy),
+        "majority members must stay healthy to each other"
+    );
+
+    // Local actors on the downed node keep running (the Down handler
+    // stops network participation only).
+    rt_a.send_message(actor_id, "store", &[Value::int(77)]);
+    rt_a.run_scheduler();
+    let got = rt_a
+        .actors
+        .get(&actor_id)
+        .and_then(|a| a.get_state_field("received"))
+        .and_then(|v| v.as_int());
+    assert_eq!(
+        got,
+        Some(77),
+        "local actors must keep running on a downed node"
+    );
+
+    // Heal the partition: A stays down (transport shut down; operator
+    // restart is the recovery path) and the majority keeps working.
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(HashSet::new());
+    rt_b.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(HashSet::new());
+    rt_c.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .set_partition(HashSet::new());
+    for _ in 0..100 {
+        advance_all(&mut [&mut rt_a, &mut rt_b, &mut rt_c], step);
+    }
+    assert!(
+        rt_a.distributed.cluster.as_ref().unwrap().is_down(),
+        "downed node must stay down after the partition heals"
+    );
+    assert!(
+        !rt_b.distributed.cluster.as_ref().unwrap().is_down(),
+        "majority node B must stay up after heal"
+    );
+    assert!(
+        !rt_c.distributed.cluster.as_ref().unwrap().is_down(),
+        "majority node C must stay up after heal"
+    );
+
+    // The majority keeps doing real work: B sends a remote message to an
+    // actor on C after the heal.
+    let actor_c = rt_c.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = rt_c.actors.get_mut(&actor_c).unwrap();
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+    let target = ActorAddress::remote(node_c, actor_c);
+    rt_b.send_distributed(target, "store", &[Value::int(88)]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        rt_b.process_network();
+        rt_c.process_network();
+        rt_c.run_scheduler();
+        let got = rt_c
+            .actors
+            .get(&actor_c)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(88) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "majority nodes must keep delivering remote messages after the minority was downed"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
+}
+
 /// End-to-end coverage of PLAN.md Phase 5 deliverable 7 parts (a)+(b)
 /// through the REAL failure-detection path, not a direct call to
 /// `handle_node_failed`. A local actor on survivor A monitors a remote
