@@ -758,6 +758,9 @@ pub fn send_distributed(
             runtime.send_message(actor_id, behavior, args);
         }
         ResolveResult::Remote { node_id, actor_id } => {
+            // Remember the bare id → node mapping so a LATER bare actor-ref
+            // Value (no node id) can route here too (RFC-0007).
+            crate::runtime::distribution::record_remote_ref(runtime, node_id, actor_id);
             // String payloads must cross the wire by CONTENT: a bare string
             // id indexes the sender's module constant pool and means nothing
             // (or the wrong thing) on the receiving node. Resolve each
@@ -825,7 +828,7 @@ pub fn send_distributed(
 /// Codes: 0=unresolvable, 1=node left cluster, 2=string payload unresolvable,
 /// 3=string intern failed on receiver, 4=target actor not found, 5=unknown.
 /// Non-existent senders (id 0) are silently skipped.
-fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
+pub(crate) fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
     if sender_id == 0 {
         return;
     }
@@ -1025,6 +1028,58 @@ pub fn process_network_packets(
                 runtime
                     .pending_spawn_responses
                     .insert(request_id, if success { Some(actor_id) } else { None });
+                let from = incoming.from_node;
+                // The placeholder resolves (success) or dies (failure); in
+                // either case it stops being pending.
+                runtime.spawn_placeholders.remove(&request_id);
+                if success {
+                    // The placeholder VALUE the program holds keeps
+                    // routing to the real actor id even if the application
+                    // consumed the response via take_spawn_response.
+                    runtime.spawn_translations.insert(request_id, actor_id);
+                    // The placeholder VALUE the program holds (request id)
+                    // now translates to the real actor id via
+                    // pending_spawn_responses; also map the real id so
+                    // direct refs route. The request-id → node entry was
+                    // recorded at spawn time.
+                    crate::runtime::distribution::record_remote_ref(runtime, from, actor_id);
+                }
+                // Flush any messages queued against the placeholder.
+                if let Some(msgs) = runtime.pending_spawn_messages.remove(&request_id) {
+                    if success {
+                        for m in msgs {
+                            let content_hash =
+                                try_lookup_content_hash(runtime, &m.behavior_name);
+                            let packet = resolver.build_packet(
+                                actor_id,
+                                &m.behavior_name,
+                                m.payload,
+                                m.sender,
+                                crate::runtime::mailbox::MessagePriority::Normal,
+                                m.string_table,
+                                content_hash,
+                                m.trace_id,
+                            );
+                            let reply_addr = cluster
+                                .get_node(from)
+                                .map(|info| info.address)
+                                .or_else(|| transport.connection_addr(from));
+                            if let Some(addr) = reply_addr {
+                                transport.send(from, addr, packet);
+                            } else {
+                                warn!(
+                                    "nulang-net: dropping queued message for spawned actor {}: node {:?} left cluster",
+                                    actor_id, from
+                                );
+                                notify_delivery_failed(runtime, m.sender, "target node left cluster");
+                            }
+                        }
+                    } else {
+                        for m in msgs {
+                            notify_delivery_failed(runtime, m.sender, "spawn request rejected");
+                        }
+                    }
+                }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::CrdtSync { ops } => {
@@ -1284,6 +1339,19 @@ pub fn process_network_packets(
                 if let Some((target_actor, behavior_name, mut msg, string_table, content_hash)) =
                     resolver.parse_packet(incoming.packet)
                 {
+                    // Record the wire sender (bare id → node) so the
+                    // recipient can reply BY VALUE (RFC-0007): a later
+                    // `send <sender_ref>` on this node routes over the
+                    // wire instead of the local mailbox. parse_packet
+                    // already cached the sender in the forward
+                    // RemoteActorCache for explicit-address sends.
+                    if msg.sender != 0 {
+                        crate::runtime::distribution::record_remote_ref(
+                            runtime,
+                            incoming.from_node,
+                            msg.sender,
+                        );
+                    }
                     // Resolve the behavior name against the target actor's
                     // behavior table — the same rule local sends use
                     // (`Runtime::send_message`). An unknown name falls back
@@ -1489,6 +1557,11 @@ pub fn spawn_on_node(
         ActorAddress::local(id)
     } else {
         let request_id = fast_random_u64();
+        // The placeholder VALUE the program will hold carries only this
+        // request id — record id → node and tag it pending so sends to
+        // the ref queue until the SpawnResponse arrives (RFC-0007).
+        crate::runtime::distribution::record_remote_ref(runtime, node, request_id);
+        runtime.spawn_placeholders.insert(request_id);
         let packet = Packet::SpawnRequest {
             request_id,
             behavior_name: behavior_name.to_string(),
@@ -1541,7 +1614,7 @@ fn fast_random_u64() -> u64 {
 /// resolvable content (no current actor, no sender module, or an id outside
 /// the pool); the caller must drop the message rather than send a dangling
 /// id.
-fn resolve_wire_strings(runtime: &Runtime, args: &[Value]) -> Option<(Vec<Value>, Vec<String>)> {
+pub(crate) fn resolve_wire_strings(runtime: &Runtime, args: &[Value]) -> Option<(Vec<Value>, Vec<String>)> {
     let mut payload = args.to_vec();
     let mut table: Vec<String> = Vec::new();
     for value in payload.iter_mut() {

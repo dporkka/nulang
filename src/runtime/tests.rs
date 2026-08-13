@@ -5446,6 +5446,254 @@ fn test_remote_spawn_request_delivery() {
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
 }
 
+/// RFC-0007 cross-node routing by BARE actor-ref value: after a remote
+/// spawn, `send`/`ask` addressing the spawned actor by its plain id (the
+/// only thing an actor-ref Value carries) must route over the wire —
+/// previously the node id was dropped at `remote_spawn` and the bare id
+/// fell into the local mailbox path.
+#[test]
+fn test_remote_ref_send_by_bare_id_routes_wire() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.distributed.node_id.unwrap();
+
+    rt_b.register_spawnable_behavior("store", remote_spawn_store_handler);
+
+    rt_a.join_cluster(addr_b);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    // Remote spawn, exactly like the language's `spawn@node` lowering.
+    let request_id = {
+        let mut transport = rt_a.distributed.transport.take().unwrap();
+        let cluster = rt_a.distributed.cluster.take().unwrap();
+        let resolver = rt_a.distributed.resolver.take().unwrap();
+        let placeholder = spawn_on_node(
+            &mut rt_a,
+            &mut transport,
+            &cluster,
+            &resolver,
+            node_b,
+            "store",
+            vec![("received".to_string(), Value::int(0))],
+        );
+        rt_a.distributed.transport = Some(transport);
+        rt_a.distributed.cluster = Some(cluster);
+        rt_a.distributed.resolver = Some(resolver);
+        placeholder.actor_id()
+    };
+
+    // The placeholder is tagged so messages queue until the response.
+    assert!(
+        rt_a.spawn_placeholders.contains(&request_id),
+        "spawn placeholder must be tagged pending"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let remote_actor = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        if let Some(result) = rt_a.take_spawn_response(request_id) {
+            break result.expect("node B rejected the spawn request");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no SpawnResponse received from node B"
+        );
+        sleep(Duration::from_millis(50));
+    };
+
+    // The real id is now routable BY VALUE: node A recorded the bare id →
+    // node mapping, and a plain `send_message(id, name, args)` (no
+    // ActorAddress wrapper) must go over the wire.
+    assert_eq!(
+        rt_a.remote_refs.get(&remote_actor),
+        Some(&node_b),
+        "real remote actor id must be recorded in the reverse index"
+    );
+
+    rt_a.send_message(remote_actor, "store", &[Value::int(7)]);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_b.run_scheduler();
+        let got = rt_b
+            .actors
+            .get(&remote_actor)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(7) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "bare-id send to the remotely-spawned actor was not delivered"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
+/// RFC-0007 placeholder queue: a message sent to the spawn@node
+/// placeholder BEFORE the SpawnResponse arrives is queued in wire form
+/// and flushed to the real actor id on arrival — no message loss in the
+/// spawn-in-flight window. After the response, the same placeholder
+/// value translates to the real id and sends directly.
+#[test]
+fn test_remote_ref_pending_spawn_queue_flushes() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.distributed.node_id.unwrap();
+
+    rt_b.register_spawnable_behavior("store", remote_spawn_store_handler);
+
+    rt_a.join_cluster(addr_b);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    let placeholder_id = {
+        let mut transport = rt_a.distributed.transport.take().unwrap();
+        let cluster = rt_a.distributed.cluster.take().unwrap();
+        let resolver = rt_a.distributed.resolver.take().unwrap();
+        let placeholder = spawn_on_node(
+            &mut rt_a,
+            &mut transport,
+            &cluster,
+            &resolver,
+            node_b,
+            "store",
+            vec![("received".to_string(), Value::int(0))],
+        );
+        rt_a.distributed.transport = Some(transport);
+        rt_a.distributed.cluster = Some(cluster);
+        rt_a.distributed.resolver = Some(resolver);
+        placeholder.actor_id()
+    };
+
+    // Send to the placeholder WITHOUT pumping the network first — the
+    // SpawnResponse cannot have arrived, so this must queue.
+    rt_a.send_message(placeholder_id, "store", &[Value::int(5)]);
+    assert_eq!(
+        rt_a.pending_spawn_messages.get(&placeholder_id).map(Vec::len),
+        Some(1),
+        "pre-response send must be queued against the placeholder"
+    );
+
+    // Pump until the response arrives; the flush delivers the queued msg.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let remote_actor = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        if let Some(result) = rt_a.take_spawn_response(placeholder_id) {
+            break result.expect("node B rejected the spawn request");
+        }
+        if Instant::now() >= deadline {
+            panic!("no SpawnResponse received from node B");
+        }
+        sleep(Duration::from_millis(50));
+    };
+
+    assert!(
+        rt_a.pending_spawn_messages.get(&placeholder_id).is_none(),
+        "queued messages must be flushed (and removed) on SpawnResponse"
+    );
+
+    // The flushed wire packet may still be in flight when the response
+    // arrived; keep pumping until the handler observes the value.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_b.run_scheduler();
+        let got = rt_b
+            .actors
+            .get(&remote_actor)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(5) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "queued pre-response message must be delivered to the spawned actor"
+    );
+
+    // After the response the placeholder VALUE translates to the real id:
+    // a send through the placeholder id must route directly.
+    rt_a.send_message(placeholder_id, "store", &[Value::int(6)]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_b.run_scheduler();
+        let got = rt_b
+            .actors
+            .get(&remote_actor)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(6) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "placeholder send after SpawnResponse must translate to the real id"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
+/// RFC-0007 collision guard: `fresh_actor_id` starts at 1 on EVERY node,
+/// so a remote actor id can numerically equal a local actor's id. Local
+/// actors must win the routing decision — a bare-id send to a colliding
+/// local actor must never hijack to the remote node.
+#[test]
+fn test_remote_ref_local_collision_prefers_local() {
+    let mut rt_a = start_distributed_node();
+    let node_b = NodeId(4242);
+
+    // Local actor gets id 1 (first spawn on a fresh runtime).
+    let local_id = rt_a.spawn_actor(Box::new(|| vec![]));
+    assert_eq!(local_id, 1);
+
+    // Simulate a colliding remote ref known to node B (e.g. an inbound
+    // sender whose id collides with our local actor 1).
+    rt_a.remote_refs.insert(local_id, node_b);
+
+    // A bare-id send to the colliding id must stay LOCAL.
+    rt_a.send_message(local_id, "whatever", &[Value::int(9)]);
+    assert!(
+        !rt_a.actors[&local_id].mailbox.is_empty(),
+        "colliding bare-id send must deliver to the LOCAL actor"
+    );
+    assert!(
+        rt_a.pending_spawn_messages.is_empty(),
+        "colliding send must not be treated as a spawn placeholder"
+    );
+
+    // The remote mapping survives for genuinely-remote ids.
+    assert_eq!(rt_a.remote_refs.get(&local_id), Some(&node_b));
+
+    shutdown_nodes(&mut [&mut rt_a]);
+}
+
 // ========================================================================
 // CRDT delta-sync round schedule tests
 // ========================================================================
