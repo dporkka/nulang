@@ -166,7 +166,9 @@ impl SimCluster {
                                 if !self.is_cut(from, to_idx) && !self.nodes[to_idx].is_down() {
                                     let payload =
                                         self.nodes[from].gossip_payload(GOSSIP_PAYLOAD_MAX_ENTRIES);
-                                    self.nodes[to_idx].merge_membership(payload);
+                                    let sender = self.id(from);
+                                    self.nodes[to_idx]
+                                        .merge_membership_from_sender(payload, sender);
                                 }
                             }
                         }

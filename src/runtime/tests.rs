@@ -3899,6 +3899,57 @@ fn pump_until_peer_failed(nodes: &mut [&mut Runtime], dead: NodeId, timeout: Dur
     }
 }
 
+/// Pump network processing on `nodes` until every node's cluster view of
+/// every OTHER node (identified by node id in `listen`) carries that peer's
+/// REAL listen address, or the deadline elapses.
+///
+/// Address convergence is strictly slower than the membership-count
+/// convergence `pump_until_converged` checks: the heartbeat discovery path
+/// records a joiner's ephemeral SOURCE port (not its listen address), and
+/// that stale address propagates through relayed gossip at the baseline
+/// incarnation. It is only corrected once the peer's authoritative
+/// self-gossip arrives AND the correction is re-propagated at a bumped
+/// incarnation (see `merge_membership_from_sender`). Tests that route a
+/// remote message to a non-seed node must wait for this, or `send_distributed`
+/// dials a dead source port and silently drops the message.
+fn pump_until_addresses_converge(
+    nodes: &mut [&mut Runtime],
+    listen: &[(NodeId, SocketAddr)],
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        for rt in nodes.iter_mut() {
+            rt.process_network();
+        }
+        let mut converged = true;
+        for rt in nodes.iter() {
+            let local = rt.distributed.node_id.unwrap();
+            let cluster = rt.distributed.cluster.as_ref().unwrap();
+            for &(peer_id, real_addr) in listen {
+                if peer_id == local {
+                    continue;
+                }
+                if cluster.get_node(peer_id).map(|i| i.address) != Some(real_addr) {
+                    converged = false;
+                    break;
+                }
+            }
+            if !converged {
+                break;
+            }
+        }
+        if converged {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cluster addresses did not converge to real listen addresses within the timeout"
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
 /// PLAN.md Phase 1 bullet 4 (chaos suite for distribution): a first,
 /// real step -- not the full "10^3 seeds across 5 topologies" target,
 /// but a genuine fault-injection test against real `Runtime` instances
@@ -4020,6 +4071,167 @@ fn test_three_node_cluster_survives_hard_node_failure_and_rejoin() {
     }
 
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c2]);
+}
+
+/// PLAN.md Phase 1 bullet 4 (chaos suite) rolling-restart follow-up.
+/// `test_three_node_cluster_survives_hard_node_failure_and_rejoin` proved a
+/// single hard node failure is detected and the survivors keep operating
+/// while a fresh node rejoins; this extends the shape to a FULL rolling
+/// restart of every node in the cluster, in sequence. For each node: kill its
+/// transport hard (no graceful Leave packet), wait for the remaining live
+/// nodes to mark it `Failed` through the real heartbeat-timeout/suspicion
+/// machine, then bring up a fresh node (a new process identity, not a resume)
+/// that joins the surviving cluster and reconverges to full healthy
+/// membership. After the whole cycle the restarted nodes still deliver a
+/// remote message to each other — the cluster did real cross-node work
+/// throughout every restart, not just membership bookkeeping.
+///
+/// Deliberately NOT covered here (still follow-up): 5-node topologies,
+/// split-brain, asymmetric partition, and multi-seed CI. Split-brain in
+/// particular needs a partition-injection primitive over loopback TCP (there
+/// is no `tc`/iptables in this test harness), which this test does not
+/// attempt.
+#[test]
+fn test_three_node_cluster_survives_rolling_restart_of_every_node() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let mut rt_c = start_distributed_node();
+
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    let node_c = rt_c.distributed.node_id.unwrap();
+
+    // Form a full 3-node cluster (chain-seeded through B so gossip converges
+    // transitively, mirroring the hard-failure test).
+    rt_a.join_cluster(addr_b);
+    rt_c.join_cluster(addr_b);
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c],
+        3,
+        Duration::from_secs(30),
+    );
+
+    // Restart C: kill it, let A+B detect the failure, then a fresh C2 joins
+    // the surviving cluster through A.
+    shutdown_nodes(&mut [&mut rt_c]);
+    pump_until_peer_failed(&mut [&mut rt_a, &mut rt_b], node_c, Duration::from_secs(20));
+    let mut rt_c2 = start_distributed_node();
+    let node_c2 = rt_c2.distributed.node_id.unwrap();
+    rt_c2.join_cluster(addr_a);
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c2],
+        3,
+        Duration::from_secs(30),
+    );
+    for rt in [&rt_a, &rt_b, &rt_c2] {
+        let cluster = rt.distributed.cluster.as_ref().unwrap();
+        assert_eq!(
+            cluster.get_node(node_c2).unwrap().status,
+            NodeStatus::Healthy,
+            "C2 did not rejoin healthy after C's restart"
+        );
+    }
+
+    // Restart B: A+C2 detect the failure, then a fresh B2 joins through C2.
+    let addr_c2 = rt_c2.distributed.transport.as_ref().unwrap().listen_addr();
+    shutdown_nodes(&mut [&mut rt_b]);
+    pump_until_peer_failed(
+        &mut [&mut rt_a, &mut rt_c2],
+        node_b,
+        Duration::from_secs(20),
+    );
+    let mut rt_b2 = start_distributed_node();
+    let node_b2 = rt_b2.distributed.node_id.unwrap();
+    rt_b2.join_cluster(addr_c2);
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_c2, &mut rt_b2],
+        3,
+        Duration::from_secs(30),
+    );
+    for rt in [&rt_a, &rt_c2, &rt_b2] {
+        let cluster = rt.distributed.cluster.as_ref().unwrap();
+        assert_eq!(
+            cluster.get_node(node_b2).unwrap().status,
+            NodeStatus::Healthy,
+            "B2 did not rejoin healthy after B's restart"
+        );
+    }
+
+    // Restart A last (only C2+B2 remain to detect the failure and to join
+    // through): a fresh A2 joins through C2.
+    shutdown_nodes(&mut [&mut rt_a]);
+    pump_until_peer_failed(
+        &mut [&mut rt_c2, &mut rt_b2],
+        node_a,
+        Duration::from_secs(20),
+    );
+    let mut rt_a2 = start_distributed_node();
+    let node_a2 = rt_a2.distributed.node_id.unwrap();
+    rt_a2.join_cluster(addr_c2);
+    pump_until_converged(
+        &mut [&mut rt_c2, &mut rt_b2, &mut rt_a2],
+        3,
+        Duration::from_secs(30),
+    );
+    for rt in [&rt_c2, &rt_b2, &rt_a2] {
+        let cluster = rt.distributed.cluster.as_ref().unwrap();
+        assert_eq!(
+            cluster.get_node(node_a2).unwrap().status,
+            NodeStatus::Healthy,
+            "A2 did not rejoin healthy after A's restart"
+        );
+    }
+
+    // Every original node has now been restarted once and the cluster is back
+    // to full health. Prove the fully-restarted cluster still does real work:
+    // B2 sends a remote message to an actor on A2 and it is delivered.
+    let actor_id = rt_a2.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = rt_a2.actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+    let target = ActorAddress::remote(node_a2, actor_id);
+    // The three restarted nodes must agree on each other's real listen
+    // addresses before a remote send can route (the heartbeat discovery path
+    // records ephemeral source ports; the authoritative self-gossip
+    // correction must propagate first — see `pump_until_addresses_converge`).
+    let addr_a2 = rt_a2.distributed.transport.as_ref().unwrap().listen_addr();
+    let addr_b2 = rt_b2.distributed.transport.as_ref().unwrap().listen_addr();
+    pump_until_addresses_converge(
+        &mut [&mut rt_a2, &mut rt_b2, &mut rt_c2],
+        &[(node_a2, addr_a2), (node_b2, addr_b2), (node_c2, addr_c2)],
+        Duration::from_secs(15),
+    );
+    rt_b2.send_distributed(target, "store", &[Value::int(99)]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        rt_a2.process_network();
+        rt_b2.process_network();
+        rt_a2.run_scheduler();
+        let got = rt_a2
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(99) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "remote delivery failed after a full rolling restart of every node"
+    );
+
+    shutdown_nodes(&mut [&mut rt_c2, &mut rt_b2, &mut rt_a2]);
 }
 
 /// End-to-end coverage of PLAN.md Phase 5 deliverable 7 parts (a)+(b)
