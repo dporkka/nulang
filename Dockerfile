@@ -17,7 +17,7 @@ RUN /app/target/release/nulang --eval 'perform IO.print("hello")'
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 libssl3 ca-certificates \
+    python3 libpython3.11 libssl3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/nulang /usr/local/bin/nulang
