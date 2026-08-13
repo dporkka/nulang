@@ -252,7 +252,13 @@ suspension; now the resume result decides completion vs re-suspension,
 mirroring the LLM path), and the `send remote`/`ask remote`
 local-delivery fallback + `RAsk` result-register convention (both
 pinned at the runtime/VM level). SPEC2.md and CHANGELOG.md updated;
-see their entries for evidence.
+see their entries for evidence. **Update 2 (2026-08-13):** the RFC-0007
+cross-node routing gap closed — `spawn@node` references (bare
+actor-ref values) now route over the wire via a runtime reverse index
+(id → node), with spawn-in-flight message queueing and placeholder→real
+translation; `ask remote` routes by the same index and the VM `RAsk`
+opcode now accepts actor-ref targets and stages args. SPEC2.md/CHANGELOG.md
+updated; see the changelog entry for the test evidence.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it

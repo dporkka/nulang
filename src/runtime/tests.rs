@@ -5669,12 +5669,12 @@ fn test_remote_ref_local_collision_prefers_local() {
     let mut rt_a = start_distributed_node();
     let node_b = NodeId(4242);
 
-    // Local actor gets id 1 (first spawn on a fresh runtime).
+    // Local actor (id from the global counter — never assume a value;
+    // `fresh_actor_id` is process-global, so later tests see higher ids).
     let local_id = rt_a.spawn_actor(Box::new(|| vec![]));
-    assert_eq!(local_id, 1);
 
     // Simulate a colliding remote ref known to node B (e.g. an inbound
-    // sender whose id collides with our local actor 1).
+    // sender whose id collides with our local actor).
     rt_a.remote_refs.insert(local_id, node_b);
 
     // A bare-id send to the colliding id must stay LOCAL.
