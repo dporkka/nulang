@@ -1,0 +1,11 @@
+# Never ship build artifacts, git history, or local tool state into images.
+.git
+target
+.build-target
+.build-tmp
+.cargo/registry
+**/target
+out.wasm
+test_val
+find_bindgen
+node_modules
