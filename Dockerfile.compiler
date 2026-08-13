@@ -1,0 +1,35 @@
+# Nulang compiler image - minimal binary with the WASM backend only.
+#
+# Used by nulang-cloud's nlc-deploy image as the NULANG_BIN compiler for the
+# direct-upload Nulang source path (`compile_nulang` invokes
+# `nulang --backend wasm --out <out> <input.nula>`). Built without the
+# python/sqlite/lsp/ai-runtime features so the image stays small and has no
+# Python runtime dependency.
+#
+# Build: docker build -f Dockerfile.compiler -t nulang .
+
+FROM rust:1.95-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN cargo build --release --no-default-features --features wasm-backend --bin nulang
+
+# Smoke test: the compiler can emit WASM.
+RUN printf 'perform IO.print("x")\n' > /tmp/smoke.nula \
+    && ./target/release/nulang --backend wasm --out /tmp/smoke.wasm /tmp/smoke.nula \
+    && echo "compiler smoke ok"
+
+# ---- Runtime Stage ----
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/nulang /usr/local/bin/nulang
+
+ENTRYPOINT ["nulang"]

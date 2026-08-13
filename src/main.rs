@@ -739,6 +739,17 @@ fn main() {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
+            // Metrics node: the metrics server runs on a background thread and
+            // would die with the process once the program finishes. When
+            // `--metrics-port` is set, stay alive so /metrics keeps serving
+            // the final snapshot published by run_with_runtime (same contract
+            // as `registry serve`). Stop with Ctrl-C.
+            if let Some(port) = opts.metrics_port {
+                eprintln!("Program finished; serving /metrics on :{port} (Ctrl-C to stop)");
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
         }
         return;
     }
@@ -1727,6 +1738,7 @@ fn run_with_runtime(
             }
             shard_0.run_scheduler();
         });
+        shard_0.publish_metrics();
         Ok((value, std::rc::Rc::new(std::cell::RefCell::new(shard_0))))
     } else {
         let runtime = std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
@@ -1740,6 +1752,7 @@ fn run_with_runtime(
         }
         let value = vm.run()?;
         runtime.borrow_mut().run_scheduler();
+        runtime.borrow().publish_metrics();
         Ok((value, runtime))
     }
 }
