@@ -17,11 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY . .
 
-RUN cargo build --release --no-default-features --features wasm-backend --bin nulang
+RUN CARGO_TARGET_DIR=/build/target cargo build --release --no-default-features --features wasm-backend --bin nulang
 
 # Smoke test: the compiler can emit WASM.
 RUN printf 'perform IO.print("x")\n' > /tmp/smoke.nula \
-    && ./target/release/nulang --backend wasm --out /tmp/smoke.wasm /tmp/smoke.nula \
+    && /build/target/release/nulang --backend wasm --out /tmp/smoke.wasm /tmp/smoke.nula \
     && echo "compiler smoke ok"
 
 # ---- Runtime Stage ----

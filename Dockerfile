@@ -8,10 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 
-RUN cargo build --release
+RUN CARGO_TARGET_DIR=/app/target cargo build --release
 
 # Smoke test: verify the binary can evaluate Nulang code
-RUN ./target/release/nulang --eval 'perform IO.print("hello")'
+RUN /app/target/release/nulang --eval 'perform IO.print("hello")'
 
 # ---- Runtime Stage ----
 FROM debian:bookworm-slim
