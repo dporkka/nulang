@@ -45,6 +45,43 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-14 (docs-truth sweep)
+
+- **RFC 0011 — split-brain resolver (`static-quorum`)** (Experimental,
+  `src/runtime/cluster.rs`). `SplitBrainResolver` trait +
+  `StaticQuorumResolver` down a node that falls below configured quorum;
+  `Failed`-peer probing self-heals a clean partition without external
+  rejoin. Down-self + probe re-join covered by DST/chaos scenarios.
+  Commits `5a0b641`, `1498cc7` (2026-08-13).
+- **RFC 0012 — cross-node link/monitor supervision** (Stable,
+  `src/runtime/supervision.rs`). `RemoteLinkRegistry`/
+  `RemoteMonitorRegistry` track cross-node watchers; `Packet::Link`/
+  `Monitor`/`Down` wire types propagate link/`DOWN` across nodes.
+  Commit `0ab2c42` (2026-08-04).
+- **Tombstone GC for `ORSet`/`AWORSet`/`RGA`** (Stable,
+  `src/runtime/crdt_manager.rs`). Causal-stability watermark
+  (`gc_stable_tombstones`) reclaims `removed` sets and RGA tombstones once
+  every healthy replica has observed them. Commit `492cd72` (2026-08-08).
+- **OpenTelemetry observability + `--metrics-port`** (Experimental,
+  `src/observability.rs`, `src/main.rs`). `otel` cargo feature +
+  `init_tracing`; `--metrics-port` Prometheus-format server exports
+  `GcStats`/`SchedulerStats`/`ResolverStats`/mailbox depths. Commits
+  `5d15857` (2026-08-08), `7592b72` (2026-08-13).
+- **Op-based CRDT replication** (Stable, `src/runtime/crdt_manager.rs`,
+  `network.rs`). `Packet::CrdtOp` ships individual `CrdtOp`s alongside
+  `CrdtDeltaSync` (lowest-bandwidth sync path); `CrdtManager::apply_op`
+  merges inbound ops. Commit `f97b28d` (2026-08-04).
+- **Durable-store hardening** (Stable, `src/runtime/persistence.rs`).
+  `LibsqlStore` applies `PRAGMA journal_mode=WAL` + operator-configurable
+  `PRAGMA synchronous`; `crdt_snapshot` column round-trips save/load;
+  `JsonFileStore` fsyncs journal/workflow appends. Commit `42d879d`
+  (2026-08-03).
+- **Supervisor restart fixes** (Stable, `src/runtime/supervisor.rs`).
+  `rebuild_child` recreates the `Supervisor` struct so a nested supervisor
+  keeps supervising after restart; `restart_all`/`restart_from` check each
+  sibling's `should_restart` (per-sibling rate limit). Commit `22a56c7`
+  (2026-08-03).
+
 ### Added since 1.0.0-frozen — 2026-08-14
 
 - **`let rec f(x) = ... in ...` works at module level.** Recursive local

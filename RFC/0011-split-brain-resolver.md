@@ -1,11 +1,11 @@
 # RFC 0011: Split-Brain Resolver for Cluster Membership
 
-- **Status:** Draft
+- **Status:** Implemented
 - **Tier:** Experimental (formally tiers the previously-untiered
   cluster-membership surface; see Tier Classification)
 - **Author:** AI assistant review
 - **Created:** 2026-08-03
-- **Resolved:** (pending)
+- **Resolved:** 2026-08-13 (Implemented: commits `5a0b641`, `1498cc7`)
 - **Language-version at effect:** none (no Frozen or Stable surface touched;
   NUL0 wire protocol v1 unchanged)
 - **Supersedes:** none

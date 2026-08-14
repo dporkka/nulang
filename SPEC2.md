@@ -389,7 +389,7 @@ Every state variable in an actor has an associated *state model* that determines
 | `local` | None | None | Reset to initial value | Ephemeral caches, temporary buffers |
 | `durable` | Snapshot + journal | None | Replay from journal | Single-node persistent state |
 | `event_sourced` | Event journal | Event stream | Full event replay | Audit trails, temporal queries |
-| `crdt` | Delta log | Not yet wired (accepted syntax; behaves as `durable` today — see §9.10) | CRDT merge (planned) | Shared distributed state (planned) |
+| `crdt` | Delta log | Concrete-type selector + merge-on-sync landed; `Crdt.*` effect module and operation-set enforcement open (see §9.10) | CRDT merge (on sync) | Shared distributed state |
 
 The state model is declared alongside the variable:
 
@@ -409,8 +409,8 @@ persistent actor ShoppingCart {
   }
 
   behavior track_viewer(node: Int) {
-    // NOTE: `crdt` fields do not yet merge automatically -- this behaves
-    // as an ordinary durable field today. See §9.10.
+    // NOTE: `crdt` fields with a concrete-type selector route through
+    // `CrdtManager` (merge-on-sync); see §9.10.
     self.viewers = self.viewers + 1
   }
 }
@@ -418,10 +418,9 @@ persistent actor ShoppingCart {
 
 The runtime enforces the semantics of `durable` (checkpointed and
 journaled) and `event_sourced` (rebuilt by replaying emitted events, see
-`emit`, §6.14). `crdt` is accepted syntax tracked as a state-model tag,
-but is not yet wired to the eight built-in CRDT data types (Appendix
-B.4) or their merge semantics -- see §9.10 and §12.5 for the precise
-implementation-status note and what remains to close that gap.
+`emit`, §6.14). `crdt` fields with a concrete-type selector route through
+`CrdtManager` (merge-on-sync); a `Crdt.*` effect module and operation-set
+enforcement are not yet implemented — see §9.10/§12.5.
 
 ## 1.5 Capability Security Overview
 
@@ -524,19 +523,24 @@ fn factorial(n: Int) -> Int {
 The following identifiers are reserved as keywords in Nulang and may not be used as ordinary identifiers:
 
 ```
-agent        alias        and          ask          actor
-behavior     box          break        case         compensate
-crdt         durable      effect       else         emit
-entity       event_sourced exit        extern       false
-fn           for          handle       if           import
-in           iso          let          link
-local        match        migrate      module       monitor
-not          or           organization parallel     perform
-persistent   pub          receive      rec          ref
-resume       return       self         send         spawn
-state        step         tag          then         tool
-trn          true         type         unit         val
-while        with         workflow
+actor         durable       import        par           tag
+agent         effect        in            parallel      then
+alias         else          initial       perform       throws
+and           emit          iso           persistent    tool
+as            entity        let           pub           trn
+ask           errdefer      linear        rec           true
+await         event_sourced lineariso     receive       type
+behavior      exit          link          recover       unit
+box           extern        local         ref           until
+break         fail          match         remote        using
+case          false         migrate       resume        val
+catch         fn            module        return        var
+class         for           monitor       self          while
+compensate    given         nil           send          with
+consume       handle        not           spawn         workflow
+crdt          handler       opaque        state
+database      if            or            state_machine
+defer         impl          organization  step
 ```
 
 Keywords are case-sensitive and must be written in lowercase.
@@ -545,11 +549,11 @@ Notes on the inventory:
 
 - `true`, `false`, `nil`, and `unit` are literal keywords, and `and`, `or`, `not` are keyword spellings of the `&&`, `||`, `!` operators.
 - `entity` is a reserved keyword accepted by the grammar; it desugars to `persistent actor` with `event_sourced` as the default state model (see Chapter 8).
-- `exit`, `link`, and `monitor` are used as operation names in `perform Actor.exit(...)` / `Actor.link(...)` / `Actor.monitor(...)`, and in `spawn link|monitor Actor { ... }` desugaring. `await`, `loop`, `node`, `priv`, `subworkflow`, and `where` were formerly reserved but have been freed as identifiers (they were never wired into the grammar).
-- The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag` are keywords usable anywhere a capability is parsed. `lineariso` is **not** a keyword; it is recognized as a contextual identifier in capability position.
+- `exit`, `link`, and `monitor` are used as operation names in `perform Actor.exit(...)` / `Actor.link(...)` / `Actor.monitor(...)`, and in `spawn link|monitor Actor { ... }` desugaring. `await` is reserved but unwired (re-reserved July 2026 for future async/await; see GOVERNANCE §2a). `where`, `priv`, `loop`, `node`, `subworkflow` were freed as identifiers per RFC 0010 §C.6.
+- The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag`, `lineariso`, `linear` are keywords usable anywhere a capability is parsed.
 - `organization` is a reserved keyword accepted by the grammar; it desugars to `entity` with the same durable-first defaults (RFC 0009).
 - `cap` (in the `expr :cap iso` annotation) and `to` (in `migrate a to node`) are contextual identifiers, not keywords.
-- There is no `capability`, `var`, `consume`, `recover`, `enum`, `event`, `from`, `as`, or `config` keyword. Constructs earlier drafts associated with those words are either expressed differently (Chapters 5 and 7) or **Planned**.
+- There is no `capability`, `enum`, `event`, `from`, or `config` keyword. Constructs earlier drafts associated with those words are either expressed differently (Chapters 5 and 7) or **Planned**.
 
 ## 2.4 Identifiers
 
@@ -1146,9 +1150,9 @@ let counter: &ref Int = &0
 
 // Value-level constructors exist for every capability: `&cap expr`
 // builds a reference with that capability
-fn takes_iso(x: &iso [Int]) -> Int { *x }   // pass `&iso data` at the call site
+fn takes_iso(x: &iso [Int]) -> [Int] { *x }  // pass `&iso data` at the call site
 let unique: &iso [Int] = &iso [1, 2, 3]     // unique ownership — operand moved
-let frozen: &val Tree[Int] = &val tree       // immutable shared view
+let frozen: &val [Int] = &val [1, 2, 3]     // immutable shared view
 let writable: &trn Int = &trn 0              // unique writer — operand moved
 let read_only: &box Int = &box 0             // read-only view of anything
 let identity: &tag Int = &tag 0              // opaque identity, no dereference
@@ -2271,21 +2275,14 @@ in the same place `bytecode_module`/`bytecode_offsets` are restored.
 
 ## 9.10 CRDT State
 
-**Implementation status: Rust-embedder API only, no `.nula`-level surface
-yet.** `state crdt <name>: Type = expr` parses and is tracked internally as
-a `StateModel::Crdt` persistence-model tag, but today it behaves
-identically to `state durable` — no CRDT type selection, no operation-set
-enforcement (e.g. a `crdt`-tagged field still accepts unrestricted
-decrement), and no merge-on-conflict semantics are applied to it. The
-eight CRDT types described in Appendix B.4 (`GCounter`, `PNCounter`,
-`GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`, `RGA`) exist and
-are tested at the Rust level (`src/runtime/crdt.rs`, `crdt_reg.rs`,
-`CrdtManager`), but are not constructible or nameable from `.nula` source:
-there is no type-selector syntax and no `Crdt.*` effect module. A future
-RFC is required to wire a concrete-type selector and enforced operation
-sets to `state crdt` fields before the syntax above is a conforming
-implementation surface.
-
+**Implementation status (verified 2026-08-14):** the concrete-type selector
+landed — `state crdt <name>: <Type> = expr` accepts
+`gcounter | pncounter | gset | orset | aworset | lwwregister | mvregister
+| rga` (`CrdtType::from_keyword`, `src/parser.rs:1752-1809`) and crdt
+fields are registered with `CrdtManager::register_actor_field` with
+merge-on-sync on replication rounds. **Not yet implemented:** a `Crdt.*`
+effect module, enforced per-type operation sets (a `gcounter` field still
+accepts arbitrary assignment), and `.nula`-level conformance coverage.
 ---
 
 # Chapter 10: Workflows
@@ -2481,7 +2478,7 @@ The runtime-backed `Signal.wait(name)` operation (performed as `perform Signal.w
 
 ## 10.11 Subworkflows — Planned
 
-- `subworkflow` is a reserved keyword; invoking one workflow from another is not yet wired into the parser
+- `subworkflow` was freed as an identifier per RFC 0010 §C.6 (GOVERNANCE §2a); invoking one workflow from another is not yet wired into the parser
 - Design: inherit parent's durability guarantees and participate in same compensation scope
 
 ## 10.12 Error Handling and Retry — Planned
@@ -2631,12 +2628,10 @@ Cluster parameters are configured through the runtime API today; a declarative `
 
 ## 12.4 Message Routing
 
-**Implementation status: single-node only.** No CLI flag or `.nula`
-syntax forms an actual cluster (`Runtime::enable_distribution` is a
-Rust-embedder-only API, called from nowhere in `main.rs`) — every claim
-below about routing "to whichever node hosts the actor" describes
-planned multi-node behavior that cannot be observed from a single
-`nulang <file>.nula` process.
+**Implementation status (verified 2026-08-14):** a `nulang node --listen
+<ADDR> [--seed <ADDR>] [--expected-nodes <N>] [--tls-cert/--tls-key]`
+CLI forms a real cluster (`main.rs:220` → `enable_distribution` +
+`join_cluster`); no `.nula`-level `config cluster` block yet.
 
 - The runtime resolves an actor's address (local or remote) and routes messages accordingly
 - Remote-actor references are cached; the programmer sends messages and the runtime handles routing
@@ -2705,20 +2700,12 @@ mean "planned."
 
 ## 12.5 CRDT Replication
 
-**Implementation status: the delta-sync replication protocol is real and
-tested at the Rust level; `.nula`-level `state crdt` fields are not yet
-wired to it.** `CrdtManager` and its eight backing types (`GCounter`,
-`PNCounter`, `GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`,
-`RGA`; see Appendix B.4) implement genuine delta-state replication —
-`delta_since`/`generate_delta_sync_ops`/`apply_delta_op` ship real diffs
-over the wire (`Packet::CrdtDeltaSync`) and merge them idempotently. That
-machinery is exercised by `src/runtime/tests.rs` and `stress_tests.rs`,
-not by any `.nula` program: there is no syntax to construct a specific
-CRDT type, no `Crdt.*` effect module, and the `state crdt` field tag
-below does not route through `CrdtManager` at all today — it behaves like
-`state durable`, with no operation-set restriction and no CRDT merge on
-concurrent writes. The example is the language's *planned* surface for
-this feature, not a currently conforming one:
+**Implementation status (verified 2026-08-14):** the delta-sync protocol is
+real (as before) and `.nula`-level `state crdt` fields now carry a
+concrete-type selector and merge through `CrdtManager` on sync (see
+§9.10). Still missing: a `Crdt.*` effect module, per-type operation-set
+enforcement, and `.nula` conformance cases. The example below is now
+conforming for the selector + merge halves:
 
 ```nulang
 persistent actor GlobalCounter {
@@ -2734,33 +2721,22 @@ persistent actor GlobalCounter {
 }
 ```
 
-This parses and runs today (as an ordinary durable counter — concurrent
-`increment`s across replicas are NOT guaranteed to converge via a
-`GCounter`-style max-of-per-replica-counts merge), but does not yet get
-the described replication/merge behavior. Wiring `state crdt` fields to
-`CrdtManager` — a concrete-type selector, an enforced operation set per
-type, and merge-on-sync — is tracked as a real implementation gap, not a
-documentation gap only; see `RFC/` for the tracking item once filed.
+The selector + merge halves are now conforming; the remaining gaps are the
+`Crdt.*` effect module, per-type operation-set enforcement, and `.nula`
+conformance coverage.
 
 ## 12.6 Fault Tolerance
 
-**Implementation status: the first two bullets below do not exist.**
-"Actor migration on node failure" is aspirational on both halves: node
-failure triggers no migration (there is no node-death-triggered logic
-anywhere in the distributed runtime — `distribution.rs`/`distributed.rs`
-have zero failover/rehome logic), and actor migration itself is a complete
-no-op stub even when triggered manually (`OpCode::Migrate` records a
-pending migration that nothing ever drains, `src/vm.rs:4349-4360`;
-`DistributedVmCallbacks::migrate` is `fn migrate(&mut self, _actor_id:
-u64, _target_node_id: u64) {}`, `src/runtime/callbacks.rs:1526`). "Message
-buffering for failed-node actors" also does not exist: messages to an
-unhealthy or unknown node's actors are dropped with a failure
-notification, not buffered for later delivery. The third and fourth
-bullets are real: CRDT healing is accurate per §12.5's own caveat, and
-supervision-based recovery (§8.8) is real but node-local only — a
-supervisor cannot detect or react to the failure of a node hosting one of
-its remote children. Tracked as a real implementation gap in `PLAN.md`'s
-Phase 5 (Distributed Systems Excellence).
+**Implementation status (verified 2026-08-14):** the first bullet is now
+partially real — node failure triggers `handle_node_failed`
+(`distribution.rs`, 2026-08-09): dead-node `RemoteActorCache` invalidation
+and `DOWN`-with-`noconnection` to local watchers (D7 a+b), and actor
+migration is real (`DistributedVmCallbacks::migrate`, `callbacks.rs:1593`,
+AOT path `1950c01`) with `migrated_actors` forwarding for in-flight
+messages. Still absent: automatic re-spawn of durable actors from a
+replica on node loss (designed in RFC 0014, not implemented), and message
+buffering for failed-node actors beyond the forwarding window. Cross-node
+link/monitor supervision is real (RFC 0012).
 
 - Actor migration on node failure
 - Message buffering for failed-node actors
@@ -3305,6 +3281,14 @@ Configuration values are typed and validated at startup. Invalid values produce 
 
 Nulang provides built-in observability through three pillars: logging, metrics, and tracing.
 
+> **Implementation status (verified 2026-08-14):** the distributed
+> observability slice landed: `otel` feature + `init_tracing`
+> (`src/observability.rs`), `--metrics-port` Prometheus server
+> (`src/main.rs:804/1727`), and a `trace_id` carried cross-node in
+> `Packet::ActorMessage` (`network.rs:547-549`). The `.nula` effects below
+> (`metrics.counter/histogram/gauge/timer`, `trace.span/annotate`, `config
+> trace`) are **planned surface** (backlog).
+
 ### Structured Logging
 
 ```nulang
@@ -3361,6 +3345,13 @@ config trace {
 ## 15.4 Debugging
 
 Nulang provides several debugging capabilities for development and production environments.
+
+> **Implementation status (verified 2026-08-14):** `perform
+> debug.inspect(actor_id)` is landed — the runtime returns
+> `{ state, mailbox_size, behaviors, supervisor }` (`callbacks.rs:438-455`);
+> a standalone `Debug.inspect(label, value)` print form exists
+> (`vm.rs:664`). `debug.trace_messages` and `debug.snapshot` are
+> **planned surface** (backlog).
 
 ### Actor Inspection
 
@@ -3747,10 +3738,11 @@ Only the built-in fixed-size array `[T]` exists today (indexed load/store, `arr[
 
 ## B.4 CRDT Types
 
-*Planned* — these 8 types exist and are tested at the Rust level
-(`src/runtime/crdt.rs`, `crdt_reg.rs`), but none is yet constructible or
-nameable from `.nula` source (no type-selector syntax, no `Crdt.*` effect
-module). See §9.10 and §12.5 for the full implementation-status note.
+These 8 types exist and are tested at the Rust level (`src/runtime/crdt.rs`,
+`crdt_reg.rs`). The concrete-type selector (`gcounter | pncounter | gset |
+orset | aworset | lwwregister | mvregister | rga`) is landable from
+`.nula` `state crdt` declarations; a `Crdt.*` effect module and per-type
+operation-set enforcement are not yet implemented. See §9.10 and §12.5.
 
 | Type | Description | Merge Strategy |
 |------|-------------|----------------|
