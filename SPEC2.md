@@ -49,8 +49,8 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Workflows: `workflow Name { step name { body } compensate { expr } ... }` with `parallel { ... }` step groups, saga compensation in reverse order, `perform Signal.wait("name")`, and `perform Timer.sleep("name", ms)`, all durable across restarts.
 - The AI runtime: `agent` declarations with model, system prompt, tools, episodic/semantic/procedural memory, and pricing; the generic `PerformAsync` opcode dispatches LLM, Pipeline, Supervisor, and Debate effects via `effect_op` strings (e.g. `"Inference.ask"`, `"Pipeline.run"`); agent behaviors (`ask`, `usage`, `store_fact`, `recall`); tool schemas generated from `@tool` functions; and the `Pipeline`, `Supervisor`, and `Debate` orchestration builtins. The pure AI types live in the `nulang-ai` workspace crate (`crates/nulang-ai/`); the core crate re-exports them behind the `ai-runtime` feature flag.
 - A register-based bytecode VM with a Cranelift JIT tiering path; an OTP-style supervision runtime (restart strategies and policies, links, monitors, exit signals); a distributed runtime (TCP wire protocol, gossip membership, location-transparent addressing, eight CRDT types); a REPL; and an LSP server.
-- Typeclass declarations: `class`/`impl` with dictionary-passing transform for method calls on concrete types (Phase 4, Experimental). See `CHANGELOG.md`. **Verified 2026-08-02:** literal-receiver dispatch works end-to-end (minimal declarations, two-concrete-type dispatch, missing-impl rejection, superclass syntax all confirmed against the real binary) — but a constrained generic function using a typeclass bound on a type-variable receiver (e.g. `fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }`) type-checks successfully and then **crashes at runtime** ("Not a function: nil"): the dictionary transform (`try_resolve_typeclass_dict` in `src/hir_lower.rs`) only resolves literal receivers, not type-variable ones. This is the canonical, expected use case for typeclasses (generic code constrained by a bound), not a corner case. See `conformance/behavior/typeclass_06_constrained_generic_runtime_crash.nula`.
-- Generics (`fn f[T](...)`, `type T[A] = ...`, §7.8): basic generics — one or more independent type parameters, per-callsite type inference, return-only type parameters — work end-to-end. **Verified 2026-08-02, two real gaps found:** (1) recursive generic ADTs cannot be constructed at all — §7.8's own example `type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))` fails to type-check its own constructor call (`Node(Leaf, 1, Leaf)` is a type error), confirmed for two independent recursive shapes; (2) declared type parameters are not skolemized inside the function body — a generic function's body can pin its own type parameter to a concrete type via an internal literal (e.g. `fn fresh[T]() -> T { 0 - 1 }` silently becomes `() -> Int`), so the unsoundness surfaces later at a mismatched call site instead of being rejected at the generic declaration. See `conformance/behavior/generics_03/07/08_*.nula`.
+- Typeclass declarations: `class`/`impl` with dictionary-passing transform for method calls on concrete types (Phase 4, Experimental). See `CHANGELOG.md`. **Verified 2026-08-02, constrained-generic crash fixed 2026-08-13:** literal-receiver dispatch works end-to-end (minimal declarations, two-concrete-type dispatch, missing-impl rejection, superclass syntax all confirmed against the real binary). The canonical constrained-generic case — a typeclass bound on a type-variable receiver (`fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }`) — used to type-check and then **crash at runtime** ("Not a function: nil"): the dictionary transform only resolved literal receivers, not type-variable ones. Fixed at the HIR level (`DictKind::Param`); the call site now passes the concrete dictionary argument (`infer_type_arg` → `_impl_Eq_Int`). Pinned by `conformance/behavior/typeclass_06_constrained_generic_runtime_crash.nula` (now passes, exit 0).
+- Generics (`fn f[T](...)`, `type T[A] = ...`, §7.8): basic generics — one or more independent type parameters, per-callsite type inference, return-only type parameters — work end-to-end. **Verified 2026-08-02, both gaps fixed 2026-08-13:** (1) recursive generic ADTs can now be constructed — §7.8's `type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))` type-checks its own constructor call, pinned for two independent recursive shapes (`generics_03` accept, `generics_07` accept); (2) declared type parameters are now skolemized inside the function body — a generic function that pins its type parameter to a concrete type via an internal literal (`fn fresh[T]() -> T { 0 - 1 }`) is rejected AT THE DEFINITION (rigid placeholder cannot unify with `Int`), not at a later mismatched call site (`generics_08` expects the type error, exit 4). See `conformance/behavior/generics_03/07/08_*.nula`.
 - Standard-library modules: `stdlib::core`, `stdlib::list`, `stdlib::string`, `stdlib::set`, `stdlib::map`, `stdlib::http` — resolved via `NULANG_STDLIB` or `src/stdlib/` (Experimental). See `CHANGELOG.md`.
 - Error handling syntax: `catch expr => body`, `fail expr` (structured short-circuit return), `T ! E` return types, `?` operator (Stable). See `CHANGELOG.md`.
 - Transport resilience: `send remote`, `ask remote` with timeout clauses, capability enforcement at call sites (Stable). See `CHANGELOG.md`.
@@ -2154,35 +2154,25 @@ Runtime recovery process:
 4. Reconstruct `event_sourced` state by applying replayed events
 5. Merge `crdt` state from all available replicas
 
-**Implementation status (verified 2026-08-02).** `Runtime::recover_actor`
-(`src/runtime/mod.rs`) does NOT run a field's `apply` handler during
-recovery, despite §9.5's "reconstructed by replaying it" and bullet 4
-above. It reconstructs every `event_sourced` field as a bare *count* of
-persisted events for that field (`current + 1` per `EventEntry`,
-unconditionally) -- the event's `args` and the field's `apply` clause
-are read from storage but never consulted. This is invisible for a
-field with no `apply` block (a plain incrementing counter, like this
-section's own `events: Int` example above, where "count of events" and
-"the field's actual value" happen to coincide) but silently wrong for
-any field with a non-trivial `apply` handler.
-
-Concrete, compiled-binary-verified evidence
-(`test_event_sourced_apply_handler_survives_recovery`,
-`src/integration_tests/mod.rs`): an `entity Counter` with
+**Implementation status (verified 2026-08-02; apply-handler recovery
+fixed 2026-08-13).** Recovery does not re-execute an `apply` handler
+(they are inlined at each `emit` call site by `hir_lower.rs`); instead
+`emit_event` persists the field's CURRENT value — captured AFTER the
+inlined apply handler ran and after the unconditional "+1" every
+`event_sourced` field gets per emit (`src/runtime/workflow.rs`) — in
+the `EventEntry`, and `recover_actor` restores that exact post-apply
+value from the event. The stored value, not a bare event count, is what
+recovery reconstructs, so non-trivial `apply` handlers survive a crash
+without needing an addressable bytecode unit. Pinned by
+`test_event_sourced_apply_handler_recovery`
+(`src/integration_tests/mod.rs`): an `entity Counter` with
 `apply | Incremented(by) => self.count = self.count + by`, sent
 `increment(3)` then `increment(4)` with no crash, reaches `count = 9`
-(matches `conformance/behavior/persist_07_emit_accumulates_across_sends.nula`).
-The same two messages with a crash-and-recover between them reach only
-`count = 6` after recovery -- the first event's `by = 3` is dropped
-entirely; recovery only knows "one event happened" and reconstructs
-`0 + 1 = 1` where the live actor had reached `4` (apply's `0 + 3`, plus
-the unconditional "+1" every `event_sourced` field gets per emit, see
-`Runtime::emit_event` in `src/runtime/workflow.rs`). A real fix needs
-apply handlers compiled to an addressable, replayable bytecode unit
-keyed by event name (they are currently inlined at each `emit` call
-site by `hir_lower.rs`, with no standalone entry point recovery could
-re-invoke against a persisted event's `args`) -- tracked as follow-up,
-not attempted here.
+(matches `conformance/behavior/persist_07_emit_accumulates_across_sends.nula`);
+the same two messages with a crash-and-recover between them recover to
+`count = 4` after the first message (apply's `0 + 3`, plus the +1 bump)
+and reach `9` after continuing — identical to the never-crashed
+baseline.
 
 A related, more severe bug was found and fixed alongside this: before
 this session, `recover_actor` never restored `Actor.state_models` (the

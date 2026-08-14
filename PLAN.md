@@ -439,23 +439,23 @@ updated; see the changelog entry for the test evidence.
   4. Single-argument `perform Timer.sleep(ms)` suspends a step and
      never resumes it — a permanent hang, not an error. Only the
      two-argument durable form works.
-  5. `event_sourced` field reconstruction during recovery is a bare
+  5. ~~`event_sourced` field reconstruction during recovery is a bare
      count of persisted events, never running the field's `apply`
      handler against the event's args — correct for a plain counter,
-     silently wrong for any field with a non-trivial `apply` handler
-     (extended session; see bug 6 above's neighbor finding).
-  6. A constrained generic function using a typeclass bound on a
+     silently wrong for any field with a non-trivial `apply` handler~~.
+     **Fixed:** `emit_event` persists the post-apply field value and
+     recovery restores it (see SPEC2 §9.6;
+     `test_event_sourced_apply_handler_recovery`).
+  6. ~~A constrained generic function using a typeclass bound on a
      type-variable receiver type-checks but crashes at runtime ("Not a
      function: nil") — the dictionary-passing transform only resolves
-     literal receivers (extended session, `typeclass_06`).
-  7. Recursive generic ADTs cannot be constructed — SPEC2.md §7.8's own
-     `Tree[T]` example fails to type-check its own constructor call
-     (extended session, `generics_03`/`07`).
-  8. Generic function type parameters are not skolemized in the
-     function body, so an internally-inconsistent generic (e.g. a body
-     that only ever produces `Int` for a declared `T`) is accepted at
-     the declaration and only fails later at a mismatched call site
-     (extended session, `generics_08`).
+     literal receivers~~. **Fixed:** `DictKind::Param` at HIR (see
+     SPEC2 §1; `typeclass_06` passes).
+  7. ~~Recursive generic ADTs cannot be constructed~~. **Fixed**
+     (rigid-variable handling; `generics_03`/`07` pass).
+  8. ~~Generic function type parameters are not skolemized in the
+     function body~~. **Fixed:** rejected at the definition
+     (`generics_08` expects the type error).
   Also corrected: `SPEC2.md` §4.6 (built-in effects table — see bug 4
   above), §12.4 (distributed message routing — see bugs 1-2 above, plus
   a separate correction: `monitor`/`link`/`exit` were undersold as

@@ -2578,8 +2578,12 @@ match { a: 2, b: 9 } with {
     /// `apply` handler against their `args`), landing on 1 instead of
     /// the live value of 4. The second send then applies on top of that
     /// wrong base, landing the whole run on 6 instead of 9.
+    /// EventSourced fields with non-trivial `apply` handlers survive
+    /// crash + recovery: `emit_event` persists the post-apply field value
+    /// and `recover_actor` restores it (SPEC2 §9.6; was a bare event
+    /// count before the fix).
     #[test]
-    fn test_event_sourced_apply_handler_recovery_known_gap() {
+    fn test_event_sourced_apply_handler_recovery() {
         let source = r#"
             entity Counter {
                 state count: Int = 0
