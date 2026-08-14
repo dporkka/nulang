@@ -99,6 +99,14 @@ two major versions.*
   restores it — recovery no longer reconstructs a bare event count that
   silently drops `apply`'s contributions. Pinned by
   `test_event_sourced_apply_handler_recovery`.
+- **A failing workflow step is no longer silent.** Previously a step
+  error (e.g. a non-exhaustive match) produced no diagnostic at all —
+  no stderr, exit 0 — only a difference in which compensations ran
+  revealed it. The runtime now records a durable
+  `WorkflowEvent::StepFailed` (with the step name and error message)
+  alongside saga compensation, and the CLI prints
+  `workflow step '<name>' failed: <error>` to stderr and exits nonzero.
+  Pinned by `test_workflow_step_failure_is_recorded_and_surfaced`.
 - **Saga compensation and workflow step dispatch no longer shift when a
   plain `actor` is declared before a `workflow` in the same module.**
   Compensation pairs now carry the step's absolute (whole-module)

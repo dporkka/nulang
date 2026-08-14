@@ -2270,9 +2270,16 @@ in this pass beyond the first):**
    returns the completed frame state after a normal finish — a blind
    re-capture re-stalled the actor). Pinned by
    `test_workflow_timer_sleep_single_arg_resumes`.
-5. A step failing (e.g. a non-exhaustive match) produces no diagnostic
+5. ~~A step failing (e.g. a non-exhaustive match) produces no diagnostic
    at all — no stderr, exit 0 — only a difference in which
-   compensations ran (if any) reveals it happened.
+   compensations ran (if any) reveals it happened.~~ **Fixed
+   2026-08-13:** a failed step now records a durable
+   `WorkflowEvent::StepFailed { step_name, error }` alongside saga
+   compensation, `Runtime::workflow_failures()` exposes them, and the
+   CLI prints `workflow step 'X' failed: <error>` to stderr and exits
+   nonzero instead of silently succeeding. Pinned by
+   `test_workflow_step_failure_is_recorded_and_surfaced` and a CLI
+   smoke run (`boom` step, exit 1).
 6. `parallel` blocks (§10.6) run their branches sequentially today, not
    concurrently, though the observable contract (all branches complete;
    the aggregate step waits; a branch failure fails the whole block)

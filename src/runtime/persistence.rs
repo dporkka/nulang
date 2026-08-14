@@ -206,6 +206,15 @@ pub enum WorkflowEvent {
         parallel_step_name: String,
         branch_name: String,
     },
+    /// A workflow step failed at runtime (the step body returned an
+    /// error). Recorded alongside saga compensation so failures are
+    /// durable and surfacable (SPEC2 §10 known-issue #5: they used to be
+    /// silent — exit 0, no diagnostic).
+    StepFailed {
+        sequence: u64,
+        step_name: String,
+        error: String,
+    },
     /// Any other event emitted by a workflow handler.
     Custom {
         sequence: u64,
@@ -225,6 +234,7 @@ impl WorkflowEvent {
             | WorkflowEvent::SignalReceived { sequence, .. }
             | WorkflowEvent::SagaCompensated { sequence, .. }
             | WorkflowEvent::ParallelBranchCompleted { sequence, .. }
+            | WorkflowEvent::StepFailed { sequence, .. }
             | WorkflowEvent::Custom { sequence, .. } => *sequence,
         }
     }

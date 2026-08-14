@@ -252,7 +252,13 @@ suspension; now the resume result decides completion vs re-suspension,
 mirroring the LLM path), and the `send remote`/`ask remote`
 local-delivery fallback + `RAsk` result-register convention (both
 pinned at the runtime/VM level). SPEC2.md and CHANGELOG.md updated;
-see their entries for evidence. **Update 2 (2026-08-13):** the RFC-0007
+see their entries for evidence. **Update 3 (2026-08-13):** the saga
+compensation + workflow step-dispatch misindexing (documented follow-up
+bug 3 / SPEC2 §10 issue #2) fixed — compensation pairs carry absolute
+behavior indices and workflow bytecode_offsets are compressed to the
+actor's own steps; and SPEC2 §10 issue #5 fixed — failing workflow
+steps now record a durable `StepFailed` event surfaced by the CLI
+(stderr + exit 1) instead of exiting 0 silently. **Update 2 (2026-08-13):** the RFC-0007
 cross-node routing gap closed — `spawn@node` references (bare
 actor-ref values) now route over the wire via a runtime reverse index
 (id → node), with spawn-in-flight message queueing and placeholder→real
