@@ -5582,7 +5582,9 @@ fn test_remote_ref_pending_spawn_queue_flushes() {
     // SpawnResponse cannot have arrived, so this must queue.
     rt_a.send_message(placeholder_id, "store", &[Value::int(5)]);
     assert_eq!(
-        rt_a.pending_spawn_messages.get(&placeholder_id).map(Vec::len),
+        rt_a.pending_spawn_messages
+            .get(&placeholder_id)
+            .map(Vec::len),
         Some(1),
         "pre-response send must be queued against the placeholder"
     );

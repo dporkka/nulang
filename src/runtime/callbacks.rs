@@ -1764,7 +1764,8 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
                 }
                 None => {
                     let node_id = rt.distributed.node_id.map(|n| n.0).unwrap_or(0);
-                    let target = ActorAddress::remote(crate::runtime::NodeId(node_id), target_actor);
+                    let target =
+                        ActorAddress::remote(crate::runtime::NodeId(node_id), target_actor);
                     rt.send_distributed(target, behavior, args);
                 }
             }

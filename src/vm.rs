@@ -6271,7 +6271,8 @@ mod vm_tests {
                 args: &[Value],
                 _timeout_ms: u64,
             ) -> Value {
-                self.asks.push((target_actor, behavior.to_string(), args.to_vec()));
+                self.asks
+                    .push((target_actor, behavior.to_string(), args.to_vec()));
                 Value::int(123)
             }
             fn gossip(&mut self, message: &str) -> Value {
@@ -6367,11 +6368,7 @@ mod vm_tests {
         assert_eq!(cb.migrations, &[(5, 11)]);
         assert_eq!(
             cb.asks,
-            &[(
-                5,
-                "echo".to_string(),
-                vec![Value::int(5), Value::int(5)]
-            )],
+            &[(5, "echo".to_string(), vec![Value::int(5), Value::int(5)])],
             "RAsk must stage behavior args (regs 0..param_count) like local Ask"
         );
         assert_eq!(cb.gossips, &["sync".to_string()]);
