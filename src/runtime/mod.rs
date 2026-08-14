@@ -2113,9 +2113,6 @@ impl Runtime {
 
     #[tracing::instrument(level = "trace", skip(self))]
     pub fn run_scheduler(&mut self) {
-        // How often (in scheduler ticks) deferred local decrements are
-        // retried while actors are still running.
-        const GC_PUMP_INTERVAL: u64 = 256;
         let mut ticks: u64 = 0;
         loop {
             // Drain any cross-shard messages before checking the local
@@ -2314,6 +2311,14 @@ impl Runtime {
                 Some(actor_id) => {
                     self.step_actor(actor_id);
                     steps += 1;
+                    if steps % GC_PUMP_INTERVAL == 0 {
+                        // Safe at any cadence: process_deferred only frees
+                        // objects whose local and foreign counts have already
+                        // reached zero. Mirrors the production
+                        // `run_scheduler`'s per-batch pump so heap-churn DST
+                        // scenarios exercise the same GC cadence.
+                        self.process_deferred_all();
+                    }
                 }
                 None => {
                     // No actor is ready. With a virtual clock installed and
@@ -2323,6 +2328,18 @@ impl Runtime {
                     // Without a virtual clock (or with an empty wheel)
                     // there is nothing deterministic left to do: Quiesce.
                     if self.virtual_clock.is_none() || self.timer_wheel.is_empty() {
+                        // Deliver pending foreign-ref decrements and run
+                        // cycle detection only once the run queue has
+                        // drained — mirrors the production
+                        // `run_scheduler`'s end-of-run drain. Receiver-side
+                        // holds keep `foreign_count` elevated for as long as
+                        // a receiving actor holds a pointer, so the -1 ops
+                        // only release the *in-flight* count; applying them
+                        // mid-run is still deferred to keep mailbox pointers
+                        // counted by the in-flight bump until they are
+                        // received (and held).
+                        self.process_gc_ops();
+                        self.process_deferred_all();
                         return DeterministicRunResult::Quiescent { steps };
                     }
                     let deadline = self
@@ -5170,7 +5187,10 @@ impl Runtime {
 /// Interval (in `sync_crdts` rounds) between full-state repair syncs.
 /// Round 1 is full; rounds 2..=N are delta; round N+1 is full again.
 const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
-
+/// How often (in scheduler ticks) deferred local decrements are retried
+/// while actors are still running. Used by both the production
+/// `run_scheduler` and the deterministic DST scheduler.
+const GC_PUMP_INTERVAL: u64 = 256;
 /// How long (wall-clock) a migrated-actor forwarding entry is kept
 /// before it is garbage-collected.  After this TTL, messages for the
 /// actor that still reach the old node are bounced to the DLQ (target

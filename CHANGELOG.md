@@ -63,6 +63,24 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **Message-reorder DST scenario.** `NetworkTransport` gains
+  `set_reorder`/`flush_held` (default no-ops); the deterministic
+  transport delivers consecutive packets to a peer swapped (bounded
+  adjacent reorder — nothing lost or duplicated). New 25-seed sweep:
+  three nodes form the cluster under reordered heartbeats/gossip/acks,
+  a 30-message remote burst delivers exactly 30 (AtMostOnce), and
+  GCounter replicas converge under reordered delta sync.
+
+- **GC-during-send DST scenario.** The deterministic scheduler now
+  pumps GC on the production cadence (deferred frees mid-run,
+  foreign-ref decrements + deferred retry at quiescence) — the DST path
+  previously never applied `process_gc_ops`, so heap-churn scenarios
+  could not run. New 60-seed sweep: nested heap-array trees sent across
+  actors with in-flight foreign bumps, receiver holds, deferred frees,
+  and seed-permuted GC interleavings; every seed delivers intact
+  contents with exactly the held set of live objects (no premature
+  free, no leak).
+
 - **Node-crash DST scenario.** `DeterministicCluster::crash_node`/
   `restart_node` model a hard crash + fresh-node restart (skipped from
   the pump, links cut, Runtime replaced with the same node id). New

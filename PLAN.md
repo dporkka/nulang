@@ -626,6 +626,33 @@ updated; see the changelog entry for the test evidence.
     reconverges to full `Healthy` and a remote message delivers to an
     actor on the restarted node. This is the seed-sweepable, sleep-free
     counterpart of `test_three_node_cluster_survives_hard_node_failure_and_rejoin`.
+  - **Message-reorder scenario (2026-08-14, bullet-2 deliverable).**
+    `DeterministicNetworkTransport` gains a bounded-adjacent-reorder
+    mode (`set_reorder`/`flush_held` on the `NetworkTransport` trait,
+    default no-ops): packets on a (from,to) pair are delivered with
+    consecutive pairs swapped (P2 before P1) — nothing is lost or
+    duplicated, only delayed one slot; the harness
+    (`DeterministicCluster::set_reorder_all` + per-turn flush) enables
+    it on every link from the first packet. `test_dst_cluster_message_reorder_seed_sweep`:
+    25 seeds, three nodes; the cluster must FORM under reordered
+    heartbeats/gossip/acks (order-independent merges), a 30-message
+    remote burst delivers exactly 30 (AtMostOnce under reorder), and
+    GCounter replicas converge to the summed total under reordered
+    delta sync.
+  - **GC-during-send scenario (2026-08-14, bullet-2 deliverable).**
+    The deterministic scheduler now pumps GC on the production cadence
+    (deferred frees every `GC_PUMP_INTERVAL` steps, foreign-ref
+    decrements + deferred retry at quiescence) — the DST path previously
+    never applied `process_gc_ops`, so heap-churn scenarios could not
+    run. `test_dst_gc_during_send_seed_sweep`: 60 seeds; a builder
+    actor allocates nested array trees on its own heap, sends each to a
+    receiver (in-flight foreign bump + receiver hold), then releases
+    its local ref (deferred free); a churn actor allocates+frees blocks
+    so the seed permutes the GC interleaving. Every seed: all messages
+    deliver with intact contents (no premature free, no refcount
+    imbalance), all `MESSAGES × (K+1)` tree objects stay alive on the
+    builder (held by the receiver), and the receiver heap holds only
+    its cycle-detector sentinel.
 - **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
   determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
   open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`

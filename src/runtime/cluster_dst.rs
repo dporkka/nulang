@@ -62,6 +62,9 @@ pub(crate) struct DeterministicCluster {
     /// Hard-crashed nodes: skipped by the pump, with every peer's link to
     /// them dropped (dead socket). `restart_node` replaces the Runtime.
     crashed: Vec<bool>,
+    /// Bounded-adjacent-reorder mode on every link (see
+    /// [`DeterministicCluster::set_reorder_all`]).
+    reorder: bool,
     /// Shared in-memory packet bus (kept so `restart_node` can create a
     /// fresh transport on the same bus).
     bus: Arc<
@@ -122,6 +125,7 @@ impl DeterministicCluster {
             rng,
             partitions: vec![std::collections::HashSet::new(); addrs.len()],
             crashed: vec![false; addrs.len()],
+            reorder: false,
             bus,
             round: 0,
             limit_hits: 0,
@@ -230,6 +234,21 @@ impl DeterministicCluster {
         }
     }
 
+    /// Enable bounded adjacent reordering on every node's transport link.
+    /// Deterministic fault injection: consecutive packets to a peer are
+    /// delivered swapped (P2 before P1) — nothing is lost or duplicated,
+    /// only delayed one slot. The cluster protocol (heartbeats, gossip,
+    /// acks, actor messages, CRDT sync) must form and stay correct under
+    /// reordered delivery; the seed still permutes node order on top.
+    pub fn set_reorder_all(&mut self, enabled: bool) {
+        self.reorder = enabled;
+        for rt in self.nodes.iter_mut() {
+            if let Some(transport) = rt.distributed.transport.as_mut() {
+                transport.set_reorder(enabled);
+            }
+        }
+    }
+
     /// Run one round: advance every node's virtual clock by `ROUND_STEP`,
     /// then execute the nodes in a seed-permuted order — each node first
     /// drains its transport (packet delivery + cluster tick) and then runs
@@ -266,6 +285,13 @@ impl DeterministicCluster {
                 crate::runtime::DeterministicRunResult::StepLimitExceeded { .. }
             ) {
                 self.limit_hits += 1;
+            }
+            // Deliver any packets still held by the reorder buffer (odd
+            // tails are never stranded; no-op when reorder is off).
+            if self.reorder {
+                if let Some(transport) = rt.distributed.transport.as_mut() {
+                    transport.flush_held();
+                }
             }
         }
         self.round += 1;
@@ -813,6 +839,125 @@ mod tests {
                 counter_value(&cluster, 2, counter),
                 99,
                 "seed {seed}: remote message must deliver to the restarted node"
+            );
+        }
+    }
+
+    /// PLAN.md Phase 1 bullet 2 (DST): message-reorder scenario, seed-driven.
+    /// Every link reorders packets with bounded adjacent swaps (P2 before
+    /// P1; nothing lost or duplicated, only delayed one slot) from the very
+    /// first packet. Invariants for every seed:
+    ///  1. The cluster still forms — heartbeats, gossip merges, and acks
+    ///     are order-independent, so membership converges to full
+    ///     `Healthy` even when packet pairs arrive swapped.
+    ///  2. AtMostOnce remote delivery still holds — the counter reaches
+    ///     exactly `MESSAGES` (reorder never duplicates or loses a packet).
+    ///  3. No node hits the step budget (no deadlock/livelock).
+    ///  4. CRDT replication still converges — delta/full-state sync packets
+    ///     merge order-independently, so both replicas reach the summed
+    ///     total under reordered delivery.
+    #[test]
+    fn test_dst_cluster_message_reorder_seed_sweep() {
+        const MESSAGES: i64 = 30;
+        const ROUNDS: u64 = 60;
+        let seeds = crate::dst::dst_seed_count(25);
+
+        for seed in 0..seeds {
+            let mut cluster =
+                DeterministicCluster::new(&[addr(9151), addr(9152), addr(9153)], seed);
+            // Reorder from the very first packet: the cluster must FORM
+            // under out-of-order heartbeats/gossip/acks.
+            cluster.set_reorder_all(true);
+
+            // CRDT replica on node A, incremented on both nodes mid-run.
+            let counter_id = {
+                let rt = &mut cluster.node_mut(0);
+                rt.crdt_manager
+                    .as_mut()
+                    .expect("crdt manager")
+                    .create_gcounter()
+                    .0
+            };
+            // Converge membership under reorder before sending (the
+            // resolver refuses to route to a non-Healthy node).
+            cluster.run_rounds(120);
+            assert!(
+                cluster.active_views_converged(),
+                "seed {seed}: cluster must form under reordered delivery"
+            );
+
+            let counter = spawn_counter(&mut cluster.node_mut(0));
+            for _ in 0..MESSAGES {
+                cluster.send_remote(1, 0, counter, "inc", &[Value::int(1)]);
+            }
+            // Interleave local replica increments with the sync rounds;
+            // which side's delta ships first is seed-permuted by the node
+            // order on top of the reorder.
+            for i in 0..20 {
+                cluster
+                    .node_mut(0)
+                    .crdt_manager
+                    .as_mut()
+                    .unwrap()
+                    .get_gcounter_mut(counter_id)
+                    .unwrap()
+                    .increment();
+                cluster
+                    .node_mut(1)
+                    .crdt_manager
+                    .as_mut()
+                    .unwrap()
+                    .get_gcounter_mut(counter_id)
+                    .unwrap()
+                    .increment();
+                cluster.run_rounds(ROUNDS / 20);
+                let _ = i;
+            }
+            cluster.run_rounds(ROUNDS);
+
+            assert_eq!(
+                cluster.limit_hits, 0,
+                "seed {seed}: step budget exceeded — possible deadlock/livelock"
+            );
+            let id0 = cluster.id(0);
+            let id1 = cluster.id(1);
+            let id2 = cluster.id(2);
+            for (viewer, peer) in [(0, id1), (0, id2), (1, id0), (1, id2), (2, id0), (2, id1)] {
+                assert_eq!(
+                    cluster.cluster_status(viewer, peer),
+                    Some(NodeStatus::Healthy),
+                    "seed {seed}: node {viewer} must see node {} healthy under reorder",
+                    peer.0
+                );
+            }
+            let count = counter_value(&cluster, 0, counter);
+            assert_eq!(
+                count, MESSAGES,
+                "seed {seed}: counter must reach exactly {MESSAGES} under reorder (AtMostOnce), got {count}"
+            );
+            let va = cluster
+                .node_mut(0)
+                .crdt_manager
+                .as_mut()
+                .unwrap()
+                .get_gcounter_mut(counter_id)
+                .unwrap()
+                .value();
+            let vb = cluster
+                .node_mut(1)
+                .crdt_manager
+                .as_mut()
+                .unwrap()
+                .get_gcounter_mut(counter_id)
+                .unwrap()
+                .value();
+            assert_eq!(
+                va, 40,
+                "seed {seed}: both replicas must converge to the summed total (20 increments each side) under reorder, got {va}"
+            );
+            assert_eq!(
+                vb, va,
+                "seed {seed}: replicas must converge under reordered CRDT sync"
             );
         }
     }
