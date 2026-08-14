@@ -13,6 +13,19 @@
 
 use std::collections::{HashMap, VecDeque};
 
+/// Seed count for DST seed-sweep tests. Defaults to `default`; the
+/// `NULANG_DST_SEEDS` environment variable overrides it so CI can scale a
+/// sweep to 10⁴ seeds without editing the test (see
+/// `.github/workflows/dst-nightly.yml`). Same seed → same run, so a
+/// higher count is purely more interleavings covered.
+pub fn dst_seed_count(default: u64) -> u64 {
+    std::env::var("NULANG_DST_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
 /// A deterministic pseudo-random number generator (splitmix64).
 #[derive(Debug, Clone)]
 pub struct DeterministicRng {
@@ -40,6 +53,32 @@ impl DeterministicRng {
             let idx = (self.next() as usize) % items.len();
             Some(&items[idx])
         }
+    }
+}
+
+/// `rand_core::RngCore` view of the deterministic splitmix64 generator, so
+/// the same seeded sequence can drive every random decision in the runtime
+/// (scheduler selection, cluster gossip/repair picks) — a same-seed run is
+/// then bit-reproducible end to end.
+impl rand_core::RngCore for DeterministicRng {
+    fn next_u32(&mut self) -> u32 {
+        self.next() as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.next()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let bytes = self.next().to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
     }
 }
 

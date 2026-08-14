@@ -59,6 +59,17 @@ cd spec/formal
 lake build
 ```
 
+## Build-graph note (2026-08-14)
+
+`spec/formal/lakefile.lean` roots `#[Nulang, types, capabilities, effects]`.
+From 89bd0d6 (2026-08-09) until 2026-08-14 the root list was `#[Nulang]`
+only — the top-level `types.lean`/`capabilities.lean`/`effects.lean`
+(the Core soundness formalization) were orphaned from `lake build`.
+Proofs claimed for those files in commits fe610d8/dd3aafa were never
+type-checked and have been reverted; the honest status is the 9-`sorry`
+state documented above. The roots are restored so `lake build` covers
+the top-level files again (the CI sorry-ratchet counts them either way).
+
 ## References
 
 - `src/types.rs` — Rust implementation (oracle)

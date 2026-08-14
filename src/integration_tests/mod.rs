@@ -292,6 +292,72 @@ mod tests {
     }
 
     #[test]
+    fn test_let_rec_module_level() {
+        // Doc-pass gap 3: `let rec f(x) = ... in ...` at module level used
+        // to fail in `parse_module_let` ("Expected =" on the parameter
+        // list); it now rewinds to the expression path. Recursion works
+        // through the full VM.
+        assert_int(
+            "let rec f(n) = if n <= 1 then 1 else n * f(n - 1) in f(5)",
+            120,
+        );
+        assert_int(
+            "fn main() { let rec fib(n) = if n <= 1 then n else fib(n - 1) + fib(n - 2) in fib(10) }",
+            55,
+        );
+    }
+
+    #[test]
+    fn test_type_decl_alias_bodies() {
+        // Doc-pass gap 5: `type X = <full type>` now accepts array,
+        // primitive, function, and reference bodies (previously only
+        // variants/records parsed; `type Buffer = [Int]` failed with
+        // "Expected variant name").
+        assert_int(
+            "type Buffer = [Int]\nlet b: Buffer = [1, 2, 3]\nperform Array.length(b)",
+            3,
+        );
+        assert_int("type T = Int\nlet x: T = 5\nx + 1", 6);
+        assert_int(
+            "type F = (Int) -> Int\nlet inc: F = fn(n) n + 1\ninc(41)",
+            42,
+        );
+        // Variants still parse as variants.
+        assert_int(
+            "type Option[T] = Some(T) | None\nlet o: Option[Int] = Some(5)\nmatch o { | Some(v) => v | None => 0 }",
+            5,
+        );
+    }
+
+    #[test]
+    fn test_cap_ref_value_constructors() {
+        // Value-level capability constructors: every capability parses as
+        // `&cap expr`, erases to a plain move at runtime (capabilities are
+        // compile-time only), and dereferences through `*`. Rejection of a
+        // second unique constructor (`&iso x` twice) is pinned at the
+        // capability-analyzer level (see effect_checker tests) because the
+        // integration pipeline below skips capability analysis.
+        assert_int("let x = &10 in *x", 10);
+        assert_int("let x = &ref 10 in *x", 10);
+        assert_int("let x = &iso 10 in *x", 10);
+        assert_int("let x = &trn 10 in *x", 10);
+        assert_int("let x = &val 10 in *x", 10);
+        assert_int("let x = &box 10 in *x", 10);
+        assert_int("let x = &linear 10 in *x", 10);
+        assert_int("let x = &lineariso 10 in *x", 10);
+        assert_int("let x = &tag 10 in 0", 0); // tag is opaque identity only
+                                               // Constructing from a variable and passing the unique reference to a
+                                               // function parameter annotated with the same capability.
+        assert_int(
+            "fn f(x: &iso Int) -> Int { *x }; let v = 42 in let r = &iso v in f(r)",
+            42,
+        );
+        // Shared constructors alias without consuming: the source binding
+        // stays usable.
+        assert_int("let v = 42 in let r = &val v in *r + v", 84);
+    }
+
+    #[test]
     fn test_record_field_access() {
         let source = "let r = { x: 1, y: 2 } in r.x + r.y";
         assert_int(source, 3);
@@ -6850,6 +6916,14 @@ match { a: 2, b: 9 } with {
             // &ref is the default (mutable). Both dereference with *.
             "let x = &val 10 in *x",
             "let x = &ref 10 in { x = 3; *x }",
+            // Value-level capability constructors: every capability erases
+            // to a plain move and dereferences identically.
+            "let x = &iso 10 in *x",
+            "let x = &trn 10 in *x",
+            "let x = &box 10 in *x",
+            "let x = &linear 10 in *x",
+            "let x = &lineariso 10 in *x",
+            "let x = &tag 10 in 0",
             // Field access through &val reference
             "let r = { x: 1, y: 2 } in let p = &val r in p.x + p.y",
             // Effect handlers, with and without a resumed value

@@ -828,7 +828,15 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
             out.push(']');
         }
         Expr::Unary { op, expr, .. } => {
-            out.push_str(op_sym_unary(*op));
+            match op {
+                crate::ast::UnOp::Ref(cap) => {
+                    // `&iso x` — the capability keyword must be separated
+                    // from the operand, or `&isox` re-parses as ref-cap `&` of
+                    // the identifier `isox`.
+                    out.push_str(&format!("&{} ", cap));
+                }
+                other => out.push_str(&op_sym_unary(*other)),
+            }
             fmt_expr(out, expr, indent, had_unhandled);
         }
         Expr::Assign { target, value, .. } => {
@@ -1144,12 +1152,12 @@ fn is_omittable_type(ty: &Type) -> bool {
     }
 }
 
-fn op_sym_unary(op: crate::ast::UnOp) -> &'static str {
+fn op_sym_unary(op: crate::ast::UnOp) -> String {
     match op {
-        crate::ast::UnOp::Neg => "-",
-        crate::ast::UnOp::Not => "!",
-        crate::ast::UnOp::Deref => "*",
-        crate::ast::UnOp::Ref(_) => "ref",
+        crate::ast::UnOp::Neg => "-".to_string(),
+        crate::ast::UnOp::Not => "!".to_string(),
+        crate::ast::UnOp::Deref => "*".to_string(),
+        crate::ast::UnOp::Ref(cap) => format!("&{}", cap),
     }
 }
 
@@ -1185,6 +1193,29 @@ mod tests {
     fn test_fmt_import() {
         let out = format_source("import Foo::Bar").expect("import formats");
         assert!(out.contains("import Foo::Bar"), "got: {out}");
+    }
+
+    #[test]
+    fn test_fmt_cap_ref_constructors() {
+        // `&cap` must format with the capability keyword AND a space before
+        // the operand: the old `op_sym_unary` printed "ref" for every Ref op
+        // (destroying the capability), and a missing space made `&iso x`
+        // re-parse as ref-cap `&` of the identifier `isox`.
+        let src = r#"fn main() {
+    let x = 5
+    let r = &iso x
+    let s = &val x
+    *r + *s
+}
+"#;
+        let out = format_source(src).expect("cap refs format");
+        assert!(out.contains("&iso x"), "iso constructor lost: {out}");
+        assert!(out.contains("&val x"), "val constructor lost: {out}");
+        assert!(
+            !out.contains("ref x"),
+            "old 'ref' emission still present: {out}"
+        );
+        assert_idempotent(src);
     }
 
     #[test]

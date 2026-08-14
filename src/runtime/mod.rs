@@ -49,6 +49,9 @@ mod workflow;
 pub use trace::TraceContext;
 
 #[cfg(test)]
+mod cluster_dst;
+
+#[cfg(test)]
 mod cluster_sim;
 
 #[cfg(test)]
@@ -2110,9 +2113,6 @@ impl Runtime {
 
     #[tracing::instrument(level = "trace", skip(self))]
     pub fn run_scheduler(&mut self) {
-        // How often (in scheduler ticks) deferred local decrements are
-        // retried while actors are still running.
-        const GC_PUMP_INTERVAL: u64 = 256;
         let mut ticks: u64 = 0;
         loop {
             // Drain any cross-shard messages before checking the local
@@ -2255,40 +2255,70 @@ impl Runtime {
     /// the real actor runtime, not a simulated stand-in.
     ///
     /// Scope (PLAN.md Phase 1 bullet 2): pure message-passing + timer
-    /// determinism. Does NOT drive `self.scheduler` (the crossbeam
-    /// queue), cross-shard messages, or LLM completions -- a program that
+    /// + cross-shard determinism. Does NOT drive `self.scheduler` (the
+    /// crossbeam queue) or LLM completions -- a program that
     /// spawns/sends/asks/links/monitors between actors, arms timers
     /// (`send_after`), or uses timed receive-waits executes
     /// byte-identically for the same seed, provided a virtual clock is
-    /// installed. Timer determinism (2026-08-13): when no actor is ready
-    /// but the timer wheel is non-empty, the scheduler advances the
-    /// virtual clock to the next deadline and re-ticks, so a
-    /// timer-armed program's timers actually fire instead of the run
-    /// Quiescing forever with them pending (the pre-extension behavior).
-    /// Clock advances count toward `max_steps` so a program that keeps
-    /// re-arming timers cannot spin past the bound. WITHOUT a virtual
-    /// clock the old contract holds: a timer-armed program stops making
-    /// progress once its timer-waiting actor's mailbox empties and
-    /// surfaces as `Quiescent` (timers are wall-clock-based and cannot be
-    /// driven deterministically). Network-driven determinism remains
-    /// tracked as follow-up work.
+    /// installed. Cross-shard messages (sharded `Runtime`s) are drained
+    /// at the top of every loop iteration exactly like the production
+    /// scheduler (`drain_cross_shard_messages`), so `new_sharded`
+    /// runtimes are deterministic too. Timer determinism (2026-08-13):
+    /// when no actor is ready but the timer wheel is non-empty, the
+    /// scheduler advances the virtual clock to the next deadline and
+    /// re-ticks, so a timer-armed program's timers actually fire instead
+    /// of the run Quiescing forever with them pending (the
+    /// pre-extension behavior). Clock advances count toward `max_steps`
+    /// so a program that keeps re-arming timers cannot spin past the
+    /// bound. WITHOUT a virtual clock the old contract holds: a
+    /// timer-armed program stops making progress once its
+    /// timer-waiting actor's mailbox empties and surfaces as `Quiescent`
+    /// (timers are wall-clock-based and cannot be driven
+    /// deterministically). Network-driven determinism (multi-node
+    /// clusters over the in-memory transport) lives in
+    /// `cluster_dst::DeterministicCluster` (test-gated), which pumps
+    /// per-node deterministic scheduler runs interleaved with transport
+    /// delivery.
     pub fn run_scheduler_deterministic(
         &mut self,
         seed: u64,
         max_steps: u64,
     ) -> DeterministicRunResult {
         let mut rng = crate::dst::DeterministicRng::new(seed);
+        self.run_scheduler_deterministic_with_rng(&mut rng, max_steps)
+    }
+
+    /// Like [`Runtime::run_scheduler_deterministic`], but draws actor
+    /// selection from a caller-owned RNG so a multi-node harness can
+    /// interleave nodes and actors from one seeded sequence.
+    pub fn run_scheduler_deterministic_with_rng(
+        &mut self,
+        rng: &mut crate::dst::DeterministicRng,
+        max_steps: u64,
+    ) -> DeterministicRunResult {
         let mut steps: u64 = 0;
         loop {
             if steps >= max_steps {
                 return DeterministicRunResult::StepLimitExceeded { steps };
             }
+            // Drain cross-shard messages first (mirrors the production
+            // scheduler's `run_scheduler`); enqueued actors then show up
+            // in `pick_ready_actor_deterministic`'s ready set.
+            self.drain_cross_shard_messages();
             // Tick timers first (respects virtual clock via self.now())
             self.tick_timers();
-            match self.pick_ready_actor_deterministic(&mut rng) {
+            match self.pick_ready_actor_deterministic(rng) {
                 Some(actor_id) => {
                     self.step_actor(actor_id);
                     steps += 1;
+                    if steps % GC_PUMP_INTERVAL == 0 {
+                        // Safe at any cadence: process_deferred only frees
+                        // objects whose local and foreign counts have already
+                        // reached zero. Mirrors the production
+                        // `run_scheduler`'s per-batch pump so heap-churn DST
+                        // scenarios exercise the same GC cadence.
+                        self.process_deferred_all();
+                    }
                 }
                 None => {
                     // No actor is ready. With a virtual clock installed and
@@ -2298,6 +2328,18 @@ impl Runtime {
                     // Without a virtual clock (or with an empty wheel)
                     // there is nothing deterministic left to do: Quiesce.
                     if self.virtual_clock.is_none() || self.timer_wheel.is_empty() {
+                        // Deliver pending foreign-ref decrements and run
+                        // cycle detection only once the run queue has
+                        // drained — mirrors the production
+                        // `run_scheduler`'s end-of-run drain. Receiver-side
+                        // holds keep `foreign_count` elevated for as long as
+                        // a receiving actor holds a pointer, so the -1 ops
+                        // only release the *in-flight* count; applying them
+                        // mid-run is still deferred to keep mailbox pointers
+                        // counted by the in-flight bump until they are
+                        // received (and held).
+                        self.process_gc_ops();
+                        self.process_deferred_all();
                         return DeterministicRunResult::Quiescent { steps };
                     }
                     let deadline = self
@@ -5016,6 +5058,16 @@ impl Runtime {
         distribution::enable_distribution(self, bind_addr, tls_config)
     }
 
+    /// Enable distribution over a caller-supplied transport (DST: the
+    /// in-memory `DeterministicNetworkTransport`). The transport's node
+    /// id and listen address become this node's identity.
+    pub fn enable_distribution_with_transport(
+        &mut self,
+        transport: Box<dyn NetworkTransport>,
+    ) -> std::io::Result<()> {
+        distribution::enable_distribution_with_transport(self, transport)
+    }
+
     pub fn join_cluster(&mut self, seed_addr: std::net::SocketAddr) {
         distribution::join_cluster(self, seed_addr)
     }
@@ -5135,7 +5187,10 @@ impl Runtime {
 /// Interval (in `sync_crdts` rounds) between full-state repair syncs.
 /// Round 1 is full; rounds 2..=N are delta; round N+1 is full again.
 const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
-
+/// How often (in scheduler ticks) deferred local decrements are retried
+/// while actors are still running. Used by both the production
+/// `run_scheduler` and the deterministic DST scheduler.
+const GC_PUMP_INTERVAL: u64 = 256;
 /// How long (wall-clock) a migrated-actor forwarding entry is kept
 /// before it is garbage-collected.  After this TTL, messages for the
 /// actor that still reach the old node are bounced to the DLQ (target

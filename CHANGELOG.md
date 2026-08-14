@@ -45,6 +45,130 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-14
+
+- **`let rec f(x) = ... in ...` works at module level.** Recursive local
+  bindings already parsed in expression position; module-level entry
+  failed because `parse_module_let` hit the parameter list ("Expected =")
+  with the parser already past the `let` token, blocking the expression
+  fallback. `parse_module_let` now rewinds to `let` when the name is
+  followed by `(`. Pinned by parser + integration tests (PLAN doc-pass
+  gap 3 closed).
+- **`type X = <full type>` accepts any alias body.** `type Buffer =
+  [Int]`, `type T = Int`, `type F = (Int) -> Int`, `type R = &ref Int`
+  now parse as aliases (previously "Expected variant name, found [");
+  variants (`Some(T) | None`) and records are unchanged. Primitive type
+  names lex as `UpperIdent`, so they are routed to the alias path too
+  (PLAN doc-pass gap 5 closed). SPEC2 §4.5.1's stale bare-row shorthand
+  prose removed — effect rows require braces; `! Type` is the typed-error
+  surface (PLAN doc-pass gap 4 closed, doc side).
+
+- **Parameter-level LinearIso must-use verified end-to-end.** 5 new
+  conformance cases (cap_30–34) prove exactly-once enforcement for
+  `lineariso` function and behavior parameters through the compiled
+  binary: single use ok, double use rejected, never used rejected,
+  explicit `consume x` discharge ok, behavior-param consume ok.
+  Conformance suite: 305/305.
+
+- **Parser fix: `Nil`-led sum types.** The gap-5 type-declaration
+  routing sent `Nil` (a primitive type name) to the alias path,
+  breaking `type Stream[T] = Nil | Cons(...)` — `Nil` is the canonical
+  empty variant of a sum type, not a degenerate alias body. New
+  `type_decl_body_is_alias` exempts it; pinned by a parser unit test
+  and the generics_07/typeclass_08 conformance cases.
+
+- **Conformance contract updates:** generics_08's stderr assertion no
+  longer depends on internal fresh-type-var numbering; workflow_09/11
+  expect the deliberate post-2d56e33 contract (failing saga steps
+  surface a diagnostic and exit nonzero, compensation trace unchanged).
+
+- **LSP protocol-level integration tests.** 6 tests drive the full
+  JSON-RPC dispatch path (`tower_lsp::LspService` with real `Request`
+  objects — the same service the stdio server runs), closing the
+  "no protocol-level integration tests" gap: initialize capability
+  round-trip, publishDiagnostics pushed on didOpen/didChange (empty for
+  well-formed docs, parse-error diagnostics for broken ones), hover
+  signature, completion keywords, documentSymbol outline, and the
+  shutdown/exit lifecycle (requests after exit fail with ExitedError).
+  New direct deps `futures`/`tower-service` (both already in the
+  lockfile) behind the `lsp` feature.
+
+- **Message-reorder DST scenario.** `NetworkTransport` gains
+  `set_reorder`/`flush_held` (default no-ops); the deterministic
+  transport delivers consecutive packets to a peer swapped (bounded
+  adjacent reorder — nothing lost or duplicated). New 25-seed sweep:
+  three nodes form the cluster under reordered heartbeats/gossip/acks,
+  a 30-message remote burst delivers exactly 30 (AtMostOnce), and
+  GCounter replicas converge under reordered delta sync.
+
+- **GC-during-send DST scenario.** The deterministic scheduler now
+  pumps GC on the production cadence (deferred frees mid-run,
+  foreign-ref decrements + deferred retry at quiescence) — the DST path
+  previously never applied `process_gc_ops`, so heap-churn scenarios
+  could not run. New 60-seed sweep: nested heap-array trees sent across
+  actors with in-flight foreign bumps, receiver holds, deferred frees,
+  and seed-permuted GC interleavings; every seed delivers intact
+  contents with exactly the held set of live objects (no premature
+  free, no leak).
+
+- **Node-crash DST scenario.** `DeterministicCluster::crash_node`/
+  `restart_node` model a hard crash + fresh-node restart (skipped from
+  the pump, links cut, Runtime replaced with the same node id). New
+  20-seed sweep: survivors mark the crashed node `Failed` through the
+  real virtual-clock failure detector, the restarted node rejoins
+  through a survivor, the cluster reconverges, and a remote message
+  delivers to an actor on the restarted node — the seed-sweepable,
+  sleep-free counterpart of the real-TCP crash/rejoin test.
+
+- **CRDT-sync-race DST scenario.** `DeterministicCluster` now drives
+  `rt.sync_crdts()` per round (the harness models a Rust embedder — CRDT
+  replication stays an embedder API per SPEC2 §12.5, deliberately not
+  auto-driven by the production loop). New 40-seed sweep: a GCounter
+  minted on node A must appear on node B via the round-1 full-state
+  sync, both nodes increment local replicas under seed-permuted
+  interleavings, and both replicas converge to the summed total on
+  every seed (no lost update).
+
+- **DST seed sweeps are env-scalable; nightly 10⁴-seed job wired.**
+  `src/dst.rs::dst_seed_count` reads `NULANG_DST_SEEDS` (defaults:
+  2000 single-node, 50 cluster, 30 cross-shard in-suite).
+  `.github/workflows/dst-nightly.yml` runs the sweeps at 10⁴ seeds on a
+  nightly schedule + manual dispatch, failing loudly on any invariant
+  violation (quiescence, AtMostOnce delivery, cluster convergence) —
+  the PLAN.md Phase 1 bullet 2 "10⁴-seeds-per-commit" deliverable.
+
+- **Cluster/network determinism (DST).** The deterministic harness now
+  drives multi-node clusters of real `Runtime`s with no wall-clock reads
+  affecting state: `Runtime::enable_distribution_with_transport` accepts
+  any transport (the in-memory `DeterministicNetworkTransport` for tests);
+  `ClusterState::set_rng` seeds gossip/repair picks; the deterministic
+  scheduler drains cross-shard channels and takes a caller-owned RNG
+  (`run_scheduler_deterministic_with_rng`); heartbeat wire timestamps
+  come from the virtual clock when one is installed. `DeterministicCluster`
+  (test-gated `src/runtime/cluster_dst.rs`) pumps N nodes with lockstep
+  virtual clocks and one seed-permuted node order. New tests: same-seed
+  bit-reproducible evolution, 50-seed remote AtMostOnce delivery sweep,
+  3-node partition→Failed→heal→deliver through the real failure detector,
+  30-seed cross-shard delivery sweep. PLAN.md Phase 1 bullet 2 (DST)
+  cluster/network determinism closed.
+
+- **Value-level capability constructors for every reference capability.**
+  `&cap expr` now constructs a reference with the requested capability for
+  all eight capabilities (`&iso`, `&trn`, `&val`, `&box`, `&tag`,
+  `&ref`, `&lineariso`, `&linear`); bare `&expr` remains `&ref`
+  (backward compatible). Previously `&expr` always produced a `ref`
+  reference while `&iso T`/`&val T`/`&trn T`/`&box T` were accepted in
+  annotations only — the capability system's biggest missing surface
+  (SPEC2 §3.9, PLAN.md "Gaps found by the doc pass" item 1). Semantics:
+  the unique constructors (`&lineariso`, `&linear`, `&iso`, `&trn`) move a
+  bare-variable operand exactly like `consume x` — a second `&iso x` on the
+  same binding is a capability error — while the shared constructors
+  (`&ref`, `&val`, `&box`, `&tag`) alias without consuming. Capabilities
+  are compile-time only, so every constructor erases to a plain value move
+  at runtime (`OpCode::Move`). The formatter now prints `&cap` (previously
+  every `&`-expression formatted as `ref`, breaking round-trips). Pinned by
+  parser/analyzer/integration tests and differential-corpus entries.
+
 ### Added since 1.0.0-frozen — 2026-08-13
 
 - **`lineariso`/`linear` capability annotations now parse.** The lexer emits

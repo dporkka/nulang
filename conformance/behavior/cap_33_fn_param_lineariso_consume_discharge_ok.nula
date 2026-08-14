@@ -1,0 +1,8 @@
+fn use_once(lineariso x: Int) {
+    let y = consume x
+    perform IO.print(y)
+}
+fn main() {
+    use_once(42)
+    unit
+}

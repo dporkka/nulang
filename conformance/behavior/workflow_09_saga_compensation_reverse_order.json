@@ -1,1 +1,1 @@
-{ "exit_code": 0, "stdout": "main-done\nreserved\ncharged\nrefunded\nreleased" }
+{"exit_code": 1, "stdout": "main-done\nreserved\ncharged\nrefunded\nreleased", "stderr": "non-exhaustive match.raise"}

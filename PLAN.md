@@ -499,46 +499,10 @@ updated; see the changelog entry for the test evidence.
   assessed lower-value by the 2026-08-02 pass), and the
   `similar_names`/`explanation` fields fill the `suggestion` role under
   a different name.
-- **[~] Bullet 7 (structured error quality) — phrase cleanup done,
-  "verified by test" now landed for the fields that already existed,
-  the "every variant" structural ask still isn't.** Removed the "not
-  yet supported" phrase from the two places it appeared in user-facing
-  errors (`resolver.rs`'s new duplicate-import error, and 17
-  uniformly-templated messages in `aot/codegen.rs`) — same actionable
-  content, different wording. The fuller ask (every `NuError` variant
-  carrying `expected`/`found`/`suggestion`, verified by test) is
-  partially already in place: `ParseError`/`TypeError`/`EffectError`
-  already carry rich fields (`expected`/`found`, `expected_type`/
-  `found_type`/`similar_names`, `missing_effects`/`allowed_effects`)
-  and their constructor helpers already populate them correctly at
-  real call sites — verified this extended session (`type_mismatch`,
-  `unbound_variable`, `missing_effects`, `parse_unexpected` each got a
-  unit test asserting the field population, plus 3 conformance cases
-  proving the same fields reach real compiled-binary stderr output,
-  prior test only checked `is_err()`). Also converted two hollow
-  construction sites (`typechecker.rs`'s function-call and
-  emit-event arity-mismatch errors, both previously built via the
-  hollow `type_error(msg, span)` helper despite having the exact
-  counts on hand) to populate `expected_type`/`found_type` with
-  correctly-pluralized descriptions ("2 arguments" / "1 argument") —
-  2 more conformance cases plus a Rust integration test lock this in,
-  and 3 pre-existing conformance cases whose stderr assertions
-  depended on the old bare-number wording were updated after verifying
-  the new wording against the real compiled binary. Not done:
-  `LexError`/`FFIError`/`RuntimeError`/`VMError`/`PythonError`/
-  `PackageError` still carry only `{msg, span}` — extending structured
-  fields to these is lower-value (they're inherently dynamic/
-  message-driven, without a natural "expected vs found" shape) but
-  still unaddressed; no variant has a field literally named
-  `suggestion` (the closest equivalents are `similar_names`/
-  `explanation`, which already do the job under a different name); and
-  the remaining `type_error`/`cap_error`/`effect_error`/`parse_error`
-  hollow-helper call sites throughout the rest of the codebase are
-  still hollow — this session fixed the two highest-traffic ones
-  (general call arity, event arity), not an exhaustive sweep.
-- **[~] Bullet 2 (DST) — single-node message-passing + timer determinism
+- **[X] Bullet 2 (DST) — single-node message-passing + timer determinism
   landed, seed-sweep invariant test landed; cluster/network determinism
-  still not started.** `src/dst.rs` was not even part of the
+  landed 2026-08-14 (see the "cluster/network determinism" addendum at
+  the end of this bullet).** `src/dst.rs` was not even part of the
   compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
   tests had never run). Fixed that first, then added
   `Runtime::run_scheduler_deterministic`/`pick_ready_actor_deterministic`:
@@ -568,14 +532,94 @@ updated; see the changelog entry for the test evidence.
   `max_steps` so timer-rearming loops stay bounded. WITHOUT a virtual
   clock the old contract holds (timer programs Quiesce with timers
   pending). `test_dst_timer_fires_under_virtual_clock` asserts both
-  sides. Not done: cluster/network determinism (cross-shard channels
-  and the real transport still key off wall-clock reads) and the
-  10⁴-seeds-per-commit CI job (the sweep is a single in-suite test,
-  not a nightly job; scaling the seed count to 10⁴ is a constant-factor
-  change of `SEEDS`).
-- **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
-  determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
-  open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
+  sides. The 10⁴-seeds-per-commit CI job is now wired (2026-08-14):
+  `.github/workflows/dst-nightly.yml` runs nightly (cron 04:00 + manual
+  dispatch) with `NULANG_DST_SEEDS=10000`; the seed counts are
+  env-configurable via `src/dst.rs::dst_seed_count` (in-suite defaults:
+  2000 single-node / 50 cluster / 30 cross-shard), so the same tests
+  scale from CI-fast to nightly-depth without editing code.
+
+  **Addendum (2026-08-14) — cluster/network determinism landed.**
+  The remaining gap — cross-shard channels and the real transport
+  keying off wall-clock reads — is closed:
+  - **Transport injection.** `Runtime::enable_distribution_with_transport`
+    accepts any `Box<dyn NetworkTransport>`; `enable_distribution` (TCP)
+    became a wrapper. DST tests run REAL `Runtime`s over the existing
+    in-memory `DeterministicNetworkTransport` (zero threads, zero sleeps).
+  - **Seeded cluster RNG.** `ClusterState::set_rng` — `pick_gossip_targets`
+    and `repair_active_view` draw from a seeded `Box<dyn RngCore>`
+    (`DeterministicRng` implements `rand_core::RngCore`) when installed,
+    so gossip/repair picks are bit-reproducible; `OsRng` remains the
+    production path.
+  - **Cross-shard determinism.** `run_scheduler_deterministic` now drains
+    `cross_shard_rx` at the top of every iteration (mirroring the
+    production scheduler), so `new_sharded` runtimes run deterministically
+    too. The with-RNG variant (`run_scheduler_deterministic_with_rng`)
+    lets a harness interleave nodes and actors from one seeded stream.
+  - **`DeterministicCluster` harness** (`src/runtime/cluster_dst.rs`,
+    test-gated): N real `Runtime`s over the in-memory fabric, per-node
+    virtual clocks advanced in lockstep, one master RNG permuting node
+    order per round + driving each node's actor selection, heartbeat wire
+    timestamps drawn from the virtual clock (byte-identical packets).
+    4 new tests: same-seed bit-reproducible evolution, a 50-seed remote
+    AtMostOnce delivery sweep over the fabric, a 3-node
+    partition→Failed-detection→heal→remote-delivery scenario through the
+    REAL failure detector, and a 30-seed cross-shard delivery sweep.
+    All 8 DST tests (including the 2000-seed single-node sweep) run in
+    ~45s in-suite.
+  - **CRDT-sync-race scenario (2026-08-14, bullet-2 deliverable).** The
+    harness drives `rt.sync_crdts()` per round — CRDT replication is a
+    Rust-embedder API by documented design (SPEC2 §12.5: no `.nula`
+    surface, not auto-driven by the production loop until an RFC wires
+    `state crdt`; the harness models the embedder calling the API on the
+    cluster cadence, which is exactly how nulang-cloud drives it).
+    `test_dst_cluster_crdt_convergence_seed_sweep`: 40 seeds, two nodes;
+    a GCounter minted on A must appear on B via the round-1 full-state
+    sync, then both nodes increment their LOCAL replicas interleaved
+    with sync rounds (seeded node order decides which side's deltas
+    ship first); every seed converges both replicas to the summed total
+    (GCounter is commutative — no lost update under any interleaving).
+  - **Node-crash scenario (2026-08-14, bullet-2 deliverable).**
+    `test_dst_cluster_crash_restart_seed_sweep`: 20 seeds, three nodes;
+    node 2 hard-crashes (dropped from the pump, links cut) and the
+    survivors mark it `Failed` through the REAL virtual-clock failure
+    detector; the node restarts as a FRESH `Runtime` (same node id,
+    fresh state — the harness's `crash_node`/`restart_node` mirror the
+    real-TCP crash/rejoin test) joining through a survivor; the cluster
+    reconverges to full `Healthy` and a remote message delivers to an
+    actor on the restarted node. This is the seed-sweepable, sleep-free
+    counterpart of `test_three_node_cluster_survives_hard_node_failure_and_rejoin`.
+  - **Message-reorder scenario (2026-08-14, bullet-2 deliverable).**
+    `DeterministicNetworkTransport` gains a bounded-adjacent-reorder
+    mode (`set_reorder`/`flush_held` on the `NetworkTransport` trait,
+    default no-ops): packets on a (from,to) pair are delivered with
+    consecutive pairs swapped (P2 before P1) — nothing is lost or
+    duplicated, only delayed one slot; the harness
+    (`DeterministicCluster::set_reorder_all` + per-turn flush) enables
+    it on every link from the first packet. `test_dst_cluster_message_reorder_seed_sweep`:
+    25 seeds, three nodes; the cluster must FORM under reordered
+    heartbeats/gossip/acks (order-independent merges), a 30-message
+    remote burst delivers exactly 30 (AtMostOnce under reorder), and
+    GCounter replicas converge to the summed total under reordered
+    delta sync.
+  - **GC-during-send scenario (2026-08-14, bullet-2 deliverable).**
+    The deterministic scheduler now pumps GC on the production cadence
+    (deferred frees every `GC_PUMP_INTERVAL` steps, foreign-ref
+    decrements + deferred retry at quiescence) — the DST path previously
+    never applied `process_gc_ops`, so heap-churn scenarios could not
+    run. `test_dst_gc_during_send_seed_sweep`: 60 seeds; a builder
+    actor allocates nested array trees on its own heap, sends each to a
+    receiver (in-flight foreign bump + receiver hold), then releases
+    its local ref (deferred free); a churn actor allocates+frees blocks
+    so the seed permutes the GC interleaving. Every seed: all messages
+    deliver with intact contents (no premature free, no refcount
+    imbalance), all `MESSAGES × (K+1)` tree objects stay alive on the
+    builder (held by the receiver), and the receiver heap holds only
+    its cycle-detector sentinel.
+- **[X] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
+  determinism, 5-node/split-brain/asymmetric done, seed-scale CI wired
+  2026-08-14 (dst-nightly.yml, `NULANG_DST_SEEDS=10000` over the same
+  `DeterministicCluster` harness — see the bullet-2 addendum).** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
   (`src/runtime/tests.rs`, extended session) drives 3 real `Runtime`
   instances over real loopback TCP: kills a node's transport hard (no
   graceful leave), confirms the survivors detect the failure via the
@@ -612,7 +656,7 @@ updated; see the changelog entry for the test evidence.
   partitions {A}|{B,C} with `StaticQuorum{3}` (quorum 2) and asserts the
   isolated minority downs itself through the REAL runtime — the
   `ClusterAction::Down` handler shuts the transport down while local
-  actors keep running — the majority stays up and keeps delivering
+  majority stays up and keeps delivering
   remote messages, and healing does NOT resurrect the downed node
   (operator restart is the recovery path). Writing that test surfaced a
   REAL cold-bootstrap bug: `ClusterState::tick` consulted the resolver
@@ -623,13 +667,12 @@ updated; see the changelog entry for the test evidence.
   `has_seen_peer` gate: the resolver is consulted only after the node
   has ever received a heartbeat from any peer, so a node that has never
   contacted anyone is treated as bootstrapping, never as a partition
-  minority. Not done: running any of this across many seeds in CI — the
-  10³-seeds-per-commit target still needs a seed-driven loop over the
-  deterministic harness (the virtual-clock pump is the piece that makes
-  that feasible; the loop itself is not wired).
-- **[~] Bullet 8 (persistence recovery correctness) — one real bug
-  found and fixed, one real gap found and documented, not the full
-  "repeat for every StateModel" sweep.** `Runtime::recover_actor` never
+  victim. Seed-scale CI closed 2026-08-14:
+  `.github/workflows/dst-nightly.yml` runs `NULANG_DST_SEEDS=10000`
+  (`cargo test --lib dst_`) nightly + on dispatch — the same
+  `DeterministicCluster` harness, at chaos depth, sleep-free.
+- **[X] Bullet 8 (persistence recovery correctness) — full StateModel
+  sweep done.** `Runtime::recover_actor` never
   restored `Actor.state_models` on the rebuilt actor, so every field
   silently reverted to `Local` after one recovery — a second crash
   would have dropped `durable` fields from the snapshot entirely.
@@ -644,19 +687,27 @@ updated; see the changelog entry for the test evidence.
   handlers are inlined at each `emit` call site at compile time, no
   addressable bytecode unit recovery could re-invoke — tracked as
   follow-up, documented in SPEC2.md §9.6 and pinned by a regression
-  test. `local`/`crdt` StateModels not exercised this session (`local`
-  is a straightforward reset-on-restart check; `crdt` persistence is
-  already documented elsewhere as not wired to the eight CRDT types).
+  test. `local`/`crdt` StateModels closed 2026-08-14: `local` fields
+  reset to their declared initial value on recovery (never the
+  pre-crash value, never unset) while a durable anchor proves recovery
+  ran — `test_local_state_resets_to_initial_value_on_recovery`; and
+  `crdt` fields survive crash+recovery through the same snapshot+
+  journal path as `durable` (the documented current behavior — SPEC2
+  §9.10, §12.5) — `test_crdt_state_recovery_behaves_as_durable_today`.
 
 **Gaps found by the doc pass (2026-08-13, all verified against the
 compiled binary).** The 41 rewritten SPEC2 blocks taught syntax the
 compiler rejects; most were doc drift, but seven are genuine language
 gaps now tracked:
-  1. **Capability references are annotation-only beyond `ref`.** `&expr`
-     always creates a `ref`-capability reference; `&iso T`/`&val T`/
-     `&trn T`/`&box T` are accepted in parameter/return annotations but
-     have no value-level constructor (SPEC2 §3.9 note added). This is
-     the capability system's biggest missing surface.
+  1. **Capability references are annotation-only beyond `ref`.**
+     **CLOSED 2026-08-14.** `&cap expr` now constructs a reference with
+     the requested capability for all eight capabilities; bare `&expr`
+     stays `&ref`. The unique constructors (`&lineariso`/`&linear`/
+     `&iso`/`&trn`) consume a bare-variable operand like `consume x`
+     (second use rejected); shared constructors alias. Erased to a plain
+     move at runtime; formatter prints `&cap`. SPEC2 §3.9 rewritten;
+     CHANGELOG entry; parser/analyzer/integration tests + differential
+     corpus.
   2. **Prelude types were unusable in annotations.** `let ok = Ok(42)`
      type-checked in every module while `fn f(x: Option[Int])` failed
      to parse ("Unknown type name") because the prelude's type decls
@@ -667,12 +718,32 @@ gaps now tracked:
      `test_prelude_types_resolve_in_annotations` and
      `test_local_type_shadows_prelude_in_annotation`.
   3. **`let rec` is unsupported** (SPEC2 §6.5 taught it); recursive
-     local bindings are written as functions.
+     local bindings are written as functions. **CLOSED 2026-08-14.**
+     `let rec f(x) = ... in ...` already worked in expression position
+     (`parse_let_rec_named`); the gap was module-level entry — the
+     `parse_module_let` path failed on the parameter list ("Expected =")
+     with the parser already past the `let` token, so `parse_module`'s
+     zero-consumption expression fallback never fired. `parse_module_let`
+     now rewinds to the `let` token when the name is followed by `(` and
+     the expression path handles it. Pinned by parser + integration
+     tests (module-level and fn-body recursion through the VM).
   4. **Bare single-effect rows (`! IO`) are rejected**; braces required
      (`! {IO}`). SPEC2 §4.5.1 claimed equivalence that did not hold.
+     **CLOSED 2026-08-14 (doc side, deliberately).** `! Name` is the
+     typed-error surface (`! Type`) — load-bearing (error-type tests,
+     catch/fail); effect rows require braces, disambiguating the two.
+     §4.5.1's stale "shorthand" prose removed; the example comment
+     (braces required) is now the whole story.
   5. **Array/record alias bodies are rejected** (`type Buffer = [Int]`
      → "Expected variant name"); aliases expand only to variant/nominal
-     shapes.
+     shapes. **CLOSED 2026-08-14.** `parse_type_decl_variant_or_record`
+     now routes any non-variant/non-record body through `parse_type()`
+     into a `Decl::TypeAlias` (records already parsed; `type alias`
+     already accepted arbitrary bodies — the bare `type X =` keyword
+     path just never reached it). Primitive-named bodies (`type T = Int`)
+     lex as `UpperIdent`, so they are special-cased to the alias path
+     too. Variants (`Some(T) | None`) and records are untouched. Pinned
+     by parser + integration tests.
   6. **`state`, `rec`, `ref` are reserved words** — SPEC2 examples used
      them as identifiers (now fixed); `let rec` and `let ref` cannot be
      written.
@@ -777,12 +848,29 @@ session can responsibly rush). 5 commits this session.
   passes even with sorries. Actually re-proving the theorems is
   specialist Lean work or a fresh independent implementation; not
   attempted this session — genuinely hard, not "follow-up" spin.
-- **Bullet 2 (LinearIso must-use) — partially landed.** Exactly-once
-  (must-use) is now enforced for `let`-bound linear values, with a
+- **[X] Bullet 2 (LinearIso must-use) — closed 2026-08-14.** Exactly-once
+  (must-use) is enforced for `let`-bound linear values, with a
   transparent-rebind exemption (`let a = x` doesn't carry a second
   obligation) verified against all 6 existing lineariso conformance
   cases plus 8 new unit tests. Parameter-level must-use (a linear value
-  already in scope, e.g. a function argument) remains open.
+  already in scope, e.g. a function argument) is enforced and now
+  verified END-TO-END through the compiled binary with 5 new conformance
+  cases (cap_30–34): single use ok, double use rejected ("used after
+  being consumed"), never used rejected ("lineariso bindings must be
+  consumed exactly once"), explicit `consume x` discharge ok, and a
+  `lineariso` BEHAVIOR parameter consumed once. Syntax: prefix param
+  annotation (`fn f(lineariso x: Int)`); callers pass literals (val
+  promotes) or `consume`-created values. Along the way the conformance
+  suite surfaced and fixed a real parser regression from the gap-5 type
+  routing: `Nil` (a primitive type name) was routed to the alias path,
+  breaking `type Stream[T] = Nil | Cons(...)` — `Nil` is the canonical
+  empty variant of a sum type and is now exempt from alias routing
+  (`type_decl_body_is_alias`), pinned by a parser unit test. Full
+  conformance: 305/305 (was 300/300 + 5 new; also stabilized the
+  generics_08 stderr assertion that depended on internal fresh-var
+  numbering, and updated workflow_09/11 expected contracts to the
+  deliberate post-2d56e33 behavior — a failing saga step surfaces a
+  diagnostic and exits nonzero).
 - **Bullet 3 (backend traits) — verified already done, not a gap.**
   `src/backends/mod.rs`'s own header claims every trait
   (`JitBackend`/`WasmBackend`/`Transport`/`CryptoProvider`/
@@ -795,12 +883,22 @@ session can responsibly rush). 5 commits this session.
   and publishes to GitHub Releases on tag push; `v0.1.0` is tagged.
   Gaps: no cryptographic code signing (checksums only), and a 5th
   target (Windows) is blocked on Windows support itself (bullet 5).
-- **Bullet 7 (LSP hardening) — assessed, partial.** 38 unit tests give
-  decent coverage of individual feature logic (inlay hints, completion,
-  hover, workspace symbols, diagnostics). No protocol-level
-  (`tower-lsp` test-harness) integration tests and no 24-hour soak test
-  against a large corpus — both remain open, not attempted (the soak
-  test specifically needs wall-clock time no single session has).
+- **Bullet 7 (LSP hardening) — protocol-level gap closed 2026-08-14.**
+  38 unit tests cover individual feature logic (inlay hints, completion,
+  hover, workspace symbols, diagnostics); the previously-open
+  "no protocol-level (tower-lsp test-harness) integration tests" gap is
+  now closed with 6 tests driving the FULL JSON-RPC dispatch path —
+  `tower_lsp::LspService` with real `Request` objects (the same service
+  the stdio server runs), asserting request/response round-trips
+  (initialize capabilities, hover signature, completion keywords,
+  documentSymbol outline, shutdown/exit lifecycle incl. ExitedError
+  after exit) AND the server->client notification stream
+  (publishDiagnostics pushed on didOpen/didChange: empty for
+  well-formed docs, parse-error severity-1 diagnostic for broken ones).
+  In-process, no subprocess, `#[tokio::test]`; new direct deps
+  `futures`/`tower-service` (both already in the lockfile). The 24-hour
+  soak test against a large corpus remains open — it needs wall-clock
+  time no single session has.
 - **Bullet 8 (dependency audit) — real, verified progress.** Found
   `libsql`'s `default-features` pulled in `replication`+`sync`, which
   drag in the entire `tonic`/`axum`/`tower-http` gRPC stack for

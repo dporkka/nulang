@@ -6146,9 +6146,9 @@ fn test_dst_timer_fires_under_virtual_clock() {
 #[test]
 fn test_dst_seed_sweep_at_most_once_delivery() {
     const MESSAGES: i64 = 200;
-    const SEEDS: u64 = 2000;
+    let seeds = crate::dst::dst_seed_count(2000);
 
-    for seed in 0..SEEDS {
+    for seed in 0..seeds {
         let mut rt = Runtime::new();
         rt.install_virtual_clock();
 
@@ -6204,6 +6204,200 @@ fn test_dst_seed_sweep_at_most_once_delivery() {
         assert_eq!(
             count, MESSAGES,
             "seed {seed}: counter must reach exactly {MESSAGES} (AtMostOnce), got {count}"
+        );
+    }
+}
+
+/// PLAN.md Phase 1 bullet 2 (DST): GC-during-send scenario, seed-driven.
+/// Real actor heaps with real ORCA refcount deltas racing message sends.
+/// A builder actor allocates nested heap arrays on its own heap (via
+/// `heap.alloc`, slots holding counted refs transferred from the alloc),
+/// sends each tree to a receiver with `current_actor` set so the send
+/// path's `send_ref_to` bumps the in-flight foreign count, then releases
+/// its local reference (`drop_local_ref` → deferred free). The receiver
+/// pops the message, takes a receiver-side hold, and sums the array
+/// contents — a premature free or a refcount imbalance shows up as a
+/// wrong sum, a dangling read, or a double-decrement assert. A churn
+/// actor allocates+frees blocks so the seeded scheduler has a real
+/// choice of which actor to run next (the GC interleaving is what the
+/// seed permutes); the deterministic scheduler now pumps GC on the
+/// production cadence (deferred frees mid-run, foreign-ref decrements +
+/// deferred retry at quiescence). Invariants for every seed:
+///  1. The run quiesces (no deadlock/livelock).
+///  2. The receiver's count equals the exact summed contents of every
+///     array (every message delivered, every array intact at read time).
+///  3. Heap hygiene: every array tree is still alive on the builder
+///     (held by the receiver — nothing prematurely freed), exactly
+///     `MESSAGES * (K + 1)` objects; the receiver's own heap is empty.
+#[test]
+fn test_dst_gc_during_send_seed_sweep() {
+    use crate::runtime::heap::{ActorHeap, TypeTag};
+
+    const MESSAGES: usize = 40;
+    const K: usize = 4; // outer array elements
+    const INNER: usize = 2; // elements per inner array
+    let seeds = crate::dst::dst_seed_count(60);
+
+    for seed in 0..seeds {
+        let mut rt = Runtime::new();
+        rt.install_virtual_clock();
+
+        let builder = rt.spawn_actor(Box::new(|| vec![]));
+        let receiver = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
+        let churner = rt.spawn_actor(Box::new(|| vec![]));
+
+        {
+            let actor = rt.actors.get_mut(&churner).unwrap();
+            actor.register_behavior("churn", |actor, _args| {
+                // Allocate + immediately release a fresh block (bump path,
+                // size-class free list): pure allocation/free churn so the
+                // seeded scheduler has a real interleaving choice. Raw tag:
+                // free_object only slot-scans Array/Record/Tuple, so the
+                // uninitialized payload is never reinterpreted as Values.
+                if let Some(p) = actor.heap.alloc(64, TypeTag::Raw) {
+                    // SAFETY: p is a live allocation on this actor's heap
+                    // with exactly one local reference (the alloc).
+                    unsafe {
+                        actor.orca_gc.drop_local_ref(&mut actor.heap, p);
+                    }
+                }
+            });
+        }
+        {
+            let actor = rt.actors.get_mut(&receiver).unwrap();
+            actor.register_behavior("accum", |actor, args| {
+                let ptr = args.get(0).and_then(|v| v.as_ptr()).expect("payload array");
+                // SAFETY: the tree is alive — the sender's in-flight
+                // foreign bump plus the receiver-side hold (taken on pop)
+                // keep it live until this behavior reads it; header_of and
+                // the slot slices are pure pointer arithmetic over the
+                // uniform OrcaHeader layout. A refcount imbalance that
+                // freed the tree early shows up here as a wrong tag, a
+                // dangling inner pointer, or garbage element values.
+                unsafe {
+                    let h = &*ActorHeap::header_of(ptr);
+                    assert_eq!(h.type_tag, TypeTag::Array, "payload must be an array");
+                    let slots = std::slice::from_raw_parts(
+                        ptr as *const Value,
+                        h.payload_size / std::mem::size_of::<Value>(),
+                    );
+                    let mut sum = 0i64;
+                    for inner in slots {
+                        let ip = inner.as_ptr().expect("inner array");
+                        let ih = &*ActorHeap::header_of(ip);
+                        assert_eq!(ih.type_tag, TypeTag::Array, "slot must hold an array");
+                        let inner_slots = std::slice::from_raw_parts(
+                            ip as *const Value,
+                            ih.payload_size / std::mem::size_of::<Value>(),
+                        );
+                        for v in inner_slots {
+                            sum += v.as_int().expect("int element");
+                        }
+                    }
+                    let n = actor
+                        .get_state_field("count")
+                        .and_then(|v| v.as_int())
+                        .unwrap_or(0);
+                    actor.set_state_field("count", Value::int(n + sum));
+                }
+            });
+        }
+
+        // Pre-enqueue churn so the scheduler interleaves churn with pops.
+        for _ in 0..MESSAGES {
+            rt.send_message(churner, "churn", &[]);
+        }
+        // Build + send one nested tree per message.
+        for i in 0..MESSAGES {
+            let outer = {
+                let actor = rt.actors.get_mut(&builder).unwrap();
+                let outer = actor
+                    .heap
+                    .alloc(K * std::mem::size_of::<Value>(), TypeTag::Array)
+                    .expect("outer alloc");
+                // SAFETY: fresh allocation; every slot is written below.
+                // Each inner array's alloc transfers its single counted
+                // reference to the slot it is stored in (the VM's
+                // ArrAlloc+ArrStore+Dot pattern balances to the same net
+                // state: one counted slot ref per element).
+                unsafe {
+                    let slots = std::slice::from_raw_parts_mut(outer as *mut Value, K);
+                    for (j, slot) in slots.iter_mut().enumerate() {
+                        let inner = actor
+                            .heap
+                            .alloc(INNER * std::mem::size_of::<Value>(), TypeTag::Array)
+                            .expect("inner alloc");
+                        let inner_slots =
+                            std::slice::from_raw_parts_mut(inner as *mut Value, INNER);
+                        for (x, islot) in inner_slots.iter_mut().enumerate() {
+                            *islot = Value::int((10 * (i * K + j) + x) as i64);
+                        }
+                        *slot = Value::ptr(inner);
+                    }
+                }
+                outer
+            };
+            // Send from the owner's context: `current_actor` gates the
+            // send path's `send_ref_to` (bumps the in-flight foreign
+            // count so the tree survives until the receiver pops+holds).
+            rt.current_actor = Some(builder);
+            rt.send_message(receiver, "accum", &[Value::ptr(outer)]);
+            rt.current_actor = None;
+            // The builder releases its local reference after the send;
+            // the in-flight bump defers the free until the receiver's
+            // decrement lands at quiescence.
+            let actor = rt.actors.get_mut(&builder).unwrap();
+            // SAFETY: outer is a live allocation owned by this actor with
+            // exactly one local reference (the builder's).
+            unsafe {
+                actor.orca_gc.drop_local_ref(&mut actor.heap, outer);
+            }
+        }
+
+        let result = rt.run_scheduler_deterministic(seed, 100_000);
+        match result {
+            crate::runtime::DeterministicRunResult::Quiescent { steps } => {
+                assert!(
+                    steps > 0,
+                    "seed {seed}: run must make progress (messages enqueued)"
+                );
+            }
+            crate::runtime::DeterministicRunResult::StepLimitExceeded { steps } => {
+                panic!("seed {seed}: StepLimitExceeded after {steps} steps — possible deadlock/livelock");
+            }
+        }
+
+        let count = rt
+            .actors
+            .get(&receiver)
+            .and_then(|a| a.get_state_field("count"))
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1);
+        let mut expected = 0i64;
+        for i in 0..MESSAGES {
+            for j in 0..K {
+                for x in 0..INNER {
+                    expected += (10 * (i * K + j) + x) as i64;
+                }
+            }
+        }
+        assert_eq!(
+            count, expected,
+            "seed {seed}: every message delivered with intact array contents, got {count}"
+        );
+        // Heap hygiene: every tree is still alive on the builder (held by
+        // the receiver — nothing prematurely freed, nothing leaked beyond
+        // the held set); the receiver's own heap was never touched.
+        assert_eq!(
+            rt.actors.get(&builder).unwrap().heap.live_count(),
+            MESSAGES * (K + 1),
+            "seed {seed}: all array trees must be alive and held (no premature free, no leak)"
+        );
+        assert_eq!(
+            rt.actors.get(&receiver).unwrap().heap.live_count(),
+            1,
+            "seed {seed}: receiver heap must hold only the lazily-allocated cycle-detector sentinel (one sticky Raw object), got {}",
+            rt.actors.get(&receiver).unwrap().heap.live_count()
         );
     }
 }

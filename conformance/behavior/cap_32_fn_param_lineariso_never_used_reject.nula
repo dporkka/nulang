@@ -1,0 +1,7 @@
+fn ignore(lineariso x: Int) {
+    unit
+}
+fn main() {
+    ignore(42)
+    unit
+}

@@ -1634,6 +1634,16 @@ pub trait NetworkTransport: Send {
     fn set_partition(&mut self, peers: HashSet<NodeId>) {
         let _ = peers;
     }
+    /// Enable bounded adjacent packet reordering on every link (DST
+    /// fault injection): consecutive packets to a peer can arrive
+    /// swapped — nothing is lost or duplicated, only delayed one slot.
+    /// Deterministic by construction (per-pair counter, no RNG).
+    /// Transports that cannot reorder leave this a no-op.
+    fn set_reorder(&mut self, _enabled: bool) {}
+    /// Deliver any packets still held by the bounded-reorder buffer
+    /// (called by the harness at the end of a node's turn so odd tails
+    /// are never stranded). Default: no-op.
+    fn flush_held(&mut self) {}
 }
 
 impl NetworkTransport for Box<dyn NetworkTransport> {
@@ -1666,6 +1676,12 @@ impl NetworkTransport for Box<dyn NetworkTransport> {
     }
     fn set_partition(&mut self, peers: HashSet<NodeId>) {
         (**self).set_partition(peers)
+    }
+    fn set_reorder(&mut self, enabled: bool) {
+        (**self).set_reorder(enabled)
+    }
+    fn flush_held(&mut self) {
+        (**self).flush_held()
     }
 }
 pub struct TcpTransport {
@@ -3253,6 +3269,12 @@ pub struct DeterministicNetworkTransport {
     /// Peers whose outbound packets are silently dropped (simulated
     /// partition, see [`NetworkTransport::set_partition`]).
     partition: HashSet<NodeId>,
+    /// Bounded-adjacent-reorder mode (see [`NetworkTransport::set_reorder`]):
+    /// when enabled, packets to a given peer are delivered with
+    /// consecutive pairs swapped — the receiver sees P2 before P1.
+    reorder: bool,
+    /// The held previous packet per target (reorder mode only).
+    held: HashMap<NodeId, IncomingPacket>,
 }
 
 impl Clone for DeterministicNetworkTransport {
@@ -3265,6 +3287,8 @@ impl Clone for DeterministicNetworkTransport {
             shared_bus: self.shared_bus.clone(),
             shutdown_flag: self.shutdown_flag.clone(),
             partition: HashSet::new(),
+            reorder: false,
+            held: HashMap::new(),
         }
     }
 }
@@ -3303,6 +3327,8 @@ impl DeterministicNetworkTransport {
             shared_bus,
             shutdown_flag,
             partition: HashSet::new(),
+            reorder: false,
+            held: HashMap::new(),
         })
     }
 
@@ -3340,7 +3366,41 @@ impl NetworkTransport for DeterministicNetworkTransport {
                 seq: 0,
                 packet,
             };
-            let _ = sender.try_send(incoming);
+            if self.reorder {
+                // Bounded adjacent reorder: hold the first packet of each
+                // pair; when the second arrives, deliver the NEW one first
+                // and then the held one — the receiver sees P2 before P1.
+                // Deterministic (per-pair state, no RNG); nothing is lost
+                // or duplicated, only delayed one slot. `flush_held`
+                // delivers the odd tail at the end of the sender's turn.
+                if let Some(held) = self.held.remove(&to_node) {
+                    let _ = sender.try_send(incoming);
+                    let _ = sender.try_send(held);
+                } else {
+                    self.held.insert(to_node, incoming);
+                }
+            } else {
+                let _ = sender.try_send(incoming);
+            }
+        }
+    }
+
+    fn flush_held(&mut self) {
+        // Drain into an owned Vec first: `held` is a field of `self`, and
+        // `get_incoming_sender` borrows `self` — draining while borrowing
+        // immutably would conflict.
+        let held: Vec<(NodeId, IncomingPacket)> = self.held.drain().collect();
+        for (to, pkt) in held {
+            if let Some(sender) = self.get_incoming_sender(to) {
+                let _ = sender.try_send(pkt);
+            }
+        }
+    }
+
+    fn set_reorder(&mut self, enabled: bool) {
+        self.reorder = enabled;
+        if !enabled {
+            self.held.clear();
         }
     }
 

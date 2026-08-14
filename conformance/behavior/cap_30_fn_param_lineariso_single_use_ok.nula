@@ -1,0 +1,7 @@
+fn use_once(lineariso x: Int) {
+    perform IO.print(x)
+}
+fn main() {
+    use_once(42)
+    unit
+}

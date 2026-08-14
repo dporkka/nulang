@@ -6,5 +6,12 @@ package «nulang-formal» {}
 @[default_target]
 lean_lib «Nulang» {
   srcDir := "."
-  roots := #[`Nulang]
+  -- The top-level `types`/`capabilities`/`effects` modules are the Core
+  -- soundness formalization (types.lean: HM typing + small-step semantics
+  -- + the progress/preservation/soundness chain); the `Nulang` root is the
+  -- newer type-language/capability-lattice/effect-row formalization.  Both
+  -- must be compiled: 89bd0d6 dropped the top-level roots from the default
+  -- target, orphaning the soundness proofs from `lake build` (they are back
+  -- since 2026-08-14).
+  roots := #[`Nulang, `types, `capabilities, `effects]
 }

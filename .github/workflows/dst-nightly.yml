@@ -1,0 +1,50 @@
+name: DST seed sweeps (nightly)
+
+# PLAN.md Phase 1 bullet 2 (DST) / bullet 4 (chaos): the
+# 10^4-seeds-per-commit invariant job. The in-suite sweeps run at
+# CI-friendly counts (2000 single-node, 50 cluster, 30 cross-shard);
+# NULANG_DST_SEEDS applies JOB-WIDE (see src/dst.rs::dst_seed_count), so
+# this job runs every sweep at 10^4 seeds:
+#   - test_dst_seed_sweep_at_most_once_delivery: 10^4 seeds x 200
+#     interleaved messages, asserting quiescence + exactly-200 delivery
+#     (AtMostOnce) on every run — real VM/GC/persistence, seed-driven
+#     scheduling.
+#   - test_dst_cluster_remote_delivery_seed_sweep: 10^4 seeds of 2 real
+#     Runtimes over the in-memory fabric, asserting cluster convergence,
+#     no step-limit hits, and exactly-30 remote deliveries.
+#   - test_dst_cross_shard_delivery_seed_sweep: 10^4 seeds of sharded
+#     Runtimes, asserting exactly-25 cross-shard deliveries.
+# Any invariant violation panics -> non-zero exit -> red job, exactly like
+# the fuzz-nightly job (PLAN.md: a violation here is a real runtime bug).
+
+on:
+  schedule:
+    # 04:00 UTC daily — off-peak, after the fuzz job (03:00).
+    - cron: "0 4 * * *"
+  workflow_dispatch: {} # allow manual runs for investigation
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dst-sweep:
+    name: DST seed sweep (10^4 seeds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: dst-sweep
+
+      - name: Run DST seed sweeps
+        env:
+          NULANG_DST_SEEDS: "10000"
+        run: cargo test --lib dst_
