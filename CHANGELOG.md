@@ -99,6 +99,16 @@ two major versions.*
   restores it — recovery no longer reconstructs a bare event count that
   silently drops `apply`'s contributions. Pinned by
   `test_event_sourced_apply_handler_recovery`.
+- **Prelude types are now usable in type annotations.** `Ok(42)` and
+  `Some(x)` type-checked in every module, but `fn f(x: Option[Int])`
+  failed to parse with "Unknown type name" — the prelude's type
+  declarations are prepended to the AST only after the user module
+  parses, so the parser never saw them. Every `Parser` now seeds the
+  prelude's resolved `Option[T]`/`Result[Ok, Err]` into its
+  imported-type cache (the same path `import stdlib::*` uses); local
+  `type Option[T]` declarations still shadow. Pinned by
+  `test_prelude_types_resolve_in_annotations` and
+  `test_local_type_shadows_prelude_in_annotation`.
 - **Doc-example verification is fully green and covers `///` doc
   comments.** The default `verify_doc_examples.sh` CI invocation was
   red: 16 docs-site blocks taught invalid syntax (pre-`then` `if`

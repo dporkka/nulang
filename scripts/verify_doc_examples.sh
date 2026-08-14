@@ -1,41 +1,27 @@
 #!/usr/bin/env bash
 # Verify all ```nulang code blocks in documentation.
-# Runs each block through --check (parse + type + effect checking).
+# Runs each block through --check (parse + type + effect checking) or
+# a full run when the block is a standalone program.
 #
-# Two sources are scanned:
-#   1. Markdown fences: docs/src/content/docs/**/*.{md,mdx} (the Astro
-#      docs site) by default -- unchanged behavior, matches the existing
-#      CI invocation in .github/workflows/ci.yml exactly -- plus the
-#      repo-root markdown files named in ROOT_DOCS below when
-#      NULANG_DOC_VERIFY_INCLUDE_ROOT=1.
-#   2. `///` doc comments in .nula source files (PLAN Phase 1 bullet 6:
-#      "every `///` doc comment" must compile+run). Repo-controlled
-#      content, so this pass is always on, not opt-in.
+# Sources scanned:
+#   1. Markdown fences in the Astro docs site
+#      (docs/src/content/docs/**/*.{md,mdx}) and the repo-root docs
+#      (SPEC2.md, README.md, docs/GETTING_STARTED.md, docs/TUTORIAL.md).
+#   2. `///` doc comments in .nula source files (PLAN Phase 1 bullet 6).
 #
-# Set NULANG_DOC_VERIFY_INCLUDE_ROOT=1 to additionally scan repo-root
-# markdown files that carry runnable examples (SPEC2.md, README.md,
-# docs/GETTING_STARTED.md, docs/TUTORIAL.md). This is opt-in, not
-# wired into the default/CI-blocking run yet: as of 2026-08-02, SPEC2.md
-# alone has dozens of blocks that are illustrative narrative fragments
-# (referencing a variable/type introduced in surrounding prose, not
-# redeclared in the fenced block itself -- e.g. "Unbound variable:
-# 'answer'") rather than standalone programs, which this script's
-# fragment-detection heuristic (is_runnable(), matching a handful of
-# declaration-keyword first lines) doesn't reliably catch. Sections
-# explicitly marked "— Planned" in their own heading ARE handled
-# (skipped, not failed) via chapter_planned/section_planned below --
-# that's a distinct, correctly-handled case from narrative fragments.
-# Run with the env var set to see the current gap directly; closing it
-# needs either a smarter fragment heuristic or rewriting the affected
-# examples to be self-contained, both out of scope for this pass.
+# Blocks that are intentionally NOT standalone programs are skipped via
+# explicit markers, never silently:
+#   - a `// fragment` comment line (illustrative snippet that references
+#     surrounding prose — SPEC2 narrative examples),
+#   - a REPL session (`nulang>` prompt),
+#   - a section whose own heading carries "— Planned" (aspirational
+#     syntax for a feature that does not exist yet; handles #, ## and
+#     ### headings).
 set -uo pipefail
 NULANG="${NULANG_BIN:-cargo run --quiet --}"
 
 DOCS_DIR="docs/src/content/docs"
-ROOT_DOCS=()
-if [[ "${NULANG_DOC_VERIFY_INCLUDE_ROOT:-0}" == "1" ]]; then
-    ROOT_DOCS=(SPEC2.md README.md docs/GETTING_STARTED.md docs/TUTORIAL.md)
-fi
+ROOT_DOCS=(SPEC2.md README.md docs/GETTING_STARTED.md docs/TUTORIAL.md)
 TMPDIR=$(mktemp -d)
 PASS=0
 FAIL=0
@@ -84,7 +70,7 @@ verify_file() {
                 chapter_planned=0
                 section_planned=0
                 [[ "$line" == *"Planned"* ]] && chapter_planned=1
-            elif [[ "$line" == "## "* ]]; then
+            elif [[ "$line" == "## "* || "$line" == "### "* ]]; then
                 section_planned=0
                 [[ "$line" == *"Planned"* ]] && section_planned=1
             fi
@@ -105,6 +91,12 @@ verify_file() {
             if is_repl "$block"; then
                 SKIP=$((SKIP + 1))
                 echo "  SKIP  $label (REPL session)"
+                continue
+            fi
+
+            if echo "$block" | grep -q '^// fragment'; then
+                SKIP=$((SKIP + 1))
+                echo "  SKIP  $label (illustrative fragment)"
                 continue
             fi
 
@@ -177,6 +169,12 @@ verify_nula_source() {
             if is_repl "$block"; then
                 SKIP=$((SKIP + 1))
                 echo "  SKIP  $label (REPL session)"
+                continue
+            fi
+
+            if echo "$block" | grep -q '^// fragment'; then
+                SKIP=$((SKIP + 1))
+                echo "  SKIP  $label (illustrative fragment)"
                 continue
             fi
 

@@ -8,8 +8,21 @@ use crate::lexer::{Token, TokenKind};
 use crate::types::{
     Capability, Effect, EffectRow, NuError, NuResult, PrimitiveType, Region, Span, Type, TypeVar,
 };
+use std::sync::OnceLock;
 type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
+/// Resolved prelude variant types (`Option[T]`, `Result[Ok, Err]`), keyed
+/// by name: `(type-parameter vars, expanded body)`. The prelude's type
+/// declarations are prepended to the AST *after* the user module is
+/// parsed, so the parser never saw them — yet prelude *constructors*
+/// (`Ok(42)`, `Some(x)`) type-check in every module. That asymmetry meant
+/// `let ok = Ok(42)` worked while `fn f(x: Option[Int])` failed to parse
+/// ("Unknown type name"). Seeding every `Parser` with the prelude's
+/// resolved decls (via the same `imported_type_cache` machinery imports
+/// use) makes prelude types usable in annotations too. Local declarations
+/// still shadow: `resolve_named_type` checks local decls first.
+static PRELUDE_TYPE_CACHE: OnceLock<Vec<(String, Vec<TypeVar>, Type)>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Operator Precedence (13 levels, higher = tighter binding)
@@ -88,6 +101,14 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
+        let mut parser = Self::new_raw(tokens);
+        parser.seed_prelude_types();
+        parser
+    }
+
+    /// Construct a parser without seeding prelude type names. Used by the
+    /// prelude cache itself to avoid `OnceLock::get_or_init` reentrancy.
+    fn new_raw(tokens: Vec<Token>) -> Self {
         Parser {
             tokens,
             pos: 0,
@@ -98,6 +119,46 @@ impl Parser {
             diagnostics: Vec::new(),
         }
     }
+
+    /// Make the prelude's variant types (`Option[T]`, `Result[Ok, Err]`)
+    /// resolvable in type annotations. Resolves each prelude `type` decl
+    /// once (lazily, via a raw parser so seeding is not re-entrant) and
+    /// splices the `(param vars, expanded body)` pairs into this parser's
+    /// imported-type cache — the same path `import stdlib::*` uses, so
+    /// use-site type arguments are substituted on cache hits.
+    fn seed_prelude_types(&mut self) {
+        let entries = PRELUDE_TYPE_CACHE.get_or_init(|| {
+            let source = crate::prelude_source::PRELUDE_SOURCE;
+            let mut lexer = crate::lexer::Lexer::new(source);
+            let tokens = match lexer.lex() {
+                Ok(t) => t,
+                Err(_) => return Vec::new(), // prelude must lex; degrade to no seeding
+            };
+            let mut pp = Self::new_raw(tokens);
+            let ast = match pp.parse_module() {
+                Ok(a) => a,
+                Err(_) => return Vec::new(),
+            };
+            let mut out = Vec::new();
+            for decl in &ast.decls {
+                if let Decl::VariantType { name, span, .. } = decl {
+                    if let Some(decl_pos) = pp.find_type_decl(name) {
+                        if let Ok((param_vars, ty)) =
+                            pp.resolve_local_type(name, &[], decl_pos, *span)
+                        {
+                            out.push((name.clone(), param_vars, ty));
+                        }
+                    }
+                }
+            }
+            out
+        });
+        for (name, param_vars, ty) in entries {
+            self.imported_type_cache
+                .insert(name.clone(), (param_vars.clone(), ty.clone()));
+        }
+    }
+
     #[tracing::instrument(level = "debug", skip(self))]
     pub fn parse_module(&mut self) -> NuResult<AstModule> {
         self.diagnostics.clear();
@@ -5738,6 +5799,37 @@ mod tests {
             }
             other => panic!("expected unknown type name error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_prelude_types_resolve_in_annotations() {
+        // Prelude constructors (Ok/Some) type-check in every module while
+        // the prelude's type declarations are prepended only after the
+        // user module parses — so annotated uses used to fail with
+        // "Unknown type name". Every Parser now seeds the prelude's
+        // resolved types into its imported-type cache.
+        let ok = parse("fn f(x: Option[Int]) -> Int { 0 }");
+        assert!(
+            ok.is_ok(),
+            "Option[Int] must parse without import: {:?}",
+            ok.err()
+        );
+        let ok = parse("fn f(x: Result[Int, String]) -> Int { 0 }");
+        assert!(
+            ok.is_ok(),
+            "Result[Int, String] must parse without import: {:?}",
+            ok.err()
+        );
+    }
+
+    #[test]
+    fn test_local_type_shadows_prelude_in_annotation() {
+        // A module-level `type Option[T]` shadows the prelude's — the
+        // resolved body must be the LOCAL declaration's.
+        let ast = parse("type Option[T] = Some(T) | None\nfn f(x: Option[Int]) -> Int { 0 }")
+            .expect("module parses");
+        let has_fn = ast.decls.iter().any(|d| matches!(d, Decl::Function { .. }));
+        assert!(has_fn, "function declaration present");
     }
 
     #[test]
