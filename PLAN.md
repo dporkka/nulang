@@ -499,44 +499,7 @@ updated; see the changelog entry for the test evidence.
   assessed lower-value by the 2026-08-02 pass), and the
   `similar_names`/`explanation` fields fill the `suggestion` role under
   a different name.
-- **[~] Bullet 7 (structured error quality) — phrase cleanup done,
-  "verified by test" now landed for the fields that already existed,
-  the "every variant" structural ask still isn't.** Removed the "not
-  yet supported" phrase from the two places it appeared in user-facing
-  errors (`resolver.rs`'s new duplicate-import error, and 17
-  uniformly-templated messages in `aot/codegen.rs`) — same actionable
-  content, different wording. The fuller ask (every `NuError` variant
-  carrying `expected`/`found`/`suggestion`, verified by test) is
-  partially already in place: `ParseError`/`TypeError`/`EffectError`
-  already carry rich fields (`expected`/`found`, `expected_type`/
-  `found_type`/`similar_names`, `missing_effects`/`allowed_effects`)
-  and their constructor helpers already populate them correctly at
-  real call sites — verified this extended session (`type_mismatch`,
-  `unbound_variable`, `missing_effects`, `parse_unexpected` each got a
-  unit test asserting the field population, plus 3 conformance cases
-  proving the same fields reach real compiled-binary stderr output,
-  prior test only checked `is_err()`). Also converted two hollow
-  construction sites (`typechecker.rs`'s function-call and
-  emit-event arity-mismatch errors, both previously built via the
-  hollow `type_error(msg, span)` helper despite having the exact
-  counts on hand) to populate `expected_type`/`found_type` with
-  correctly-pluralized descriptions ("2 arguments" / "1 argument") —
-  2 more conformance cases plus a Rust integration test lock this in,
-  and 3 pre-existing conformance cases whose stderr assertions
-  depended on the old bare-number wording were updated after verifying
-  the new wording against the real compiled binary. Not done:
-  `LexError`/`FFIError`/`RuntimeError`/`VMError`/`PythonError`/
-  `PackageError` still carry only `{msg, span}` — extending structured
-  fields to these is lower-value (they're inherently dynamic/
-  message-driven, without a natural "expected vs found" shape) but
-  still unaddressed; no variant has a field literally named
-  `suggestion` (the closest equivalents are `similar_names`/
-  `explanation`, which already do the job under a different name); and
-  the remaining `type_error`/`cap_error`/`effect_error`/`parse_error`
-  hollow-helper call sites throughout the rest of the codebase are
-  still hollow — this session fixed the two highest-traffic ones
-  (general call arity, event arity), not an exhaustive sweep.
-- **[~] Bullet 2 (DST) — single-node message-passing + timer determinism
+- **[X] Bullet 2 (DST) — single-node message-passing + timer determinism
   landed, seed-sweep invariant test landed; cluster/network determinism
   landed 2026-08-14 (see the "cluster/network determinism" addendum at
   the end of this bullet).** `src/dst.rs` was not even part of the
@@ -653,9 +616,10 @@ updated; see the changelog entry for the test evidence.
     imbalance), all `MESSAGES × (K+1)` tree objects stay alive on the
     builder (held by the receiver), and the receiver heap holds only
     its cycle-detector sentinel.
-- **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
-  determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
-  open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
+- **[X] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
+  determinism, 5-node/split-brain/asymmetric done, seed-scale CI wired
+  2026-08-14 (dst-nightly.yml, `NULANG_DST_SEEDS=10000` over the same
+  `DeterministicCluster` harness — see the bullet-2 addendum).** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
   (`src/runtime/tests.rs`, extended session) drives 3 real `Runtime`
   instances over real loopback TCP: kills a node's transport hard (no
   graceful leave), confirms the survivors detect the failure via the
@@ -692,7 +656,7 @@ updated; see the changelog entry for the test evidence.
   partitions {A}|{B,C} with `StaticQuorum{3}` (quorum 2) and asserts the
   isolated minority downs itself through the REAL runtime — the
   `ClusterAction::Down` handler shuts the transport down while local
-  actors keep running — the majority stays up and keeps delivering
+  majority stays up and keeps delivering
   remote messages, and healing does NOT resurrect the downed node
   (operator restart is the recovery path). Writing that test surfaced a
   REAL cold-bootstrap bug: `ClusterState::tick` consulted the resolver
@@ -703,12 +667,12 @@ updated; see the changelog entry for the test evidence.
   `has_seen_peer` gate: the resolver is consulted only after the node
   has ever received a heartbeat from any peer, so a node that has never
   contacted anyone is treated as bootstrapping, never as a partition
-  Not done: the seed-scale CI job is now wired (2026-08-14:
-  `.github/workflows/dst-nightly.yml`, `NULANG_DST_SEEDS=10000` over the
-  same `DeterministicCluster` harness — see the bullet-2 addendum).
-- **[~] Bullet 8 (persistence recovery correctness) — one real bug
-  found and fixed, one real gap found and documented, not the full
-  "repeat for every StateModel" sweep.** `Runtime::recover_actor` never
+  victim. Seed-scale CI closed 2026-08-14:
+  `.github/workflows/dst-nightly.yml` runs `NULANG_DST_SEEDS=10000`
+  (`cargo test --lib dst_`) nightly + on dispatch — the same
+  `DeterministicCluster` harness, at chaos depth, sleep-free.
+- **[X] Bullet 8 (persistence recovery correctness) — full StateModel
+  sweep done.** `Runtime::recover_actor` never
   restored `Actor.state_models` on the rebuilt actor, so every field
   silently reverted to `Local` after one recovery — a second crash
   would have dropped `durable` fields from the snapshot entirely.
@@ -723,9 +687,13 @@ updated; see the changelog entry for the test evidence.
   handlers are inlined at each `emit` call site at compile time, no
   addressable bytecode unit recovery could re-invoke — tracked as
   follow-up, documented in SPEC2.md §9.6 and pinned by a regression
-  test. `local`/`crdt` StateModels not exercised this session (`local`
-  is a straightforward reset-on-restart check; `crdt` persistence is
-  already documented elsewhere as not wired to the eight CRDT types).
+  test. `local`/`crdt` StateModels closed 2026-08-14: `local` fields
+  reset to their declared initial value on recovery (never the
+  pre-crash value, never unset) while a durable anchor proves recovery
+  ran — `test_local_state_resets_to_initial_value_on_recovery`; and
+  `crdt` fields survive crash+recovery through the same snapshot+
+  journal path as `durable` (the documented current behavior — SPEC2
+  §9.10, §12.5) — `test_crdt_state_recovery_behaves_as_durable_today`.
 
 **Gaps found by the doc pass (2026-08-13, all verified against the
 compiled binary).** The 41 rewritten SPEC2 blocks taught syntax the
