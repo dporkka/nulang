@@ -63,6 +63,15 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **CRDT-sync-race DST scenario.** `DeterministicCluster` now drives
+  `rt.sync_crdts()` per round (the harness models a Rust embedder — CRDT
+  replication stays an embedder API per SPEC2 §12.5, deliberately not
+  auto-driven by the production loop). New 40-seed sweep: a GCounter
+  minted on node A must appear on node B via the round-1 full-state
+  sync, both nodes increment local replicas under seed-permuted
+  interleavings, and both replicas converge to the summed total on
+  every seed (no lost update).
+
 - **DST seed sweeps are env-scalable; nightly 10⁴-seed job wired.**
   `src/dst.rs::dst_seed_count` reads `NULANG_DST_SEEDS` (defaults:
   2000 single-node, 50 cluster, 30 cross-shard in-suite).

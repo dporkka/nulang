@@ -604,6 +604,18 @@ updated; see the changelog entry for the test evidence.
     REAL failure detector, and a 30-seed cross-shard delivery sweep.
     All 8 DST tests (including the 2000-seed single-node sweep) run in
     ~45s in-suite.
+  - **CRDT-sync-race scenario (2026-08-14, bullet-2 deliverable).** The
+    harness drives `rt.sync_crdts()` per round — CRDT replication is a
+    Rust-embedder API by documented design (SPEC2 §12.5: no `.nula`
+    surface, not auto-driven by the production loop until an RFC wires
+    `state crdt`; the harness models the embedder calling the API on the
+    cluster cadence, which is exactly how nulang-cloud drives it).
+    `test_dst_cluster_crdt_convergence_seed_sweep`: 40 seeds, two nodes;
+    a GCounter minted on A must appear on B via the round-1 full-state
+    sync, then both nodes increment their LOCAL replicas interleaved
+    with sync rounds (seeded node order decides which side's deltas
+    ship first); every seed converges both replicas to the summed total
+    (GCounter is commutative — no lost update under any interleaving).
 - **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
   determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
   open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`

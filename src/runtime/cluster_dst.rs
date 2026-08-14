@@ -171,6 +171,12 @@ impl DeterministicCluster {
             let rt = &mut self.nodes[idx];
             rt.advance_time(ROUND_STEP);
             rt.process_network();
+            // CRDT delta/full-state sync to healthy members, driven on the
+            // cluster cadence exactly as a Rust embedder drives it
+            // (`Runtime::sync_crdts` is deliberately NOT auto-called by
+            // the production loop — SPEC2 §12.5 documents it as an
+            // embedder API; the harness models the embedder).
+            rt.sync_crdts();
             let result = rt.run_scheduler_deterministic_with_rng(&mut self.rng, STEPS_BUDGET);
             if matches!(
                 result,
@@ -552,6 +558,103 @@ mod tests {
             assert_eq!(
                 count, MESSAGES,
                 "seed {seed}: cross-shard counter must reach exactly {MESSAGES}, got {count}"
+            );
+        }
+    }
+
+    /// PLAN.md Phase 1 bullet 2 (DST): CRDT-sync-race scenario, seed-driven.
+    /// Two real nodes over the in-memory fabric with per-round
+    /// `sync_crdts` driven by the harness (CRDT replication is a
+    /// Rust-embedder API per SPEC2 §12.5 — the harness calls it the way
+    /// an embedder would, on the cluster cadence). A GCounter is
+    /// created on node A; the round-1 full-state sync must create the
+    /// replica on node B. Both nodes then increment their LOCAL replicas
+    /// repeatedly, interleaved with sync rounds — which node's increment
+    /// ships first is part of what the seed permutes. Invariants for every
+    /// seed:
+    ///  1. Full-state sync actually creates the entry on the receiver
+    ///     (node B's manager has the counter).
+    ///  2. Both replicas converge to the same value.
+    ///  3. The converged value is the SUM of every increment on both nodes
+    ///     (GCounter is commutative — no lost update under any
+    ///     interleaving).
+    #[test]
+    fn test_dst_cluster_crdt_convergence_seed_sweep() {
+        const SEEDS: u64 = 40;
+        const ROUNDS: u64 = 60;
+        const A_INCS: u64 = 3;
+        const B_INCS: u64 = 4;
+
+        for seed in 0..SEEDS {
+            let mut cluster = DeterministicCluster::new(&[addr(9131), addr(9132)], seed);
+            cluster.run_rounds(20); // converge membership before CRDT sync
+
+            let counter_id = {
+                let a = &mut cluster.nodes[0];
+                a.crdt_manager.as_mut().unwrap().create_gcounter().0
+            };
+            let counter_value = |rt: &mut Runtime| -> Option<u64> {
+                rt.crdt_manager
+                    .as_mut()
+                    .and_then(|m| m.get_gcounter_mut(counter_id))
+                    .map(|c| c.value())
+            };
+
+            // Interleave local increments from both sides with sync
+            // rounds: the seeded node order decides which side's deltas
+            // reach the other first.
+            let mut a_inc = 0u64;
+            let mut b_inc = 0u64;
+            let mut b_created = false;
+            for _ in 0..ROUNDS {
+                cluster.step_round();
+                if !b_created && counter_value(&mut cluster.nodes[1]).is_some() {
+                    b_created = true; // full-state sync created B's replica
+                }
+                if a_inc < A_INCS {
+                    cluster.nodes[0]
+                        .crdt_manager
+                        .as_mut()
+                        .unwrap()
+                        .get_gcounter_mut(counter_id)
+                        .unwrap()
+                        .increment();
+                    a_inc += 1;
+                }
+                if b_created && b_inc < B_INCS {
+                    cluster.nodes[1]
+                        .crdt_manager
+                        .as_mut()
+                        .unwrap()
+                        .get_gcounter_mut(counter_id)
+                        .unwrap()
+                        .increment();
+                    b_inc += 1;
+                }
+            }
+
+            assert!(
+                b_created,
+                "seed {seed}: full-state CRDT sync must create the replica on node B"
+            );
+            let va = counter_value(&mut cluster.nodes[0]).unwrap_or(0);
+            let vb = counter_value(&mut cluster.nodes[1]).unwrap_or(0);
+            let expected = A_INCS + B_INCS;
+            assert_eq!(
+                va, expected,
+                "seed {seed}: node A replica must converge to the sum of all increments"
+            );
+            assert_eq!(
+                vb, expected,
+                "seed {seed}: node B replica must converge to the sum of all increments"
+            );
+            assert_eq!(
+                va, vb,
+                "seed {seed}: replicas must converge to the same value"
+            );
+            assert_eq!(
+                cluster.limit_hits, 0,
+                "seed {seed}: step budget exceeded — possible deadlock"
             );
         }
     }
