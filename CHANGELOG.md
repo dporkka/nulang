@@ -78,6 +78,15 @@ two major versions.*
   state after a normal finish, so a blind re-capture re-stalled the
   actor (the residual hang this fix closes). Pinned by
   `test_workflow_timer_sleep_single_arg_resumes`.
+- **Saga compensation and workflow step dispatch no longer shift when a
+  plain `actor` is declared before a `workflow` in the same module.**
+  Compensation pairs now carry the step's absolute (whole-module)
+  behavior index, and a workflow actor's `bytecode_offsets` are
+  compressed to its own steps (local ids 0..step_count-1, matching
+  `layout_workflow_behavior_table`) instead of the module's full list —
+  previously the first step ran the preceding actor's first behavior and
+  its compensation was patched onto the wrong behavior, silently. Pinned
+  by `test_saga_compensation_ignores_non_workflow_actors`.
 - **`spawn@node` references route cross-node by bare actor-ref value.**
   Actor-ref Values carry only a 48-bit id (no node), so a remote-spawn
   handle used to fall into the local mailbox path — messages were

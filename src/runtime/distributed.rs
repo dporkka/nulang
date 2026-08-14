@@ -1048,8 +1048,7 @@ pub fn process_network_packets(
                 if let Some(msgs) = runtime.pending_spawn_messages.remove(&request_id) {
                     if success {
                         for m in msgs {
-                            let content_hash =
-                                try_lookup_content_hash(runtime, &m.behavior_name);
+                            let content_hash = try_lookup_content_hash(runtime, &m.behavior_name);
                             let packet = resolver.build_packet(
                                 actor_id,
                                 &m.behavior_name,
@@ -1071,7 +1070,11 @@ pub fn process_network_packets(
                                     "nulang-net: dropping queued message for spawned actor {}: node {:?} left cluster",
                                     actor_id, from
                                 );
-                                notify_delivery_failed(runtime, m.sender, "target node left cluster");
+                                notify_delivery_failed(
+                                    runtime,
+                                    m.sender,
+                                    "target node left cluster",
+                                );
                             }
                         }
                     } else {
@@ -1461,11 +1464,9 @@ fn hot_reload_behavior(
         Some(a) => a,
         None => return,
     };
-    // Rebuild bytecode offsets from the cached module
-    let mut offsets = Vec::with_capacity(module.behaviors.len());
-    for entry in &module.behaviors {
-        offsets.push(entry.code_offset);
-    }
+    // Rebuild bytecode offsets from the cached module (compressed to the
+    // actor's own behaviors for workflow actors — local step ids).
+    let offsets = crate::runtime::spawn::bytecode_offsets_for(module, actor.is_workflow);
     actor.bytecode_module = Some(module.clone());
     actor.bytecode_offsets = offsets;
     warn!(
@@ -1614,7 +1615,10 @@ fn fast_random_u64() -> u64 {
 /// resolvable content (no current actor, no sender module, or an id outside
 /// the pool); the caller must drop the message rather than send a dangling
 /// id.
-pub(crate) fn resolve_wire_strings(runtime: &Runtime, args: &[Value]) -> Option<(Vec<Value>, Vec<String>)> {
+pub(crate) fn resolve_wire_strings(
+    runtime: &Runtime,
+    args: &[Value],
+) -> Option<(Vec<Value>, Vec<String>)> {
     let mut payload = args.to_vec();
     let mut table: Vec<String> = Vec::new();
     for value in payload.iter_mut() {

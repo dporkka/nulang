@@ -2250,10 +2250,21 @@ in this pass beyond the first):**
    declaration) used to never activate the actor runtime at all —
    `spawn`/`send` were silent stubs, so every step was inert with no
    error. `src/main.rs`'s actor-detection now includes `Decl::Workflow`.
-2. Saga step compensation (§10.8) is index-based against the *whole
+2. ~~Saga step compensation (§10.8) is index-based against the *whole
    module's* declaration order, not the workflow's own steps — an
    `actor` declared before the `workflow` in the same file silently
-   shifts which step's compensation runs, with no error.
+   shifts which step's compensation runs, with no error.~~ **Fixed
+   2026-08-13:** compensation pairs now carry the step's ABSOLUTE
+   module behavior index (`mir::Module::compensation_of`), so the
+   codegen patches only the owning actor's steps. The same latent
+   misindexing in step dispatch was fixed alongside: a workflow actor's
+   `bytecode_offsets` are now compressed to ITS OWN behaviors (local
+   step ids 0..step_count-1, matching `layout_workflow_behavior_table`)
+   instead of the whole module's list — with a preceding actor, local
+   step 0 previously ran the OTHER actor's first behavior. Pinned by
+   `test_saga_compensation_ignores_non_workflow_actors` (compile-level
+   `compensate_offset` placement + behavioral happy path and
+   reverse-order compensation run with a pre-declared `actor Before`).
 3. A workflow-level `compensate { }` block (as opposed to a per-step
    one) parses but is silently dropped during lowering and never runs.
 4. ~~The single-argument `perform Timer.sleep(ms)` form suspends a step

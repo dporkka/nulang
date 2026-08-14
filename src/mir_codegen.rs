@@ -330,18 +330,20 @@ impl MirCodegen {
         }
         // Saga compensation: patch each step's compensate_offset from its
         // already-compiled compensation function's code offset.
-        // compensation_of stores (step_relative_idx, comp_idx) where
-        // step_relative_idx is a 0-based index into the owning actor's
-        // behavior list. Resolve it to the absolute behavior index via
-        // ActorMeta::behavior_indices.
+        // compensation_of stores (abs_step_idx, comp_idx) where
+        // abs_step_idx is the step's WHOLE-MODULE behavior index. The
+        // cursor walks both lists in the same order (entries are pushed
+        // actor-by-actor, behavior-by-behavior, matching
+        // `behavior_indices`), so a match means "this actor's step owns
+        // this compensation" — a plain actor before the workflow cannot
+        // hijack it (SPEC2 §10 known-issue #2).
         let mut comp_cursor = 0;
         for meta in &mir.actor_metadata {
-            for step_idx in 0..meta.behavior_indices.len() {
+            for &abs_step_idx in &meta.behavior_indices {
                 if comp_cursor < mir.compensation_of.len()
-                    && mir.compensation_of[comp_cursor].0 == step_idx
+                    && mir.compensation_of[comp_cursor].0 == abs_step_idx
                 {
                     let comp_idx = mir.compensation_of[comp_cursor].1;
-                    let abs_behavior_idx = meta.behavior_indices[step_idx];
                     let comp_offset = self
                         .module
                         .behaviors
@@ -353,16 +355,12 @@ impl MirCodegen {
                                 Span::default(),
                             )
                         })?;
-                    let entry =
-                        self.module
-                            .behaviors
-                            .get_mut(abs_behavior_idx)
-                            .ok_or_else(|| {
-                                compile_err(
-                                    "internal: compensated behavior index out of range",
-                                    Span::default(),
-                                )
-                            })?;
+                    let entry = self.module.behaviors.get_mut(abs_step_idx).ok_or_else(|| {
+                        compile_err(
+                            "internal: compensated behavior index out of range",
+                            Span::default(),
+                        )
+                    })?;
                     entry.compensate_offset = Some(comp_offset);
                     comp_cursor += 1;
                 }

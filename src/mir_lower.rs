@@ -104,16 +104,20 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
             // real behaviors, so they never fall inside behavior_indices
             // (compensations are invoked directly by offset, never
             // dispatched by name via send/ask).
-            for (step_idx, (b, _abs_idx)) in
-                a.behaviors.iter().zip(behavior_indices.iter()).enumerate()
-            {
+            for (b, &abs_idx) in a.behaviors.iter().zip(behavior_indices.iter()) {
                 if b.compensate.is_some() {
                     let comp_idx =
                         ctx.reserve_behavior(format!("{}.{}__compensate", a.name, b.name));
-                    ctx.compensation_of.push((step_idx, comp_idx));
+                    // The step's ABSOLUTE (whole-module) behavior index —
+                    // not a per-actor relative index. The codegen resolves
+                    // compensations against each actor's own
+                    // `behavior_indices`; a relative index would let an
+                    // actor declared before the workflow hijack its first
+                    // compensation (SPEC2 §10 known-issue #2).
+                    ctx.compensation_of.push((abs_idx, comp_idx));
                 }
                 if let Some(branches) = &b.parallel_branches {
-                    ctx.parallel_branches_of.push((*_abs_idx, branches.clone()));
+                    ctx.parallel_branches_of.push((abs_idx, branches.clone()));
                 }
             }
             let state_models = a
@@ -207,7 +211,7 @@ fn lower_decl_bodies(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 .expect("actor registered in pass 1")
                 .behavior_indices
                 .clone();
-            for (step_idx, (b, &idx)) in a.behaviors.iter().zip(indices.iter()).enumerate() {
+            for (b, &idx) in a.behaviors.iter().zip(indices.iter()) {
                 let full_name = format!("{}.{}", a.name, b.name);
                 let func = lower_behavior_def(ctx, &full_name, b)?;
                 ctx.fill_behavior(idx, func);
@@ -216,7 +220,7 @@ fn lower_decl_bodies(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                     let comp_idx = ctx
                         .compensation_of
                         .iter()
-                        .find(|(behavior_idx, _)| *behavior_idx == step_idx)
+                        .find(|(behavior_idx, _)| *behavior_idx == idx)
                         .map(|(_, comp_idx)| *comp_idx)
                         .expect("compensation slot reserved in pass 1");
                     let comp_def = hir::BehaviorDef {
@@ -269,7 +273,7 @@ struct ModuleCtx {
     behaviors: Vec<Option<mir::Function>>,
     behavior_names: Vec<String>,
     actor_metas: Vec<crate::bytecode::ActorMeta>,
-    /// `(step_index, compensation_behavior_idx)` pairs; see `mir::Module`.
+    /// `(step_behavior_idx, compensation_behavior_idx)` pairs; see `mir::Module`.
     compensation_of: Vec<(usize, usize)>,
     /// `(behavior_idx, branch_names)` pairs; see `mir::Module`.
     parallel_branches_of: Vec<(usize, Vec<String>)>,

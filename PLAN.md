@@ -427,9 +427,15 @@ updated; see the changelog entry for the test evidence.
   2. `send remote`/`ask remote` silently drop their message single-node
      instead of using the local-delivery fallback that already exists
      and works for other distributed paths — just isn't wired to these.
-  3. Saga compensation indexes by whole-module declaration order, not
+  3. ~~Saga compensation indexes by whole-module declaration order, not
      the workflow's own steps — another `actor` declared before the
-     `workflow` silently shifts which step's compensation runs.
+     `workflow` silently shifts which step's compensation runs.~~
+     **Fixed 2026-08-13** (see SPEC2 §10 known-issue #2): compensation
+     pairs carry the step's absolute behavior index, and workflow
+     bytecode_offsets are compressed to the actor's own steps — a
+     pre-declared actor can no longer hijack the first compensation or
+     shift step dispatch. Pinned by
+     `test_saga_compensation_ignores_non_workflow_actors`.
   4. Single-argument `perform Timer.sleep(ms)` suspends a step and
      never resumes it — a permanent hang, not an error. Only the
      two-argument durable form works.
