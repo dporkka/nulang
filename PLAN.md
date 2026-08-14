@@ -616,6 +616,16 @@ updated; see the changelog entry for the test evidence.
     with sync rounds (seeded node order decides which side's deltas
     ship first); every seed converges both replicas to the summed total
     (GCounter is commutative — no lost update under any interleaving).
+  - **Node-crash scenario (2026-08-14, bullet-2 deliverable).**
+    `test_dst_cluster_crash_restart_seed_sweep`: 20 seeds, three nodes;
+    node 2 hard-crashes (dropped from the pump, links cut) and the
+    survivors mark it `Failed` through the REAL virtual-clock failure
+    detector; the node restarts as a FRESH `Runtime` (same node id,
+    fresh state — the harness's `crash_node`/`restart_node` mirror the
+    real-TCP crash/rejoin test) joining through a survivor; the cluster
+    reconverges to full `Healthy` and a remote message delivers to an
+    actor on the restarted node. This is the seed-sweepable, sleep-free
+    counterpart of `test_three_node_cluster_survives_hard_node_failure_and_rejoin`.
 - **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
   determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
   open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`

@@ -63,6 +63,15 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **Node-crash DST scenario.** `DeterministicCluster::crash_node`/
+  `restart_node` model a hard crash + fresh-node restart (skipped from
+  the pump, links cut, Runtime replaced with the same node id). New
+  20-seed sweep: survivors mark the crashed node `Failed` through the
+  real virtual-clock failure detector, the restarted node rejoins
+  through a survivor, the cluster reconverges, and a remote message
+  delivers to an actor on the restarted node — the seed-sweepable,
+  sleep-free counterpart of the real-TCP crash/rejoin test.
+
 - **CRDT-sync-race DST scenario.** `DeterministicCluster` now drives
   `rt.sync_crdts()` per round (the harness models a Rust embedder — CRDT
   replication stays an embedder API per SPEC2 §12.5, deliberately not

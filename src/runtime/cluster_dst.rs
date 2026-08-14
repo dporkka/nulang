@@ -59,6 +59,22 @@ pub(crate) struct DeterministicCluster {
     /// owns the sets and re-applies them (multiple `partition` calls
     /// accumulate; `heal` clears one node's set).
     partitions: Vec<std::collections::HashSet<NodeId>>,
+    /// Hard-crashed nodes: skipped by the pump, with every peer's link to
+    /// them dropped (dead socket). `restart_node` replaces the Runtime.
+    crashed: Vec<bool>,
+    /// Shared in-memory packet bus (kept so `restart_node` can create a
+    /// fresh transport on the same bus).
+    bus: Arc<
+        parking_lot::Mutex<
+            HashMap<
+                NodeId,
+                (
+                    std::sync::mpsc::SyncSender<super::network::IncomingPacket>,
+                    std::sync::mpsc::SyncSender<super::network::OutgoingPacket>,
+                ),
+            >,
+        >,
+    >,
     /// Rounds executed.
     pub round: u64,
     /// How many times a node hit the per-round step budget
@@ -105,6 +121,8 @@ impl DeterministicCluster {
             addrs: addrs.to_vec(),
             rng,
             partitions: vec![std::collections::HashSet::new(); addrs.len()],
+            crashed: vec![false; addrs.len()],
+            bus,
             round: 0,
             limit_hits: 0,
         }
@@ -140,6 +158,65 @@ impl DeterministicCluster {
         self.apply_partitions();
     }
 
+    /// Hard-crash the node at `index`: it is removed from the pump and
+    /// every peer's outbound link to it is dropped (a dead socket). The
+    /// survivors' real failure detector marks it `Failed` in virtual
+    /// time. The crashed Runtime is replaced wholesale by
+    /// [`DeterministicCluster::restart_node`] — a restart is a fresh
+    /// node, exactly like the real-TCP crash/rejoin test.
+    pub fn crash_node(&mut self, index: usize) {
+        assert!(!self.crashed[index], "node {index} already crashed");
+        self.crashed[index] = true;
+        let pid = self.id(index);
+        for (i, peers) in self.partitions.iter_mut().enumerate() {
+            if i != index {
+                peers.insert(pid);
+            }
+        }
+        self.apply_partitions();
+    }
+
+    /// Restart the node at `index`: replace its Runtime with a fresh one
+    /// (same address identity — same node id — new virtual clock,
+    /// transport registered on the same bus) and rejoin the mesh through
+    /// the first non-crashed peer. The old transport's channel drops, so
+    /// in-flight packets to the dead node vanish like a closed socket.
+    pub fn restart_node(&mut self, index: usize) {
+        assert!(self.crashed[index], "node {index} is not crashed");
+        let addr = self.addrs[index];
+        let bus = self.bus.clone();
+        let mut rt = Runtime::new();
+        rt.install_virtual_clock();
+        let transport =
+            DeterministicNetworkTransport::bind_with_bus(addr, bus).expect("dst transport binds");
+        transport.register_on_bus();
+        rt.enable_distribution_with_transport(Box::new(transport))
+            .expect("dst distribution enables");
+        if let Some(cluster) = rt.distributed.cluster.as_mut() {
+            cluster.set_rng(Box::new(DeterministicRng::new(self.rng.next())));
+        }
+        // Rejoin through the first non-crashed peer (a real restart joins
+        // through a seed).
+        if let Some(seed) = self
+            .addrs
+            .iter()
+            .position(|a| {
+                *a != addr && !self.crashed[self.addrs.iter().position(|x| x == a).unwrap()]
+            })
+            .map(|i| self.addrs[i])
+        {
+            rt.join_cluster(seed);
+        }
+        self.nodes[index] = rt;
+        self.crashed[index] = false;
+        self.partitions[index].clear();
+        let pid = self.id(index);
+        for peers in self.partitions.iter_mut() {
+            peers.remove(&pid);
+        }
+        self.apply_partitions();
+    }
+
     /// Push the harness-owned partition sets into the transports
     /// (`set_partition` replaces, so the full set is always re-applied).
     fn apply_partitions(&mut self) {
@@ -168,6 +245,12 @@ impl DeterministicCluster {
             order.swap(i, i + j);
         }
         for idx in order {
+            if self.crashed[idx] {
+                // Hard-crashed: not pumped; peers' links to it are
+                // dropped, so the failure detector handles it in virtual
+                // time like a dead socket.
+                continue;
+            }
             let rt = &mut self.nodes[idx];
             rt.advance_time(ROUND_STEP);
             rt.process_network();
@@ -655,6 +738,81 @@ mod tests {
             assert_eq!(
                 cluster.limit_hits, 0,
                 "seed {seed}: step budget exceeded — possible deadlock"
+            );
+        }
+    }
+
+    /// PLAN.md Phase 1 bullet 2 (DST): node-crash scenario, seed-driven —
+    /// the sleep-free, seed-sweepable counterpart of the real-TCP
+    /// `test_three_node_cluster_survives_hard_node_failure_and_rejoin`.
+    /// 3 nodes converge; node 2 is hard-crashed (dropped from the pump,
+    /// every link to it cut); the survivors mark it `Failed` through the
+    /// REAL virtual-clock failure detector; the node restarts as a FRESH
+    /// Runtime (same node id — new state) joining through a survivor;
+    /// the cluster reconverges to full `Healthy`; a remote message then
+    /// delivers to an actor on the restarted node. Seed sweep: the
+    /// per-round node order (and the gossip/repair picks) vary, but the
+    /// invariants hold for every seed.
+    #[test]
+    fn test_dst_cluster_crash_restart_seed_sweep() {
+        let seeds = crate::dst::dst_seed_count(20);
+
+        for seed in 0..seeds {
+            let mut cluster =
+                DeterministicCluster::new(&[addr(9141), addr(9142), addr(9143)], seed);
+            let a = cluster.id(0);
+            let b = cluster.id(1);
+            let c = cluster.id(2);
+
+            // Phase 1: converge (active views fill through the repair
+            // cycle, ~50 rounds).
+            cluster.run_rounds(80);
+            assert!(
+                cluster.active_views_converged(),
+                "seed {seed}: cluster must converge before the crash"
+            );
+
+            // Phase 2: hard-crash C. Failure needs 2 s + 5 s = 70 rounds
+            // of silence; 120 gives headroom.
+            cluster.crash_node(2);
+            cluster.run_rounds(120);
+            assert_eq!(
+                cluster.cluster_status(0, c),
+                Some(NodeStatus::Failed),
+                "seed {seed}: A must mark C failed"
+            );
+            assert_eq!(
+                cluster.cluster_status(1, c),
+                Some(NodeStatus::Failed),
+                "seed {seed}: B must mark C failed"
+            );
+            assert_eq!(
+                cluster.cluster_status(0, b),
+                Some(NodeStatus::Healthy),
+                "seed {seed}: A and B stay healthy through the crash"
+            );
+
+            // Phase 3: restart C as a fresh node joining through A.
+            cluster.restart_node(2);
+            cluster.run_rounds(120);
+            for (viewer, peer) in [(0, b), (0, c), (1, a), (1, c), (2, a), (2, b)] {
+                assert_eq!(
+                    cluster.cluster_status(viewer, peer),
+                    Some(NodeStatus::Healthy),
+                    "seed {seed}: node {viewer} must reconverge with node {} after restart",
+                    peer.0
+                );
+            }
+
+            // Phase 4: real work across the restart — A sends to an actor
+            // on the fresh C.
+            let counter = spawn_counter(&mut cluster.node_mut(2));
+            cluster.send_remote(0, 2, counter, "inc", &[Value::int(99)]);
+            cluster.run_rounds(20);
+            assert_eq!(
+                counter_value(&cluster, 2, counter),
+                99,
+                "seed {seed}: remote message must deliver to the restarted node"
             );
         }
     }
