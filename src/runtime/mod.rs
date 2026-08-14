@@ -3923,7 +3923,7 @@ impl Runtime {
         // The stored snapshot value (captured after the apply handler ran
         // during live execution) correctly reconstructs fields with
         // non-trivial apply handlers.  See
-        // `integration_tests::test_event_sourced_apply_handler_recovery_known_gap`
+        // `integration_tests::test_event_sourced_apply_handler_recovery`
         // which validates this behavior.
         let events = self.persistence.read_events(actor_id);
         if !events.is_empty() {

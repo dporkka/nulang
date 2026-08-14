@@ -78,6 +78,27 @@ two major versions.*
   state after a normal finish, so a blind re-capture re-stalled the
   actor (the residual hang this fix closes). Pinned by
   `test_workflow_timer_sleep_single_arg_resumes`.
+- **Constrained generic functions with typeclass bounds work on
+  type-variable receivers.** `fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }`
+  used to type-check and then crash at runtime ("Not a function: nil") —
+  the dictionary transform only resolved literal receivers. The HIR now
+  resolves the dictionary for `DictKind::Param` receivers and the call
+  site passes the concrete dictionary argument. Pinned by
+  `conformance/behavior/typeclass_06_constrained_generic_runtime_crash.nula`.
+- **Recursive generic ADTs construct correctly, and generic type
+  parameters are skolemized in the function body.** §7.8's
+  `type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))` (and a second
+  recursive shape) type-check their own constructor calls, and a body
+  that pins its declared type parameter to a concrete type
+  (`fn fresh[T]() -> T { 0 - 1 }`) is now rejected at the definition
+  instead of failing later at a mismatched call site. Pinned by
+  `conformance/behavior/generics_03/07/08_*.nula`.
+- **`event_sourced` fields with non-trivial `apply` handlers survive
+  crash + recovery.** `emit_event` persists the field's post-apply
+  value (apply runs inline before the snapshot) and `recover_actor`
+  restores it — recovery no longer reconstructs a bare event count that
+  silently drops `apply`'s contributions. Pinned by
+  `test_event_sourced_apply_handler_recovery`.
 - **Saga compensation and workflow step dispatch no longer shift when a
   plain `actor` is declared before a `workflow` in the same module.**
   Compensation pairs now carry the step's absolute (whole-module)
