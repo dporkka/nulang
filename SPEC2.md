@@ -370,9 +370,10 @@ actor ChatBot {
   state local turns: Int = 0
 
   behavior ask(question: String) ! {Inference} {
-    let answer = perform Inference.ask(question) in
-    self.turns = self.turns + 1
-    answer
+    let answer = perform Inference.ask(question) in {
+      self.turns = self.turns + 1
+      answer
+    }
   }
 }
 ```
@@ -441,6 +442,7 @@ These capabilities form a lattice under a subtyping relation (§3.9.1). The comp
 Authority capabilities — declared on actors to govern which effects they can perform — are planned (§5.3). The intended surface is:
 
 ```nulang
+// fragment
 // Planned — not yet implemented
 capability llm      // Can perform LLM effects
 capability http     // Can make HTTP requests
@@ -566,6 +568,7 @@ Nulang uses the following naming conventions. They are conventions only — no s
 Examples of valid identifiers:
 
 ```nulang
+// fragment
 name         _private     http2        x_y_z
 Counter      Option       T            Elem
 ```
@@ -708,6 +711,7 @@ Reference types and capabilities are discussed in detail in Chapter 5.
 The pipe operator `|>` passes the left operand as the **first** argument to the function on the right:
 
 ```nulang
+// fragment
 list |> map(f) |> filter(g)
 // Equivalent to: filter(map(list, f), g)
 ```
@@ -874,12 +878,11 @@ Tuple components are accessed by position using zero-based indexing: `point.0`, 
 A record is a labeled product type, where each field has a name and a type. Record types are structural: two record types unify when they have the same field names with unifiable types, regardless of declaration order. Record literals and record types use a colon between the field name and its value or type:
 
 ```nulang
-let person = { name: "Alice", age: 30, active: true } in person
-
-// Type is inferred as: { name: String, age: Int, active: Bool }
-let greet = fn(p: { name: String, age: Int }) {
+let person = { name: "Alice", age: 30, active: true } in
+let greet = fn(p: { name: String, age: Int, active: Bool }) {
   p.name
-} in greet(person)
+} in
+greet(person)
 ```
 
 Record fields are accessed using dot notation: `person.name`, `person.age`. Record patterns destructure records with the same colon syntax: `{ name: n, age: a }`.
@@ -956,8 +959,10 @@ type Status = Pending | Running | Completed | Failed
 Enum constructors are pattern-matched like other variants:
 
 ```nulang
+type Status = Pending | Running | Completed | Failed
+
 fn status_message(s: Status) -> String {
-  match s with {
+  match s {
     | Pending   => "Waiting to start..."
     | Running   => "In progress..."
     | Completed => "Done!"
@@ -971,6 +976,7 @@ fn status_message(s: Status) -> String {
 Function types describe the type of a function, including its parameter type, return type, effect row, and capability. The general form is:
 
 ```nulang
+// fragment
 A -> R ! {EffectRow} : cap
 ```
 
@@ -994,11 +1000,11 @@ In a *type* position the row is written the same way, e.g. `(String) -> Unit ! {
 Functions are first-class values: they can be passed as arguments, returned from other functions, and stored in data structures. Anonymous functions are written with `fn` (Section 6.8):
 
 ```nulang
-fn compose(f: (B) -> C, g: (A) -> B) -> ((A) -> C) {
+fn compose[A, B, C](f: (B) -> C, g: (A) -> B) -> (A) -> C {
   fn(x) { f(g(x)) }
 }
 
-fn twice(f: (Int) -> Int) -> ((Int) -> Int) {
+fn twice(f: (Int) -> Int) -> (Int) -> Int {
   fn(x) { f(f(x)) }
 }
 ```
@@ -1084,16 +1090,15 @@ Nulang's reference type system is adapted from Pony's capability system. Every r
 A capability-qualified reference type is written with an ampersand followed by the capability: `&iso String`, `&val [Int]`, `&ref Tree[T]`. An expression can be annotated with a capability directly using the contextual keyword `cap`: `expr :cap iso`.
 
 ```nulang
-// iso: unique, can be sent to another actor
-let unique_data: &iso Buffer = make_buffer(1024)
+// ref: local mutable reference — `&` creates a ref-capability reference
+let counter: &ref Int = &0
 
-// val: immutable, can be shared freely
-let config: &val Config = load_config()
+// iso/val/trn/box references are accepted in parameter and return
+// annotations, but `&` only constructs `ref` today (see §3.9)
+fn takes_iso(x: &iso Int) -> Int { *x }
 
-// ref: local mutable reference
-let counter: &ref Int = 0
-
-// capability annotation on an expression
+// capability annotation on an expression (`:cap`)
+let data = 5
 let boxed = data :cap box
 ```
 
@@ -1136,14 +1141,20 @@ A capability-qualified type combines a reference capability with a structural ty
 Capability-qualified types are written with the capability after an ampersand prefix:
 
 ```nulang
-// An iso reference to a mutable buffer
-let buf: &iso Buffer = make_buffer(4096)
+// A ref reference to a local value — `&` creates `ref` references
+let counter: &ref Int = &0
 
-// A val reference to an immutable tree
-let tree: &val Tree[Int] = build_tree()
+// iso/val/trn/box appear in annotations; no value-level constructor
+// exists for them yet, so ref is the only creatable reference
+fn takes_iso(x: &iso [Int]) -> Int { 0 }
 
-// A ref reference to a local record
-let state: &ref { count: Int, name: String } = { count: 0, name: "default" }
+// A ref reference to a record value
+let record_ref: &ref { count: Int, name: String } = &{ count: 0, name: "default" }
+
+// Note: `&expr` always creates a `ref`-capability reference. The
+// iso/val/trn/box capabilities are accepted in parameter/return
+// annotations but have no value-level constructor yet — an open
+// implementation gap, not an intentional restriction.
 ```
 
 The compiler checks that all operations on a capability-qualified type are permitted. Attempting to write through a `val` reference or send a `ref` reference to another actor results in a compile-time error.
@@ -1243,7 +1254,7 @@ let result = handle {
   perform Console.print("Hello from handled code!")
   42
 } {
-  | Console.print(msg) => unit
+  | Console.print(msg) => 42
 }
 ```
 
@@ -1276,7 +1287,7 @@ The current implementation supports exactly this single-resumption model:
 
 ```nulang
 // Log-and-continue handler: prints, then resumes with unit
-fn run_logged() -> Unit ! {Console} {
+fn run_logged() -> Unit ! {Console, IO} {
   handle {
     perform Console.print("event happened")
   } {
@@ -1304,8 +1315,8 @@ fn multi_effect() -> Unit ! {Console, FileSystem, Rand} {
   perform Console.print("Starting...")
 }
 
-// bare single-effect row — equivalent to ! {IO}
-fn log_once(msg: String) -> Unit ! IO {
+// single-effect row (the bare `! IO` form is not accepted — braces required)
+fn log_once(msg: String) -> Unit ! {IO} {
   perform IO.print(msg)
 }
 ```
@@ -1316,7 +1327,7 @@ An open effect row lists concrete effects followed by a row variable after a pip
 
 ```nulang
 // f may perform arbitrary effects; map_option passes them through
-fn map_option[A, B](opt: Option[A], f: fn(A) -> B ! {| row}) -> Option[B] ! {| row} {
+fn map_option[A, B](opt: Option[A], f: (A) -> B ! {| row}) -> Option[B] ! {| row} {
   match opt {
     | None => None
     | Some(a) => Some(f(a))
@@ -1555,6 +1566,7 @@ Nulang is an expression-oriented language: every construct produces a value. The
 Literal expressions produce constant values:
 
 ```nulang
+// fragment
 42          // Int literal
 0x2A        // Int literal (hexadecimal)
 3.14        // Float literal
@@ -1582,6 +1594,7 @@ Inside an actor behavior, actor state fields are accessed through `self` (`self.
 Function application applies a function to its arguments. Functions are called positionally; paths through modules use dot syntax:
 
 ```nulang
+// fragment
 add(1, 2)              // function call
 Math.Utils.clamp(v, 0, 10)  // call through a module path
 list |> map(f)         // pipe operator (§6.9)
@@ -1602,16 +1615,19 @@ An optional type annotation may follow the name: `let x: Int = 42 in ...`.
 Recursive functions are bound with `let rec`:
 
 ```nulang
-let rec fact(n) = if n <= 1 then 1 else n * fact(n - 1) in
-fact(5)
+// Recursive local bindings are written as functions:
+fn fact(n: Int) -> Int {
+  if n <= 1 then 1 else n * fact(n - 1)
+}
 ```
 
 Let bindings are immutable. Mutable references are created explicitly with the prefix `&` operator and read back with the prefix `*` operator; assignment uses `=`:
 
 ```nulang
-let counter = &0 in {
+fn main() {
+  let counter: &ref Int = &0
   counter = *counter + 1
-  *counter  // evaluates to 1
+  perform IO.print(*counter)  // 1
 }
 ```
 
@@ -1622,12 +1638,13 @@ Mutable `var` bindings are planned for a future version (`var` is not currently 
 The `if` expression chooses between branches. The `then` keyword is optional, branches may be single expressions or `{ }` blocks, and the `else` branch is optional (an omitted `else` yields `unit`):
 
 ```nulang
+let x = 42
 if x > 0 then
   "positive"
 else
   "non-positive"
 
-if x > 0 {
+if x > 0 then {
   perform IO.print("positive")
 }
 ```
@@ -1639,6 +1656,7 @@ When both branches are present they must have the same type.
 The `match` expression performs pattern matching. The `with` keyword after the scrutinee is optional, and each arm may optionally begin with `case` or `|`:
 
 ```nulang
+let option = Some(7)
 match option {
   | Some(x) => x
   | None => 0
@@ -1648,6 +1666,8 @@ match option {
 Supported patterns are: wildcard `_`, variable bindings, literals, tuples, records, variant constructors, and aliases (`name @ pattern`):
 
 ```nulang
+type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
+let tree = Node((Leaf, 1, Leaf))
 match tree {
   | Leaf => 0
   | n @ Node((l, v, r)) => v
@@ -1661,9 +1681,9 @@ Pattern guards (`| pat if cond => ...`) are implemented — the guard is a boole
 Lambda expressions create anonymous functions with the `fn` keyword. An optional `->` may separate the parameter list from the body:
 
 ```nulang
-fn(x) -> x + 1
-fn(x, y) -> x + y
-fn() perform IO.print("hello")
+let f1 = fn(x) { x + 1 }
+let f2 = fn(x, y) { x + y }
+let f3 = fn() { perform IO.print("hello") }
 ```
 
 Parameter types and the effect row are inferred from use; lambdas may carry an effect annotation via their type ascription.
@@ -1673,6 +1693,7 @@ Parameter types and the effect row are inferred from use; lambdas may carry an e
 The pipe operator `|>` passes the left-hand side as the **first** argument to the right-hand-side call:
 
 ```nulang
+// fragment
 list |> map(f) |> filter(g) |> fold(h, 0)
 // Equivalent to: fold(filter(map(list, f), g), h, 0)
 ```
@@ -1733,10 +1754,16 @@ The `recover` expression, which creates an `iso` or `val` reference from an expr
 Actor expressions create and interact with actors:
 
 ```nulang
-let counter = spawn Counter { count = 0 } in  // create an actor with initial state
-send counter increment(1)                     // fire-and-forget message
-counter ! increment(1)                        // infix form of send
-let n = ask counter get() in                  // request-response
+actor Counter {
+  state count: Int = 0
+  behavior increment(by: Int) { self.count = self.count + by }
+  behavior get() { self.count }
+}
+
+let counter = spawn Counter { count = 0 }  // create an actor with initial state
+send counter increment(1)                   // fire-and-forget message
+counter ! increment(1)                      // infix form of send
+let n = ask counter get()                   // request-response
 n
 ```
 
@@ -1764,6 +1791,7 @@ A top-level expression that is not a declaration is wrapped by the parser into a
 Functions are defined with the `fn` keyword. The full signature form is:
 
 ```nulang
+// fragment
 fn name[T, U](param: Type, ...) -> ReturnType ! {Effect, Row} : capability body
 ```
 
@@ -1786,6 +1814,7 @@ fn log(msg: String) -> Unit ! {IO} {
 Named functions may recurse by referring to their own name. Functions may be preceded by annotations; the only supported annotation is `@tool(description: "...")`, which exposes the function as an agent tool (§11.4):
 
 ```nulang
+// fragment
 @tool(description: "Search the knowledge base")
 fn search(query: String) -> String {
   ...
@@ -1812,7 +1841,7 @@ type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
 
 ```nulang
 type alias UserId = Int
-type alias Handler[T] = fn(T) -> Unit
+type alias Handler[T] = (T) -> Unit
 ```
 
 ## 7.4 Actor Definitions
@@ -1849,8 +1878,8 @@ effect Console {
 The `import` declaration brings a module path into scope. Only the plain path form is implemented:
 
 ```nulang
-import List
-import Math.Utils
+import stdlib::list
+import stdlib::math
 ```
 
 Selective imports (`import List exposing [map]`) and aliased imports (`import Math as M`) are planned. Imports are resolved at compile time and have no runtime cost.
@@ -1876,8 +1905,13 @@ Module-level visibility enforcement and multi-file compilation units are planned
 Type parameters are declared in brackets after the function or type name. There are no constraints or bounds on type parameters (typeclass constraints are planned):
 
 ```nulang
-fn map[A, B](list: List[A], f: fn(A) -> B) -> List[B] {
-  ...
+type List[T] = Nil | Cons((T, List[T]))
+
+fn map[A, B](list: List[A], f: (A) -> B) -> List[B] {
+  match list {
+    | Nil => Nil
+    | Cons((head, tail)) => Cons((f(head), map(tail, f)))
+  }
 }
 
 type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
@@ -1944,6 +1978,7 @@ actor Counter {
 A persistent actor is declared by prefixing with `persistent` (Chapter 9):
 
 ```nulang
+// fragment
 persistent actor Account {
   state durable balance: Int = 0
   ...
@@ -1972,6 +2007,7 @@ entity BankAccount {
 State is declared with the `state` keyword:
 
 ```nulang
+// fragment
 state model name: Type = initial_value
 ```
 
@@ -1982,6 +2018,7 @@ The state model (`local`, `durable`, `event_sourced`, or `crdt`) determines how 
 Behaviors are declared with the `behavior` keyword. A behavior has parameters but **no declared return type**; its value is the value of its body expression. Optional `! {Row}` effect and `: capability` annotations may follow the parameter list (the capability defaults to `ref` when omitted):
 
 ```nulang
+// fragment
 behavior name(parameters) ! {Row} : capability {
   // body
 }
@@ -1994,7 +2031,12 @@ Behaviors execute sequentially within an actor. Each behavior processes one mess
 Messages are sent with the `send` keyword or the infix `!` operator, naming the target behavior and its arguments:
 
 ```nulang
-let counter = spawn Counter { count = 0 } in
+actor Counter {
+  state count: Int = 0
+  behavior increment() { self.count = self.count + 1 }
+}
+
+let counter = spawn Counter { count = 0 }
 send counter increment()
 counter ! increment()
 ```
@@ -2010,9 +2052,15 @@ Message sending is asynchronous and non-blocking: the message is enqueued in the
 The `ask` expression sends a message and waits for the behavior's value as a response:
 
 ```nulang
-let counter = spawn Counter { count = 0 } in
+actor Counter {
+  state count: Int = 0
+  behavior increment() { self.count = self.count + 1 }
+  behavior get() { self.count }
+}
+
+let counter = spawn Counter { count = 0 }
 send counter increment()
-let count = ask counter get() in
+let count = ask counter get()
 count
 ```
 
@@ -2021,6 +2069,7 @@ count
 Actors are created with `spawn`, which takes the actor type name and a brace-enclosed list of initial state values (the braces are required, and may be empty to use the declared defaults):
 
 ```nulang
+// fragment
 let counter = spawn Counter { count = 0 } in
 let other = spawn Counter {} in
 ...
@@ -2058,9 +2107,18 @@ actor Queue[T] {
 Actor references are values of the primitive type `Address` — opaque identifiers that can be passed between actors (capability `tag` once shared):
 
 ```nulang
+actor Counter {
+  state count: Int = 0
+  behavior get() { self.count }
+}
+actor Worker {
+  behavior use_counter(addr) { 0 }
+}
+
 let counter = spawn Counter { count = 0 } in
-let ref: Address = counter in
-send another_actor use_counter(ref)
+let worker = spawn Worker {} in
+let addr = counter in
+send worker use_counter(addr)
 ```
 
 ---
@@ -2466,7 +2524,7 @@ agent ResearchAssistant = {
   memory: { max_turns: 50 },
   semantic_memory: { dimensions: 64 },
   procedural_memory: { namespace: "research" },
-  pricing: { input: 30, output: 60 }
+  pricing: { input: 30.0, output: 60.0 }
 }
 ```
 
@@ -2491,6 +2549,7 @@ Provider configuration files (`config llm { ... }`) are planned — `config` is 
 - The runtime executes tool calls the model emits and feeds the results back
 
 ```nulang
+// fragment
 @tool(description: "Evaluate an arithmetic expression")
 fn calculate(expression: String) -> Float {
   ...
@@ -2575,6 +2634,11 @@ planned multi-node behavior that cannot be observed from a single
 - Remote-actor references are cached; the programmer sends messages and the runtime handles routing
 
 ```nulang
+actor ShoppingCart {
+  state items_count: Int = 0
+  behavior add_item(n: Int) { self.items_count = self.items_count + n }
+}
+
 let cart = spawn ShoppingCart { items_count = 0 } in
 send cart add_item(42)
 // Runtime routes to whichever node hosts the actor
@@ -2612,6 +2676,7 @@ then unreachable by bare value — use an explicit
 Actors move between nodes explicitly with `migrate` (the `to` here is contextual syntax, not a keyword):
 
 ```nulang
+// fragment
 migrate cart to target_node
 ```
 

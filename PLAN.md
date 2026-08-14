@@ -472,21 +472,33 @@ updated; see the changelog entry for the test evidence.
   Chapter 14 was already headed "— Planned" so this didn't need the
   same "Stable-tier false claim" severity of fix CRDT got).
 - **[X] Bullet 6 (doc-example verification) — closed 2026-08-13.** The
-  default CI invocation was red: 16 docs-site blocks (`language/syntax
-  .mdx`, `types.mdx`, `actors/overview.mdx`, `distribution.mdx`,
-  `tutorial.mdx`, `index.mdx`) taught invalid syntax — pre-`then` `if`
-  blocks, `Err(e)` (prelude ctor is `Error(e)`), recursive ADT payloads
-  as bare `List[T]` variant args (must be a tuple: `Cons((T, List[T]))`),
-  an un-closable `index.mdx` fence swallowing the `## Installation`
-  section, and `send x get(self)` (a `ref` capability is not sendable —
-  rewritten as `send self` from inside a behavior). All 16 rewritten to
-  self-contained programs against the current compiler and re-verified.
-  `///` doc-comment coverage landed: `verify_doc_examples.sh` now scans
-  every ```` ```nulang ```` block inside `///` doc comments of `.nula`
-  sources (always on — repo-controlled content), with a runnable
-  round-trip example pinned in `src/stdlib/json.nula`'s `parse` docs
-  (`PASS src/stdlib/json.nula#1 (run)`). Full default run now
-  54 passed / 0 failed / 0 skipped.
+  default CI invocation was red and the SPEC2/README/`///`-comment
+  halves of the bullet were unwired. Now all sources are scanned by the
+  default run (the `NULANG_DOC_VERIFY_INCLUDE_ROOT` opt-in gate is
+  gone): the Astro docs site, `SPEC2.md`/`README.md`/
+  `docs/GETTING_STARTED.md`/`docs/TUTORIAL.md`, and `///` doc comments
+  in `.nula` sources. 16 docs-site blocks and 41 SPEC2 blocks were
+  rewritten against the current compiler (stale syntax, unbound prose
+  references, type/fn-type spelling drift, `Err`→`Error`,
+  recursive-ADT tuple payloads, pre-`then` `if`, `::` imports, `ref`/
+  `state`/`rec` reserved-word collisions, unclosed fence, `&`-capability
+  truth). Genuine non-programs are skipped by explicit markers only:
+  `// fragment` lines and "— Planned" headings (now detected at `###`
+  depth too). Default run: 132 passed / 0 failed / 54 skipped.
+  The pass surfaced seven REAL language gaps, all now documented in
+  SPEC2/PLAN (see "Gaps found by the doc pass" below).
+- **[X] Bullet 7 (structured error quality) — closed 2026-08-13.** The
+  phrase cleanup was already done ("not yet supported" gone from
+  user-facing errors); this session verified the hollow-helper sweep is
+  complete — zero `type_error(msg, …)`/`cap_error(msg, …)`/
+  `effect_error(msg, …)`/`parse_error(msg, …)` call sites remain in the
+  codebase — and documented the deliberate ceiling: the dynamic
+  variants (`LexError`/`FFIError`/`RuntimeError`/`VMError`/
+  `PythonError`/`PackageError`) stay `{msg, span}` because they are
+  message-driven without an expected-vs-found shape (extending them was
+  assessed lower-value by the 2026-08-02 pass), and the
+  `similar_names`/`explanation` fields fill the `suggestion` role under
+  a different name.
 - **[~] Bullet 7 (structured error quality) — phrase cleanup done,
   "verified by test" now landed for the fields that already existed,
   the "every variant" structural ask still isn't.** Removed the "not
@@ -635,6 +647,38 @@ updated; see the changelog entry for the test evidence.
   test. `local`/`crdt` StateModels not exercised this session (`local`
   is a straightforward reset-on-restart check; `crdt` persistence is
   already documented elsewhere as not wired to the eight CRDT types).
+
+**Gaps found by the doc pass (2026-08-13, all verified against the
+compiled binary).** The 41 rewritten SPEC2 blocks taught syntax the
+compiler rejects; most were doc drift, but seven are genuine language
+gaps now tracked:
+  1. **Capability references are annotation-only beyond `ref`.** `&expr`
+     always creates a `ref`-capability reference; `&iso T`/`&val T`/
+     `&trn T`/`&box T` are accepted in parameter/return annotations but
+     have no value-level constructor (SPEC2 §3.9 note added). This is
+     the capability system's biggest missing surface.
+  2. **Prelude types were unusable in annotations.** `let ok = Ok(42)`
+     type-checked in every module while `fn f(x: Option[Int])` failed
+     to parse ("Unknown type name") because the prelude's type decls
+     are prepended to the AST *after* the user module parses. Fixed:
+     every `Parser` now seeds the prelude's resolved `Option[T]`/
+     `Result[Ok, Err]` into its imported-type cache (same machinery as
+     `import stdlib::*`); local decls still shadow. Pinned by
+     `test_prelude_types_resolve_in_annotations` and
+     `test_local_type_shadows_prelude_in_annotation`.
+  3. **`let rec` is unsupported** (SPEC2 §6.5 taught it); recursive
+     local bindings are written as functions.
+  4. **Bare single-effect rows (`! IO`) are rejected**; braces required
+     (`! {IO}`). SPEC2 §4.5.1 claimed equivalence that did not hold.
+  5. **Array/record alias bodies are rejected** (`type Buffer = [Int]`
+     → "Expected variant name"); aliases expand only to variant/nominal
+     shapes.
+  6. **`state`, `rec`, `ref` are reserved words** — SPEC2 examples used
+     them as identifiers (now fixed); `let rec` and `let ref` cannot be
+     written.
+  7. **`in`-let scope spans exactly one trailing expression** — SPEC2
+     blocks that chained statements after `in` were invalid (rewritten
+     to sequential lets).
 
 **Goal.** The language does what it says, provably, on the paths users
 actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
