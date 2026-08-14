@@ -2,9 +2,15 @@
 # Verify all ```nulang code blocks in documentation.
 # Runs each block through --check (parse + type + effect checking).
 #
-# Scans docs/src/content/docs/**/*.{md,mdx} (the Astro docs site) by
-# default -- unchanged behavior, matches the existing CI invocation in
-# .github/workflows/ci.yml exactly.
+# Two sources are scanned:
+#   1. Markdown fences: docs/src/content/docs/**/*.{md,mdx} (the Astro
+#      docs site) by default -- unchanged behavior, matches the existing
+#      CI invocation in .github/workflows/ci.yml exactly -- plus the
+#      repo-root markdown files named in ROOT_DOCS below when
+#      NULANG_DOC_VERIFY_INCLUDE_ROOT=1.
+#   2. `///` doc comments in .nula source files (PLAN Phase 1 bullet 6:
+#      "every `///` doc comment" must compile+run). Repo-controlled
+#      content, so this pass is always on, not opt-in.
 #
 # Set NULANG_DOC_VERIFY_INCLUDE_ROOT=1 to additionally scan repo-root
 # markdown files that carry runnable examples (SPEC2.md, README.md,
@@ -140,6 +146,72 @@ verify_file() {
     done < "$file"
 }
 
+# Verify ```nulang blocks inside `///` doc comments of one .nula source
+# file. Consecutive `///` lines form the doc comment; fences inside it
+# are extracted and verified with the same machinery as markdown blocks
+# (run first, fall back to --check; declaration-first blocks check only).
+# `////` lines are regular comments, not doc comments (matches docgen).
+verify_nula_source() {
+    local file="$1" rel="$2"
+    local in_block=0 block="" block_num=0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        local trimmed="${line#"${line%%[![:space:]]*}"}"
+        [[ "$trimmed" == "////"* ]] && continue   # regular comment
+        [[ "$trimmed" != "///"* ]] && continue    # not a doc line
+        local content="${trimmed#///}"
+        content="${content#"${content%%[![:space:]]*}"}"
+
+        if [[ $in_block -eq 0 && "$content" == '```nulang' ]]; then
+            in_block=1
+            block=""
+            block_num=$((block_num + 1))
+            continue
+        fi
+        if [[ $in_block -eq 1 && "$content" == '```' ]]; then
+            in_block=0
+            [[ -z "$(echo "$block" | tr -d '[:space:]')" ]] && continue
+            TOTAL=$((TOTAL + 1))
+            label="${rel}#${block_num}"
+
+            if is_repl "$block"; then
+                SKIP=$((SKIP + 1))
+                echo "  SKIP  $label (REPL session)"
+                continue
+            fi
+
+            if is_runnable "$block"; then
+                echo "$block" > "$TMPDIR/test.nula"
+                if $NULANG "$TMPDIR/test.nula" >/dev/null 2>&1; then
+                    PASS=$((PASS + 1))
+                    echo "  PASS  $label (run)"
+                elif $NULANG --check "$TMPDIR/test.nula" >/dev/null 2>&1; then
+                    PASS=$((PASS + 1))
+                    echo "  PASS  $label (check only)"
+                else
+                    FAIL=$((FAIL + 1))
+                    echo "  FAIL  $label"
+                    $NULANG --check "$TMPDIR/test.nula" 2>&1 | head -3 | sed 's/^/        /'
+                fi
+            else
+                echo "$block" > "$TMPDIR/test.nula"
+                if $NULANG --check "$TMPDIR/test.nula" >/dev/null 2>&1; then
+                    PASS=$((PASS + 1))
+                    echo "  OK    $label (check)"
+                else
+                    FAIL=$((FAIL + 1))
+                    echo "  FAIL  $label"
+                    $NULANG --check "$TMPDIR/test.nula" 2>&1 | head -3 | sed 's/^/        /'
+                fi
+            fi
+            continue
+        fi
+        if [[ $in_block -eq 1 ]]; then
+            block="${block}${content}"$'\n'
+        fi
+    done < "$file"
+}
+
 while IFS= read -r -d '' file; do
     verify_file "$file" "${file#$DOCS_DIR/}"
 done < <(find "$DOCS_DIR" -name '*.md' -o -name '*.mdx' -print0)
@@ -148,6 +220,12 @@ for file in "${ROOT_DOCS[@]}"; do
     [[ -f "$file" ]] || continue
     verify_file "$file" "$file"
 done
+
+# .nula sources: every ```nulang block inside a /// doc comment must
+# compile+run (PLAN Phase 1 bullet 6). Repo-controlled content, always on.
+while IFS= read -r -d '' file; do
+    verify_nula_source "$file" "$file"
+done < <(find src -name '*.nula' -print0)
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $SKIP skipped ($TOTAL total) ==="

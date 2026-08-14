@@ -99,6 +99,19 @@ two major versions.*
   restores it — recovery no longer reconstructs a bare event count that
   silently drops `apply`'s contributions. Pinned by
   `test_event_sourced_apply_handler_recovery`.
+- **Doc-example verification is fully green and covers `///` doc
+  comments.** The default `verify_doc_examples.sh` CI invocation was
+  red: 16 docs-site blocks taught invalid syntax (pre-`then` `if`
+  blocks; `Err(e)` on a prelude whose constructor is `Error(e)`;
+  recursive ADT payloads written as bare `List[T]` variant args where
+  the parser requires a tuple payload `Cons((T, List[T]))`; an
+  unclosed fence in `index.mdx`; and `send x get(self)`, which is
+  untypeable because a `ref` capability is not sendable — rewritten as
+  `send self` from inside a behavior). All rewritten against the
+  current compiler. The script now also verifies every ```` ```nulang
+  ```` block inside `///` doc comments of `.nula` sources, pinned with
+  a runnable round-trip example in `src/stdlib/json.nula`'s `parse`
+  docs. Default run: 54 passed / 0 failed / 0 skipped.
 - **A failing workflow step is no longer silent.** Previously a step
   error (e.g. a non-exhaustive match) produced no diagnostic at all —
   no stderr, exit 0 — only a difference in which compensations ran

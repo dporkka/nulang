@@ -40,6 +40,10 @@ Behaviors that return a value can be called synchronously with `ask`. For actor-
 `spawn` creates a new actor instance and returns its reference:
 
 ```nulang
+actor Counter {
+    state count: Int = 0
+    behavior inc() { self.count = self.count + 1 }
+}
 let counter = spawn Counter {} in {
     // counter is an Actor reference
     send counter inc()
@@ -54,6 +58,10 @@ The expression after `in` runs in the spawner's context and can reference the ne
 `spawn link` and `spawn monitor` create an actor and immediately link or monitor it to the spawner:
 
 ```nulang
+actor Worker {
+    behavior work() { 0 }
+}
+
 // Link: abnormal exits propagate to the spawner
 let worker = spawn link Worker {} in { worker }
 
@@ -68,9 +76,20 @@ These are parser desugars — `spawn link Actor {..} in {..}` is equivalent to `
 `send` delivers a message to an actor's mailbox asynchronously:
 
 ```nulang
-send counter inc()
-send counter inc_by(5)
-send counter get(self)  // self refers to the current actor
+actor Counter {
+    state count: Int = 0
+    behavior inc() { self.count = self.count + 1 }
+    behavior inc_by(n: Int) { self.count = self.count + n }
+    behavior get() { self.count }
+    behavior tick() {
+        // self refers to the current actor — usable as a send target
+        send self inc()
+        send self inc_by(5)
+        send self get()
+    }
+}
+let counter = spawn Counter {}
+send counter tick()
 ```
 
 Messages are always delivered and never dropped. The sender does not block.
@@ -80,10 +99,12 @@ Messages are always delivered and never dropped. The sender does not block.
 Inside a behavior, `receive` blocks until a matching message arrives:
 
 ```nulang
-behavior wait_for_reply() {
-    receive {
-        | reply(value) => {
-            perform IO.print("Got: " + perform Int.to_string(value))
+actor Worker {
+    behavior wait_for_reply() {
+        receive {
+            | reply(value) => {
+                perform IO.print("Got: " + perform Int.to_string(value))
+            }
         }
     }
 }

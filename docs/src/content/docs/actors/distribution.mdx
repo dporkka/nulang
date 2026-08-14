@@ -11,6 +11,11 @@ import CopyMarkdown from '../../../components/CopyMarkdown.astro';
 Nulang actors are location-transparent: you `send` to an actor without knowing (or caring) which node it lives on. The runtime resolves actor addresses — local or remote — transparently.
 
 ```nulang
+actor Counter {
+    behavior inc() { 0 }
+}
+let some_actor = spawn Counter {}
+
 // Same code works for local AND remote actors
 send some_actor inc()
 ```

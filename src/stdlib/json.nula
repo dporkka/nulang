@@ -22,6 +22,18 @@ pub type JsonValue =
 ///
 /// Trailing whitespace and extra content after the first value are
 /// ignored. Empty or whitespace-only input returns JsonNull.
+///
+/// Example (verified by `scripts/verify_doc_examples.sh`):
+/// ```nulang
+/// // Round-trip a JSON object through parse + stringify.
+/// import stdlib::json
+///
+/// fn main() {
+///     let v = parse("{\"a\": 1, \"b\": [true, null]}")
+///     let s = stringify(v)
+///     perform IO.print("round-trip: " + s)
+/// }
+/// ```
 pub fn parse(json: String) -> JsonValue {
     let len = perform String.length(json);
 
