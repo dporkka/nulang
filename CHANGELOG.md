@@ -63,6 +63,17 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **LSP protocol-level integration tests.** 6 tests drive the full
+  JSON-RPC dispatch path (`tower_lsp::LspService` with real `Request`
+  objects — the same service the stdio server runs), closing the
+  "no protocol-level integration tests" gap: initialize capability
+  round-trip, publishDiagnostics pushed on didOpen/didChange (empty for
+  well-formed docs, parse-error diagnostics for broken ones), hover
+  signature, completion keywords, documentSymbol outline, and the
+  shutdown/exit lifecycle (requests after exit fail with ExitedError).
+  New direct deps `futures`/`tower-service` (both already in the
+  lockfile) behind the `lsp` feature.
+
 - **Message-reorder DST scenario.** `NetworkTransport` gains
   `set_reorder`/`flush_held` (default no-ops); the deterministic
   transport delivers consecutive packets to a peer swapped (bounded

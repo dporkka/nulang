@@ -3770,4 +3770,311 @@ mod lsp_tests {
         assert!(text.starts_with("fn pure"), "basic sig: {}", text);
         assert!(!text.contains("effects:"), "no effects section: {}", text);
     }
+
+    // -----------------------------------------------------------------------
+    // Protocol-level integration tests (PLAN Phase 2, bullet 7: "No
+    // protocol-level (tower-lsp test-harness) integration tests").
+    //
+    // These drive the FULL JSON-RPC dispatch path — `tower_lsp::LspService`
+    // with real `Request` objects, the same service the stdio server runs —
+    // asserting request/response round-trips (initialize, hover, completion,
+    // documentSymbol, shutdown) AND the server->client notification stream
+    // (publishDiagnostics on didOpen), which the engine-level unit tests
+    // above never reach. No subprocess, no wall-clock: `#[tokio::test]`.
+    // -----------------------------------------------------------------------
+
+    use futures::StreamExt;
+    use tower_lsp::jsonrpc::{Id, Request};
+    // `LspService` implements `tower::Service`; tower-lsp does not
+    // re-export the trait, so the Service methods come from the
+    // `tower_service` crate (a transitive dep of tower-lsp, already in
+    // the lockfile; declared directly below for the `lsp` feature).
+    use tower_service::Service;
+
+    const DOC_URL: &str = "file:///protocol_test.nula";
+
+    fn initialize_req() -> Request {
+        Request::build("initialize")
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }))
+            .id(Id::Number(1.into()))
+            .finish()
+    }
+
+    fn did_open_req(url: &str, version: i32, text: &str) -> Request {
+        Request::build("textDocument/didOpen")
+            .params(serde_json::json!({
+                "textDocument": {
+                    "uri": url,
+                    "languageId": "nulang",
+                    "version": version,
+                    "text": text
+                }
+            }))
+            .finish()
+    }
+
+    fn hover_req(url: &str, line: u32, character: u32) -> Request {
+        Request::build("textDocument/hover")
+            .params(serde_json::json!({
+                "textDocument": { "uri": url },
+                "position": { "line": line, "character": character }
+            }))
+            .id(Id::Number(2.into()))
+            .finish()
+    }
+
+    fn completion_req(url: &str, line: u32, character: u32) -> Request {
+        Request::build("textDocument/completion")
+            .params(serde_json::json!({
+                "textDocument": { "uri": url },
+                "position": { "line": line, "character": character }
+            }))
+            .id(Id::Number(3.into()))
+            .finish()
+    }
+
+    fn document_symbol_req(url: &str) -> Request {
+        Request::build("textDocument/documentSymbol")
+            .params(serde_json::json!({
+                "textDocument": { "uri": url }
+            }))
+            .id(Id::Number(4.into()))
+            .finish()
+    }
+
+    /// Drive one JSON-RPC exchange through the real service: poll-ready,
+    /// call, unwrap the transport result, return the response.
+    async fn call(
+        service: &mut LspService<NulangLanguageServer>,
+        req: Request,
+    ) -> Option<tower_lsp::jsonrpc::Response> {
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("service ready");
+        service.call(req).await.expect("call succeeds")
+    }
+
+    async fn init(service: &mut LspService<NulangLanguageServer>) {
+        let resp = call(service, initialize_req())
+            .await
+            .expect("initialize response");
+        let (_id, result) = resp.into_parts();
+        let caps = result.expect("initialize must succeed");
+        // The full capability table survives the wire round-trip.
+        assert_eq!(
+            caps["capabilities"]["hoverProvider"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            caps["capabilities"]["definitionProvider"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            caps["capabilities"]["completionProvider"]["triggerCharacters"],
+            serde_json::json!([".", ":"])
+        );
+        assert!(caps["capabilities"].get("inlayHintProvider").is_some());
+    }
+
+    /// initialize -> didOpen(good doc) -> didOpen(broken doc): the server
+    /// pushes publishDiagnostics over the server->client stream for BOTH,
+    /// empty for the good doc and non-empty (parse error) for the broken one.
+    #[tokio::test]
+    async fn test_protocol_diagnostics_pushed_on_did_open() {
+        let (mut service, mut socket) = LspService::new(|client| NulangLanguageServer::new(client));
+        init(&mut service).await;
+
+        call(
+            &mut service,
+            did_open_req(DOC_URL, 1, "fn add(x: Int, y: Int) { x + y }"),
+        )
+        .await;
+        let msg = socket.next().await.expect("diagnostics notification");
+        assert_eq!(msg.method(), "textDocument/publishDiagnostics");
+        let params = msg.params().cloned().expect("params");
+        assert_eq!(
+            params["diagnostics"].as_array().map(|a| a.len()),
+            Some(0),
+            "well-formed doc must publish zero diagnostics, got {params}"
+        );
+        assert_eq!(params["uri"], serde_json::json!(DOC_URL));
+
+        call(&mut service, did_open_req(DOC_URL, 2, "fn broken( ")).await;
+        let msg = socket.next().await.expect("diagnostics notification");
+        let params = msg.params().cloned().expect("params");
+        let diagnostics = params["diagnostics"].as_array().expect("diagnostics array");
+        assert!(
+            !diagnostics.is_empty(),
+            "broken doc must publish a diagnostic, got {params}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d["severity"] == serde_json::json!(1)),
+            "parse error must be severity 1 (Error), got {params}"
+        );
+    }
+
+    /// didChange pushes fresh diagnostics for the new text.
+    #[tokio::test]
+    async fn test_protocol_diagnostics_pushed_on_did_change() {
+        let (mut service, mut socket) = LspService::new(|client| NulangLanguageServer::new(client));
+        init(&mut service).await;
+        call(
+            &mut service,
+            did_open_req(DOC_URL, 1, "fn add(x: Int, y: Int) { x + y }"),
+        )
+        .await;
+        socket.next().await.expect("open diagnostics");
+
+        call(
+            &mut service,
+            Request::build("textDocument/didChange")
+                .params(serde_json::json!({
+                    "textDocument": { "uri": DOC_URL, "version": 2 },
+                    "contentChanges": [ { "text": "fn broken( " } ]
+                }))
+                .finish(),
+        )
+        .await;
+        let msg = socket.next().await.expect("change diagnostics");
+        assert_eq!(msg.method(), "textDocument/publishDiagnostics");
+        let params = msg.params().cloned().expect("params");
+        assert!(
+            !params["diagnostics"].as_array().unwrap().is_empty(),
+            "change to a broken doc must publish diagnostics, got {params}"
+        );
+    }
+
+    /// hover over a function declaration returns its signature text through
+    /// the full JSON-RPC round-trip.
+    #[tokio::test]
+    async fn test_protocol_hover_returns_signature() {
+        let (mut service, _socket) = LspService::new(|client| NulangLanguageServer::new(client));
+        init(&mut service).await;
+        call(
+            &mut service,
+            did_open_req(DOC_URL, 1, "fn add(x: Int, y: Int) { x + y }"),
+        )
+        .await;
+
+        let resp = call(&mut service, hover_req(DOC_URL, 0, 4))
+            .await
+            .expect("hover response");
+        let (id, result) = resp.into_parts();
+        assert_eq!(id, Id::Number(2.into()));
+        let v = result.expect("hover must succeed");
+        // HoverContents serializes as an object ({language,value} or
+        // {kind,value}) for language/markup strings, or a bare string for
+        // plain MarkedString::String — accept both.
+        let value = match v["contents"].as_str() {
+            Some(s) => s.to_string(),
+            None => v["contents"]
+                .get("value")
+                .or_else(|| v["contents"].get("language"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        };
+        assert!(
+            !value.is_empty(),
+            "hover must return signature text, got {v}"
+        );
+    }
+
+    /// completion at an empty line returns language keywords through the
+    /// full JSON-RPC round-trip.
+    #[tokio::test]
+    async fn test_protocol_completion_returns_keywords() {
+        let (mut service, _socket) = LspService::new(|client| NulangLanguageServer::new(client));
+        init(&mut service).await;
+        call(&mut service, did_open_req(DOC_URL, 1, "let x = 42\n")).await;
+
+        let resp = call(&mut service, completion_req(DOC_URL, 1, 0))
+            .await
+            .expect("completion response");
+        let (_id, result) = resp.into_parts();
+        let v = result.expect("completion must succeed");
+        let items = v
+            .as_array()
+            .expect("CompletionResponse::Array serializes as array");
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert!(
+            labels.contains(&"fn"),
+            "completion must include fn, got {labels:?}"
+        );
+        assert!(
+            labels.contains(&"match"),
+            "completion must include match, got {labels:?}"
+        );
+    }
+
+    /// documentSymbol returns the top-level declaration outline through the
+    /// full JSON-RPC round-trip.
+    #[tokio::test]
+    async fn test_protocol_document_symbol_returns_outline() {
+        let (mut service, _socket) = LspService::new(|client| NulangLanguageServer::new(client));
+        init(&mut service).await;
+        call(
+            &mut service,
+            did_open_req(
+                DOC_URL,
+                1,
+                "fn add(x: Int, y: Int) { x + y }\nfn main() { add(1, 2) }\n",
+            ),
+        )
+        .await;
+
+        let resp = call(&mut service, document_symbol_req(DOC_URL))
+            .await
+            .expect("documentSymbol response");
+        let (_id, result) = resp.into_parts();
+        let v = result.expect("documentSymbol must succeed");
+        let symbols = v.as_array().expect("documentSymbol response is an array");
+        let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(
+            names.contains(&"add") && names.contains(&"main"),
+            "outline must contain add and main, got {names:?}"
+        );
+    }
+
+    /// shutdown then exit: shutdown returns Ok; a request after exit fails
+    /// with the service's Exited error (the LSP lifecycle contract).
+    #[tokio::test]
+    async fn test_protocol_shutdown_then_exit() {
+        let (mut service, _socket) = LspService::new(|client| NulangLanguageServer::new(client));
+        init(&mut service).await;
+
+        let resp = call(
+            &mut service,
+            Request::build("shutdown").id(Id::Number(9.into())).finish(),
+        )
+        .await
+        .expect("shutdown response");
+        let (id, result) = resp.into_parts();
+        assert_eq!(id, Id::Number(9.into()));
+        assert_eq!(
+            result.expect("shutdown must succeed"),
+            serde_json::Value::Null
+        );
+
+        call(&mut service, Request::build("exit").finish()).await;
+
+        // Any request after exit is rejected at the service boundary.
+        let err = service
+            .call(
+                Request::build("textDocument/hover")
+                    .id(Id::Number(10.into()))
+                    .finish(),
+            )
+            .await;
+        assert!(
+            err.is_err(),
+            "request after exit must fail with ExitedError"
+        );
+    }
 }

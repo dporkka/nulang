@@ -866,12 +866,22 @@ session can responsibly rush). 5 commits this session.
   and publishes to GitHub Releases on tag push; `v0.1.0` is tagged.
   Gaps: no cryptographic code signing (checksums only), and a 5th
   target (Windows) is blocked on Windows support itself (bullet 5).
-- **Bullet 7 (LSP hardening) — assessed, partial.** 38 unit tests give
-  decent coverage of individual feature logic (inlay hints, completion,
-  hover, workspace symbols, diagnostics). No protocol-level
-  (`tower-lsp` test-harness) integration tests and no 24-hour soak test
-  against a large corpus — both remain open, not attempted (the soak
-  test specifically needs wall-clock time no single session has).
+- **Bullet 7 (LSP hardening) — protocol-level gap closed 2026-08-14.**
+  38 unit tests cover individual feature logic (inlay hints, completion,
+  hover, workspace symbols, diagnostics); the previously-open
+  "no protocol-level (tower-lsp test-harness) integration tests" gap is
+  now closed with 6 tests driving the FULL JSON-RPC dispatch path —
+  `tower_lsp::LspService` with real `Request` objects (the same service
+  the stdio server runs), asserting request/response round-trips
+  (initialize capabilities, hover signature, completion keywords,
+  documentSymbol outline, shutdown/exit lifecycle incl. ExitedError
+  after exit) AND the server->client notification stream
+  (publishDiagnostics pushed on didOpen/didChange: empty for
+  well-formed docs, parse-error severity-1 diagnostic for broken ones).
+  In-process, no subprocess, `#[tokio::test]`; new direct deps
+  `futures`/`tower-service` (both already in the lockfile). The 24-hour
+  soak test against a large corpus remains open — it needs wall-clock
+  time no single session has.
 - **Bullet 8 (dependency audit) — real, verified progress.** Found
   `libsql`'s `default-features` pulled in `replication`+`sync`, which
   drag in the entire `tonic`/`axum`/`tower-http` gRPC stack for
