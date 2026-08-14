@@ -460,10 +460,90 @@ def annotationsClosed : Expr → Prop
 | .app e₁ e₂ | .strConcat e₁ e₂ | .binOp _ e₁ e₂ => annotationsClosed e₁ ∧ annotationsClosed e₂
 | .letIn _ e₁ e₂ => annotationsClosed e₁ ∧ annotationsClosed e₂
 | .ifThenElse e₁ e₂ e₃ => annotationsClosed e₁ ∧ annotationsClosed e₂ ∧ annotationsClosed e₃
-theorem weakening {Γ : Context} {x : Name} {σ : Scheme} {e : Expr} {τ : Ty}
-    (h : HasType Γ e τ) :
-    HasType ((x, σ) :: Γ) e τ := by
-  sorry
+/-
+  Weakening.  The naive head-form statement `HasType Γ e τ → HasType ((x,σ)::Γ) e τ`
+  is FALSE for open schemes σ: in the `tLet` case the inner generalization runs
+  over `freeTypeVars ((x,σ)::Γ)` (larger) instead of `freeTypeVars Γ`, and the
+  `tVar` case finds the new head binding, so the derivation does not lift.  This
+  is the "variable-capture/context-ordering subtlety" documented in the README
+  regression note (2026-08-02).
+
+  The correct formulation appends the new binding AT THE TAIL of the context
+  (`Γ ++ [(x, ⟨[], τ₀⟩)]`) with a CLOSED scheme: head-first lookup never sees
+  the appended binding, so every `tVar` lifts unchanged, and
+  `freeTypeVars (Γ ++ [(x, ⟨[], τ₀⟩)]) = freeTypeVars Γ` (τ₀ closed), so the
+  `tLet` generalization is literally unchanged.
+-/
+
+/-- Lookup in `Γ` succeeds identically in `Γ ++ Δ` — appended bindings are
+    strictly behind every binding of `Γ`, so head-first lookup never sees
+    them. -/
+lemma Context.lookup_append_left {Γ Δ : Context} {x : Name} {σ : Scheme}
+    (h : Context.lookup Γ x = some σ) :
+    Context.lookup (Γ ++ Δ) x = some σ := by
+  induction Γ with
+  | nil => simp [Context.lookup] at h
+  | cons p Γs ih =>
+      cases p with
+      | mk y sy =>
+          by_cases hxy : x == y
+          · simp [Context.lookup, hxy] at h ⊢
+            exact h
+          · simp [Context.lookup, hxy] at h
+            exact ih h
+
+/-- `freeTypeVars` distributes over list append. -/
+lemma Context.freeTypeVars_append (Γ Δ : Context) :
+    Context.freeTypeVars (Γ ++ Δ) = Context.freeTypeVars Γ ++ Context.freeTypeVars Δ := by
+  induction Γ with
+  | nil => simp [Context.freeTypeVars]
+  | cons p Γs ih =>
+      cases p with
+      | mk y sy =>
+          simp [Context.freeTypeVars, ih, List.append_assoc]
+
+/-- Context weakening by appending ONE closed binding at the tail. -/
+theorem weakening_append_closed {Γ : Context} {x : Name} {τ₀ : Ty} {e : Expr} {τ : Ty}
+    (h : HasType Γ e τ) (hτ₀ : τ₀.fv = []) :
+    HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ := by
+  induction h with
+  | tVar Γ x τ σ hlookup hinst =>
+      exact .tVar (Context.lookup_append_left hlookup) hinst
+  | tLitInt => exact .tLitInt
+  | tLitBool => exact .tLitBool
+  | tLitString => exact .tLitString
+  | tLambda Γ y τ₁ e τ₂ ih =>
+      -- `((y, ⟨[], τ₁⟩) :: Γ) ++ [(x, ⟨[], τ₀⟩)]` is definitionally
+      -- `(y, ⟨[], τ₁⟩) :: (Γ ++ [(x, ⟨[], τ₀⟩)])` (cons-assoc for ++).
+      exact .tLambda ih
+  | tApp h₁ h₂ ih₁ ih₂ =>
+      exact .tApp ih₁ ih₂
+  | tLet Γ y e₁ e₂ τ₁ τ₂ h₁ h₂ ih₁ ih₂ =>
+      -- ih₂ : HasType ((y, generalize (freeTypeVars Γ) τ₁) :: (Γ ++ [(x,⟨[],τ₀⟩)])) e₂ τ₂
+      -- The tLet rule for the weakened context needs
+      --   generalize (freeTypeVars (Γ ++ [(x,⟨[],τ₀⟩)])) τ₁
+      -- which is exactly `generalize (freeTypeVars Γ) τ₁` because τ₀ is closed.
+      exact .tLet ih₁ (by
+        simpa [Context.freeTypeVars, Context.freeTypeVars_append, hτ₀] using ih₂)
+  | tIf h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      exact .tIf ih₁ ih₂ ih₃
+  | tBinOpIntArith hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpIntArith hop ih₁ ih₂
+  | tBinOpIntCmp hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpIntCmp hop ih₁ ih₂
+  | tBinOpBoolLogic hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpBoolLogic hop ih₁ ih₂
+  | tStrConcat h₁ h₂ ih₁ ih₂ =>
+      exact .tStrConcat ih₁ ih₂
+  | tUnit =>
+      exact .tUnit
+
+/-- Weakening (single closed binding, append form) — the sound version of the
+    (false) head-form statement. -/
+theorem weakening {Γ : Context} {x : Name} {τ₀ : Ty} {e : Expr} {τ : Ty}
+    (h : HasType Γ e τ) (hτ₀ : τ₀.fv = []) :
+    HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ := by
+  exact weakening_append_closed h hτ₀
 
 theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : Expr}
     (h : HasType ((x, ⟨[], τ₁⟩) :: Γ) e τ₂)
@@ -514,7 +594,89 @@ theorem canonical_forms {v : Expr} {τ : Ty}
 
 theorem progress {e : Expr} {τ : Ty} (h : HasType Context.empty e τ) :
     isValue e ∨ (∃ e', Step e e') := by
-  sorry
+  induction h with
+  | tVar Γ x τ σ hlookup hinst =>
+      -- The empty context has no bindings: lookup must fail.
+      simp [Context.lookup] at hlookup
+  | tLitInt => left; rfl
+  | tLitBool => left; rfl
+  | tLitString => left; rfl
+  | tLambda => left; rfl
+  | tApp h₁ h₂ ih₁ ih₂ =>
+      -- Both sub-derivations share the empty context, so their induction
+      -- hypotheses apply.
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ with hv₂ | ⟨e₂', step₂⟩
+        · -- Both operands are values; canonical forms forces e₁ to be a
+          -- lambda (the other value shapes have non-function types).
+          rcases canonical_forms h₁ hv₁ with
+          | ⟨n, rfl, rfl⟩ => cases h₁
+          | ⟨b, rfl, rfl⟩ => cases h₁
+          | ⟨s, rfl, rfl⟩ => cases h₁
+          | ⟨x, τ₀, e, rfl, τ₂', rfl⟩ =>
+              right
+              exact ⟨subst x e₂ e, .appBeta hv₂⟩
+          | ⟨rfl, rfl⟩ => cases h₁
+        · right; exact ⟨.app e₁ e₂', .appArg hv₁ step₂⟩
+      · right; exact ⟨.app e₁' e₂, .appFun step₁⟩
+  | tLet h₁ h₂ ih₁ ih₂ =>
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · right; exact ⟨subst x e₁ e₂, .letSubst hv₁⟩
+      · right; exact ⟨.letIn x e₁' e₂, .letBind step₁⟩
+  | tIf h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · -- e₁ is a Bool value: canonical forms forces a literal.
+        rcases canonical_forms h₁ hv₁ with
+        | ⟨b, rfl, rfl⟩ =>
+            right
+            cases b <;> simp [Step.ifTrue, Step.ifFalse]
+        | _ => cases h₁
+      · right; exact ⟨.ifThenElse e₁' e₂ e₃, .ifGuard step₁⟩
+  | tBinOpIntArith hop h₁ h₂ ih₁ ih₂ =>
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁ hv₁ with
+          | ⟨n, rfl, rfl⟩ => rcases canonical_forms h₂ hv₂ with
+            | ⟨m, rfl, rfl⟩ =>
+                right; exact ⟨binOpApply op n m, .binOpEval⟩
+            | _ => cases h₂
+          | _ => cases h₁
+        · right; exact ⟨.binOp op e₁ e₂', .binOpRight hv₁ step₂⟩
+      · right; exact ⟨.binOp op e₁' e₂, .binOpLeft step₁⟩
+  | tBinOpIntCmp hop h₁ h₂ ih₁ ih₂ =>
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁ hv₁ with
+          | ⟨n, rfl, rfl⟩ => rcases canonical_forms h₂ hv₂ with
+            | ⟨m, rfl, rfl⟩ =>
+                right; exact ⟨binOpApply op n m, .binOpEval⟩
+            | _ => cases h₂
+          | _ => cases h₁
+        · right; exact ⟨.binOp op e₁ e₂', .binOpRight hv₁ step₂⟩
+      · right; exact ⟨.binOp op e₁' e₂, .binOpLeft step₁⟩
+  | tBinOpBoolLogic hop h₁ h₂ ih₁ ih₂ =>
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁ hv₁ with
+          | ⟨b₁, rfl, rfl⟩ => rcases canonical_forms h₂ hv₂ with
+            | ⟨b₂, rfl, rfl⟩ =>
+                right; exact ⟨binOpApplyBool op b₁ b₂, .binOpEvalBool hop⟩
+            | _ => cases h₂
+          | _ => cases h₁
+        · right; exact ⟨.binOp op e₁ e₂', .binOpRight hv₁ step₂⟩
+      · right; exact ⟨.binOp op e₁' e₂, .binOpLeft step₁⟩
+  | tStrConcat h₁ h₂ ih₁ ih₂ =>
+      rcases ih₁ with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁ hv₁ with
+          | ⟨s₁, rfl, rfl⟩ => rcases canonical_forms h₂ hv₂ with
+            | ⟨s₂, rfl, rfl⟩ =>
+                right; exact ⟨.litString (s₁ ++ s₂), .strConcatEval⟩
+            | _ => cases h₂
+          | _ => cases h₁
+        · right; exact ⟨.strConcat e₁ e₂', .strConcatRight hv₁ step₂⟩
+      · right; exact ⟨.strConcat e₁' e₂, .strConcatLeft step₁⟩
+  | tUnit => left; rfl
 
 
 theorem context_drop_shadowed {Γ : Context} {x : Name} {σ σ' : Scheme} {e : Expr} {τ : Ty}
@@ -522,16 +684,128 @@ theorem context_drop_shadowed {Γ : Context} {x : Name} {σ σ' : Scheme} {e : E
     (h : HasType ((x, σ') :: (x, σ) :: Γ) e τ) :
     HasType ((x, σ') :: Γ) e τ := by
   sorry
+/-- The empty substitution is the identity on types. -/
+lemma Ty.subst_nil (τ : Ty) : τ.subst [] = τ := by
+  induction τ with
+  | var v => simp [Ty.subst]
+  | prim p => simp [Ty.subst]
+  | fn a b ha hb => simp [Ty.subst, ha, hb]
+  | unit => simp [Ty.subst]
+
+/-- Instantiation of a scheme with no parameters is its body. -/
+lemma Scheme.instantiate_closed (σ : Scheme) (h : σ.params = []) :
+    (σ.instantiate defaultFresh).1 = σ.body := by
+  unfold Scheme.instantiate
+  simp [h, Ty.subst_nil]
+
+/-- If a lookup succeeds in `Γ`, the scheme's body free variables are a
+    subset of the context's free type variables. -/
+lemma Context.lookup_body_fv_subset {Γ : Context} {x : Name} {σ : Scheme}
+    (h : Context.lookup Γ x = some σ) :
+    σ.body.fv ⊆ Context.freeTypeVars Γ := by
+  induction Γ with
+  | nil => simp [Context.lookup] at h
+  | cons p Γs ih =>
+      cases p with
+      | mk y sy =>
+          simp [Context.lookup] at h
+          by_cases hxy : x == y
+          · simp [hxy] at h
+            injection h with hbody
+            subst sy
+            intro v hv
+            simp [Context.freeTypeVars, List.mem_append, hv]
+          · simp [hxy] at h
+            intro v hv
+            simp [Context.freeTypeVars, List.mem_append]
+            right
+            exact ih h hv
+
+/-- The generalized scheme of a CLOSED type is itself closed (empty
+    parameters), and its body keeps the type's (empty) free vars. -/
+lemma Scheme.generalize_closed {Γ : Context} {τ₁ : Ty}
+    (h : τ₁.fv = []) :
+    (Scheme.generalize (Context.freeTypeVars Γ) τ₁).params = [] := by
+  unfold Scheme.generalize
+  simp [h]
+
+/-- Closed-context typing preserves closedness of the type: with a
+    context free of type variables, monomorphic (parameter-free) schemes,
+    and closed annotations, every derivable type is closed. -/
 theorem closed_type_under_closed_context {Γ : Context} {e : Expr} {τ : Ty}
     (h : HasType Γ e τ) (hΓ : Context.freeTypeVars Γ = [])
     (h_params : ∀ (x : Name) (σ : Scheme), Context.lookup Γ x = some σ → σ.params = [])
     (h_closed : annotationsClosed e) :
     τ.fv = [] := by
-  sorry
+  induction h with
+  | tVar Γ x τ σ hlookup hinst =>
+      have hparams : σ.params = [] := h_params x σ hlookup
+      have hτ : τ = σ.body := by
+        rw [← hinst]
+        exact Scheme.instantiate_closed σ hparams
+      rw [hτ]
+      have hsub : σ.body.fv ⊆ Context.freeTypeVars Γ :=
+        Context.lookup_body_fv_subset hlookup
+      rw [hΓ] at hsub
+      induction σ.body.fv with
+      | nil => rfl
+      | cons v vs ih =>
+          have hv : v ∈ ([] : List Var) := hsub (by simp)
+          simp at hv
+  | tLitInt => rfl
+  | tLitBool => rfl
+  | tLitString => rfl
+  | tLambda Γ x τ₁ e τ₂ hbody ih =>
+      -- ih : freeTypeVars ((x, ⟨[], τ₁⟩) :: Γ) = [] →
+      --      (∀ x σ, lookup ... → σ.params = []) → annotationsClosed e → τ₂.fv = []
+      -- h_closed : τ₁.fv = [] ∧ annotationsClosed e
+      exact ih (by
+        simp [Context.freeTypeVars, hΓ, h_closed.1])
+        (by
+          intro x' σ' hl
+          simp [Context.lookup] at hl
+          by_cases hxx : x' == x
+          · simp [hxx] at hl
+            injection hl with hparams hbody
+            simpa using hparams
+          · simp [hxx] at hl
+            exact h_params x' σ' hl)
+        h_closed.2
+  | tApp h₁ h₂ ih₁ ih₂ =>
+      have hfn : (.fn τ₂ τ₁).fv = [] := by
+        exact ih₁ hΓ h_params h_closed.1
+      simp [Ty.fv] at hfn
+      exact hfn.2
+  | tLet Γ x e₁ e₂ τ₁ τ₂ h₁ h₂ ih₁ ih₂ =>
+      have hτ₁ : τ₁.fv = [] := ih₁ hΓ h_params h_closed.1
+      -- ih₂ : freeTypeVars ((x, generalize (freeTypeVars Γ) τ₁) :: Γ) = [] →
+      --      (∀ x σ, lookup ... → σ.params = []) → annotationsClosed e₂ → τ₂.fv = []
+      exact ih₂ (by
+        simp [Context.freeTypeVars, hΓ, hτ₁])
+        (by
+          intro x' σ' hl
+          simp [Context.lookup] at hl
+          by_cases hxx : x' == x
+          · simp [hxx] at hl
+            injection hl with hparams hbody
+            simpa using hparams
+          · simp [hxx] at hl
+            exact h_params x' σ' hl)
+        h_closed.2
+  | tIf h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      exact ih₂ hΓ h_params h_closed.2.1
+  | tBinOpIntArith hop h₁ h₂ ih₁ ih₂ => rfl
+  | tBinOpIntCmp hop h₁ h₂ ih₁ ih₂ => rfl
+  | tBinOpBoolLogic hop h₁ h₂ ih₁ ih₂ => rfl
+  | tStrConcat h₁ h₂ ih₁ ih₂ => rfl
+  | tUnit => rfl
+
+/-- A value typed in the empty context has a closed type (provided its
+    annotations are closed). -/
 theorem value_has_closed_type {v : Expr} {τ : Ty}
     (h : HasType Context.empty v τ) (hv : isValue v) (h_closed : annotationsClosed v) :
     τ.fv = [] := by
-  sorry
+  exact closed_type_under_closed_context h rfl (by simp [Context.lookup]) h_closed
 
 theorem preservation {e e' : Expr} {τ : Ty} (ht : HasType Context.empty e τ) (hs : Step e e')
     (h_closed : annotationsClosed e) :

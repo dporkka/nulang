@@ -845,9 +845,20 @@ session can responsibly rush). 5 commits this session.
   `spec/formal/README.md`'s regression note). Added a CI sorry-count
   ratchet (`.github/workflows/ci.yml`) so this exact silent-regression
   pattern can't recur — previously CI only ran `lake build`, which
-  passes even with sorries. Actually re-proving the theorems is
-  specialist Lean work or a fresh independent implementation; not
-  attempted this session — genuinely hard, not "follow-up" spin.
+  passes even with sorries. **2026-08-14: four theorems PROVED**
+  (sorry count 9 → 5, ratchet baseline updated): the naive head-form
+  `weakening` is FALSE for open schemes (tLet generalizes over the
+  larger context; tVar finds the new head), so it was corrected to the
+  tail-append closed form `HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ`
+  (`weakening_append_closed`) and proved; `progress` proved via
+  induction + the existing `canonical_forms`; and
+  `closed_type_under_closed_context` + `value_has_closed_type` proved
+  with the lookup-fv-subset/instantiate-closed lemmas. Remaining:
+  `substitution_lemma` (needs term-free-variable/context-invariance
+  machinery — the same statement-repair class as weakening),
+  `context_drop_shadowed` (needs a set-based generalize congruence),
+  `preservation`, `type_soundness` — genuinely hard proof-design work,
+  tracked with the documented root cause.
 - **[X] Bullet 2 (LinearIso must-use) — closed 2026-08-14.** Exactly-once
   (must-use) is enforced for `let`-bound linear values, with a
   transparent-rebind exemption (`let a = x` doesn't carry a second

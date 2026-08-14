@@ -63,6 +63,20 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **Formal semantics: four soundness-support theorems proved.** The
+  naive head-form `weakening` is FALSE for open schemes (the `tLet`
+  rule generalizes over the larger context; `tVar` finds the new head
+  binding) — the documented root cause of the 2026-07-26 regression.
+  Corrected to the tail-append closed form
+  (`HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ`) and proved, along with
+  `progress`, `closed_type_under_closed_context`, and
+  `value_has_closed_type` in `spec/formal/types.lean` (sorry count 9 →
+  5; CI ratchet baseline updated). Remaining sorries are the
+  substitution→preservation→soundness chain, whose naive statements
+  carry the same capture subtlety and need term-free-variable /
+  context-invariance machinery — documented in the README regression
+  note.
+
 - **Parameter-level LinearIso must-use verified end-to-end.** 5 new
   conformance cases (cap_30–34) prove exactly-once enforcement for
   `lineariso` function and behavior parameters through the compiled

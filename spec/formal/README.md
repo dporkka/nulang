@@ -6,6 +6,15 @@
 > **Status:** Bootstrap phase — type language, substitution, unification,
 > capability lattice, and effect rows are formalized. Soundness proofs
 > are stated as conjectures pending machine verification.
+>
+> **Proof status (2026-08-14):** `weakening` (corrected statement),
+> `progress`, `closed_type_under_closed_context`, and
+> `value_has_closed_type` are PROVED in `types.lean` (sorry count 9 → 5,
+> CI ratchet baseline updated). The remaining `sorry`s are the
+> substitution→preservation→soundness chain: `substitution_lemma`,
+> `context_drop_shadowed`, `preservation`, `type_soundness`
+> (`types.lean`) and `linear_at_most_once` (`capabilities.lean`, needs
+> the context-splitting semantics — a modeling gap, not a proof gap).
 
 ## Purpose
 
@@ -58,6 +67,29 @@ statically handled — no runtime "unhandled effect" errors.
 cd spec/formal
 lake build
 ```
+
+## Regression note (2026-08-02, extended 2026-08-14)
+
+`types.lean`'s headline theorems (`progress`, `preservation`,
+`type_soundness`) were silently regressed to `sorry` by a Lean 4.16.0
+compatibility-fix commit (`ac9ef5d`, 2026-07-26); no downstream doc was
+updated until 2026-08-02. A CI sorry-count ratchet
+(`.github/workflows/ci.yml`, baseline 5) prevents silent recurrence.
+
+**Root cause, now understood and partially repaired (2026-08-14):** the
+naive head-form weakening `HasType Γ e τ → HasType ((x,σ)::Γ) e τ` is
+FALSE for open schemes σ — the `tLet` case generalizes over the larger
+context, and the `tVar` case finds the new head binding, so the
+derivation does not lift. The correct formulation appends a CLOSED
+binding at the TAIL (`HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ` with
+`τ₀.fv = []`): head-first lookup never sees it and the let-generalization
+is unchanged. `weakening_append_closed` + the corrected `weakening` are
+proved. The same subtlety blocks the remaining chain: the
+`substitution_lemma` needs term-free-variable/context-invariance
+machinery (a naive statement is capture-prone for non-closed `v`), and
+`context_drop_shadowed`'s stated hypothesis (`σ.body.fv ⊆ …`) needs a
+set-based `generalize` congruence lemma. These are genuine proof-design
+work, not mechanical fill-in.
 
 ## References
 
