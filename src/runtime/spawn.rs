@@ -84,6 +84,37 @@ pub(crate) fn spawn_actor_with_models(
 
 /// Spawn an actor for `module`'s behavior `behavior_idx`, seeded with the
 /// `init` state fields, and wire up its bytecode handlers. Shared body of
+/// Build a bytecode actor's `bytecode_offsets` vector.
+///
+/// Ordinary bytecode actors are dispatched by WHOLE-MODULE behavior id
+/// (`bytecode_offsets` indexes the module's full behavior list). Workflow
+/// actors are the exception: `layout_workflow_behavior_table` assigns
+/// steps LOCAL ids 0..step_count-1 (internal behaviors like
+/// `__timer_fired` come after), so a workflow's offsets must be its OWN
+/// behaviors compressed to local order — a plain actor declared before
+/// the workflow would otherwise shift every step (SPEC2 §10 known-issue
+/// #2, also seen at recover/migrate/hot-reload).
+pub(crate) fn bytecode_offsets_for(
+    module: &crate::bytecode::CodeModule,
+    is_workflow: bool,
+) -> Vec<usize> {
+    if is_workflow {
+        module
+            .actor_metadata
+            .iter()
+            .find(|m| m.is_workflow)
+            .map(|meta| {
+                meta.behavior_indices
+                    .iter()
+                    .map(|&i| module.behaviors[i].code_offset)
+                    .collect()
+            })
+            .unwrap_or_else(|| module.behaviors.iter().map(|b| b.code_offset).collect())
+    } else {
+        module.behaviors.iter().map(|b| b.code_offset).collect()
+    }
+}
+
 /// both VM-callback `spawn_actor` impls.
 pub(crate) fn spawn_from_module(
     rt: &mut Runtime,
@@ -123,7 +154,8 @@ pub(crate) fn spawn_from_module(
     } else {
         spawn_actor_with_models(rt, Box::new(move || init), HashMap::new(), false, None)
     };
-    let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
+    let offsets: Vec<usize> =
+        bytecode_offsets_for(module, meta.map(|m| m.is_workflow).unwrap_or(false));
     // compensation_offsets filtered to this actor's own behaviors so
     // step-local indices in run_saga_compensation match.
     let compensation_offsets: Vec<Option<usize>> = if let Some(meta) = meta {

@@ -4115,11 +4115,7 @@ impl Runtime {
         is_workflow: bool,
         is_agent: bool,
     ) -> Actor {
-        let offsets: Vec<usize> = module
-            .behaviors
-            .iter()
-            .map(|b| b.code_offset as usize)
-            .collect();
+        let offsets: Vec<usize> = crate::runtime::spawn::bytecode_offsets_for(module, is_workflow);
         let compensation_offsets: Vec<Option<usize>> = if is_workflow {
             module
                 .actor_metadata

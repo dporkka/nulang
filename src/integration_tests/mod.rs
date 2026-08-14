@@ -3331,6 +3331,136 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// SPEC2 §10 known-issue #2: saga compensation entries carried the
+    /// step's index RELATIVE to the owning actor's behavior list, but the
+    /// codegen cursor matched them against every actor's steps in module
+    /// order — a plain `actor` declared before the `workflow` hijacked the
+    /// workflow's first compensation offset (and the workflow step lost
+    /// its compensation entirely).
+    #[test]
+    fn test_saga_compensation_ignores_non_workflow_actors() {
+        let source = r#"
+            actor Before {
+                behavior x() { 1 }
+                behavior y() { 2 }
+            }
+            workflow SagaTest {
+                step a {
+                    (self.step_index = self.step_index + 1, self.a_done = 1, emit A_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 1
+                }
+                step b {
+                    (self.step_index = self.step_index + 1, self.b_done = 1, emit B_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 2
+                }
+                step c {
+                    perform Fail.now()
+                }
+            }
+            spawn Before {}
+            spawn SagaTest {}
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        // Compilation-level pin: only the workflow's own steps carry a
+        // compensate_offset; the pre-declared plain actor's behaviors are
+        // untouched.
+        let find = |name: &str| {
+            module
+                .behaviors
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("behavior {name} missing"))
+        };
+        assert_eq!(
+            find("Before.x").compensate_offset,
+            None,
+            "plain actor behavior must not receive a compensation offset"
+        );
+        assert_eq!(
+            find("Before.y").compensate_offset,
+            None,
+            "plain actor behavior must not receive a compensation offset"
+        );
+        let step_a = find("SagaTest.a");
+        let step_b = find("SagaTest.b");
+        assert!(
+            step_a.compensate_offset.is_some(),
+            "workflow step a must carry its compensation"
+        );
+        assert!(
+            step_b.compensate_offset.is_some(),
+            "workflow step b must carry its compensation"
+        );
+
+        // Behavioral pin: run the saga to completion (happy path — no
+        // compensation), then a failing run must compensate in reverse
+        // order despite the pre-declared actor.
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let _before_id = value;
+        // Spawn the workflow by name; the run above spawned both, so grab
+        // the actor whose state has comp_order.
+        let actor_id = {
+            let rt_ref = rt.borrow();
+            // The workflow desugaring seeds step_index/workflow_name;
+            // comp_order only exists after a compensation runs.
+            *rt_ref
+                .actors
+                .iter()
+                .find(|(_, a)| a.get_state_field("workflow_name").is_some())
+                .map(|(id, _)| id)
+                .expect("workflow actor not spawned")
+        };
+        // Steps a and b complete; nothing fails, so no compensation runs.
+        // Workflow steps dispatch by LOCAL id (0..step_count-1) — the
+        // compressed bytecode_offsets maps local id 0 to THIS workflow's
+        // step a even though `Before` owns the module's global index 0.
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("a_done").and_then(|v| v.as_int()),
+                Some(1),
+                "step a ran"
+            );
+            assert_eq!(
+                actor.get_state_field("b_done").and_then(|v| v.as_int()),
+                Some(1),
+                "step b ran"
+            );
+            assert_eq!(
+                actor
+                    .get_state_field("comp_order")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0),
+                0,
+                "happy path: no compensation runs (field never written)"
+            );
+        }
+
+        // Failing run: step c (local id 2) fails, and the workflow's OWN
+        // compensations run in reverse order (b then a) — the pre-declared
+        // actor must not intercept or shift them.
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("comp_order").and_then(|v| v.as_int()),
+                Some(21),
+                "compensations must run in reverse order (b then a) despite Before"
+            );
+        }
+    }
+
     #[test]
     fn test_saga_compensation_runs_in_reverse_order() {
         // A three-step saga where the third step fails. The first two steps
