@@ -1093,9 +1093,9 @@ A capability-qualified reference type is written with an ampersand followed by t
 // ref: local mutable reference — `&` creates a ref-capability reference
 let counter: &ref Int = &0
 
-// iso/val/trn/box references are accepted in parameter and return
-// annotations, but `&` only constructs `ref` today (see §3.9)
+// every capability has a value-level constructor: `&cap expr` (see §3.9)
 fn takes_iso(x: &iso Int) -> Int { *x }
+let unique: &iso Int = &iso 5
 
 // capability annotation on an expression (`:cap`)
 let data = 5
@@ -1144,18 +1144,26 @@ Capability-qualified types are written with the capability after an ampersand pr
 // A ref reference to a local value — `&` creates `ref` references
 let counter: &ref Int = &0
 
-// iso/val/trn/box appear in annotations; no value-level constructor
-// exists for them yet, so ref is the only creatable reference
-fn takes_iso(x: &iso [Int]) -> Int { 0 }
+// Value-level constructors exist for every capability: `&cap expr`
+// builds a reference with that capability
+fn takes_iso(x: &iso [Int]) -> Int { *x }   // pass `&iso data` at the call site
+let unique: &iso [Int] = &iso [1, 2, 3]     // unique ownership — operand moved
+let frozen: &val Tree[Int] = &val tree       // immutable shared view
+let writable: &trn Int = &trn 0              // unique writer — operand moved
+let read_only: &box Int = &box 0             // read-only view of anything
+let identity: &tag Int = &tag 0              // opaque identity, no dereference
 
 // A ref reference to a record value
 let record_ref: &ref { count: Int, name: String } = &{ count: 0, name: "default" }
-
-// Note: `&expr` always creates a `ref`-capability reference. The
-// iso/val/trn/box capabilities are accepted in parameter/return
-// annotations but have no value-level constructor yet — an open
-// implementation gap, not an intentional restriction.
 ```
+
+`&cap expr` is a value-level constructor for every capability; bare `&expr`
+defaults to `&ref` (backward compatible). The unique constructors
+(`&lineariso`, `&linear`, `&iso`, `&trn`) move the operand: a bare-variable
+operand is consumed exactly like `consume x`, so a second `&iso x` on the
+same binding is rejected. The shared constructors (`&ref`, `&val`, `&box`,
+`&tag`) alias without consuming. Capabilities are erased before execution —
+at runtime every constructor is a plain value move.
 
 The compiler checks that all operations on a capability-qualified type are permitted. Attempting to write through a `val` reference or send a `ref` reference to another actor results in a compile-time error.
 

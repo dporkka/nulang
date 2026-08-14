@@ -43,6 +43,32 @@ impl DeterministicRng {
     }
 }
 
+/// `rand_core::RngCore` view of the deterministic splitmix64 generator, so
+/// the same seeded sequence can drive every random decision in the runtime
+/// (scheduler selection, cluster gossip/repair picks) — a same-seed run is
+/// then bit-reproducible end to end.
+impl rand_core::RngCore for DeterministicRng {
+    fn next_u32(&mut self) -> u32 {
+        self.next() as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.next()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let bytes = self.next().to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
 /// A simulated actor in the DST framework.
 #[derive(Debug, Clone)]
 pub struct SimActor {

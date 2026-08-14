@@ -25,6 +25,9 @@
 //!   choice is not bit-reproducible; the asserted invariants (down /
 //!   stay-up / rejoin convergence) do not depend on which targets gossip
 //!   picks, only on heartbeat staleness, the resolver, and probes.
+//!   (For bit-reproducible gossip, the full-runtime
+//!   `cluster_dst::DeterministicCluster` seeds every node's `ClusterState`
+//!   via `set_rng` — this ClusterState-only harness predates that.)
 
 use std::collections::HashSet;
 use std::net::SocketAddr;

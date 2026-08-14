@@ -49,6 +49,9 @@ mod workflow;
 pub use trace::TraceContext;
 
 #[cfg(test)]
+mod cluster_dst;
+
+#[cfg(test)]
 mod cluster_sim;
 
 #[cfg(test)]
@@ -2255,37 +2258,59 @@ impl Runtime {
     /// the real actor runtime, not a simulated stand-in.
     ///
     /// Scope (PLAN.md Phase 1 bullet 2): pure message-passing + timer
-    /// determinism. Does NOT drive `self.scheduler` (the crossbeam
-    /// queue), cross-shard messages, or LLM completions -- a program that
+    /// + cross-shard determinism. Does NOT drive `self.scheduler` (the
+    /// crossbeam queue) or LLM completions -- a program that
     /// spawns/sends/asks/links/monitors between actors, arms timers
     /// (`send_after`), or uses timed receive-waits executes
     /// byte-identically for the same seed, provided a virtual clock is
-    /// installed. Timer determinism (2026-08-13): when no actor is ready
-    /// but the timer wheel is non-empty, the scheduler advances the
-    /// virtual clock to the next deadline and re-ticks, so a
-    /// timer-armed program's timers actually fire instead of the run
-    /// Quiescing forever with them pending (the pre-extension behavior).
-    /// Clock advances count toward `max_steps` so a program that keeps
-    /// re-arming timers cannot spin past the bound. WITHOUT a virtual
-    /// clock the old contract holds: a timer-armed program stops making
-    /// progress once its timer-waiting actor's mailbox empties and
-    /// surfaces as `Quiescent` (timers are wall-clock-based and cannot be
-    /// driven deterministically). Network-driven determinism remains
-    /// tracked as follow-up work.
+    /// installed. Cross-shard messages (sharded `Runtime`s) are drained
+    /// at the top of every loop iteration exactly like the production
+    /// scheduler (`drain_cross_shard_messages`), so `new_sharded`
+    /// runtimes are deterministic too. Timer determinism (2026-08-13):
+    /// when no actor is ready but the timer wheel is non-empty, the
+    /// scheduler advances the virtual clock to the next deadline and
+    /// re-ticks, so a timer-armed program's timers actually fire instead
+    /// of the run Quiescing forever with them pending (the
+    /// pre-extension behavior). Clock advances count toward `max_steps`
+    /// so a program that keeps re-arming timers cannot spin past the
+    /// bound. WITHOUT a virtual clock the old contract holds: a
+    /// timer-armed program stops making progress once its
+    /// timer-waiting actor's mailbox empties and surfaces as `Quiescent`
+    /// (timers are wall-clock-based and cannot be driven
+    /// deterministically). Network-driven determinism (multi-node
+    /// clusters over the in-memory transport) lives in
+    /// `cluster_dst::DeterministicCluster` (test-gated), which pumps
+    /// per-node deterministic scheduler runs interleaved with transport
+    /// delivery.
     pub fn run_scheduler_deterministic(
         &mut self,
         seed: u64,
         max_steps: u64,
     ) -> DeterministicRunResult {
         let mut rng = crate::dst::DeterministicRng::new(seed);
+        self.run_scheduler_deterministic_with_rng(&mut rng, max_steps)
+    }
+
+    /// Like [`Runtime::run_scheduler_deterministic`], but draws actor
+    /// selection from a caller-owned RNG so a multi-node harness can
+    /// interleave nodes and actors from one seeded sequence.
+    pub fn run_scheduler_deterministic_with_rng(
+        &mut self,
+        rng: &mut crate::dst::DeterministicRng,
+        max_steps: u64,
+    ) -> DeterministicRunResult {
         let mut steps: u64 = 0;
         loop {
             if steps >= max_steps {
                 return DeterministicRunResult::StepLimitExceeded { steps };
             }
+            // Drain cross-shard messages first (mirrors the production
+            // scheduler's `run_scheduler`); enqueued actors then show up
+            // in `pick_ready_actor_deterministic`'s ready set.
+            self.drain_cross_shard_messages();
             // Tick timers first (respects virtual clock via self.now())
             self.tick_timers();
-            match self.pick_ready_actor_deterministic(&mut rng) {
+            match self.pick_ready_actor_deterministic(rng) {
                 Some(actor_id) => {
                     self.step_actor(actor_id);
                     steps += 1;
@@ -5014,6 +5039,16 @@ impl Runtime {
         tls_config: crate::runtime::network::TlsConfig,
     ) -> std::io::Result<()> {
         distribution::enable_distribution(self, bind_addr, tls_config)
+    }
+
+    /// Enable distribution over a caller-supplied transport (DST: the
+    /// in-memory `DeterministicNetworkTransport`). The transport's node
+    /// id and listen address become this node's identity.
+    pub fn enable_distribution_with_transport(
+        &mut self,
+        transport: Box<dyn NetworkTransport>,
+    ) -> std::io::Result<()> {
+        distribution::enable_distribution_with_transport(self, transport)
     }
 
     pub fn join_cluster(&mut self, seed_addr: std::net::SocketAddr) {

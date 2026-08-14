@@ -382,6 +382,13 @@ pub struct ClusterState {
     /// When set, all time queries use this clock instead of wall time.
     clock: Option<super::timer::VirtualClock>,
 
+    /// Optional seeded RNG for deterministic testing. When set, every
+    /// internal random pick (gossip target selection, active-view repair
+    /// promotion) draws from it instead of `OsRng`, so a same-seed
+    /// cluster run is bit-reproducible end to end. `None` = `OsRng`
+    /// (production).
+    rng: Option<Box<dyn rand_core::RngCore>>,
+
     /// Optional split-brain resolver; `None` = resolver disabled.
     split_brain: Option<Box<dyn SplitBrainResolver>>,
     /// How often to probe Failed members (the self-healing path).
@@ -450,6 +457,7 @@ impl ClusterState {
             local_node,
             members,
             clock: None,
+            rng: None,
             failed_nodes: HashMap::new(),
             on_member_joined: None,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
@@ -485,6 +493,26 @@ impl ClusterState {
     /// When set, all time queries use this clock instead of wall time.
     pub fn set_clock(&mut self, clock: super::timer::VirtualClock) {
         self.clock = Some(clock);
+    }
+
+    /// Install a seeded RNG for deterministic testing. When set, every
+    /// internal random pick (gossip targets, repair promotion) draws
+    /// from it instead of `OsRng`, making a same-seed run bit-reproducible.
+    pub fn set_rng(&mut self, rng: Box<dyn rand_core::RngCore>) {
+        self.rng = Some(rng);
+    }
+
+    /// Draw a uniform index in `0..len` from the seeded RNG when one is
+    /// installed, else from `OsRng`.
+    fn random_index(&mut self, len: usize) -> usize {
+        debug_assert!(len > 0);
+        use rand_core::RngCore;
+        let mut buf = [0u8; 8];
+        match &mut self.rng {
+            Some(rng) => rng.fill_bytes(&mut buf),
+            None => rand_core::OsRng.fill_bytes(&mut buf),
+        }
+        (u64::from_le_bytes(buf) as usize) % len
     }
 
     /// Join an existing cluster by contacting a seed node.
@@ -970,10 +998,7 @@ impl ClusterState {
         if candidates.is_empty() {
             return;
         }
-        use rand_core::RngCore;
-        let mut buf = [0u8; 8];
-        rand_core::OsRng.fill_bytes(&mut buf);
-        let pick = candidates[(u64::from_le_bytes(buf) as usize) % candidates.len()];
+        let pick = candidates[self.random_index(candidates.len())];
         self.passive_view.retain(|id| *id != pick);
         self.probationary.push((pick, now));
     }
@@ -1220,10 +1245,19 @@ impl ClusterState {
     /// Pick `n` distinct random healthy targets for gossip.
     ///
     /// Selection is uniform over the healthy member set (partial
-    /// Fisher-Yates shuffle driven by `OsRng`), so no member is
-    /// systematically starved of gossip coverage.
-    fn pick_gossip_targets(&self, n: usize) -> Vec<(NodeId, SocketAddr)> {
-        let mut healthy: Vec<&NodeInfo> = self.healthy_members();
+    /// Fisher-Yates shuffle driven by the seeded RNG when one is
+    /// installed, else `OsRng`), so no member is systematically starved
+    /// of gossip coverage — and a same-seed DST cluster run picks the
+    /// same targets every time.
+    fn pick_gossip_targets(&mut self, n: usize) -> Vec<(NodeId, SocketAddr)> {
+        // Owned copies first: the shuffle below calls `self.random_index`
+        // (a mutable borrow), so the candidate list cannot hold references
+        // into `self`.
+        let mut healthy: Vec<(NodeId, SocketAddr)> = self
+            .healthy_members()
+            .into_iter()
+            .map(|info| (info.node_id, info.address))
+            .collect();
         if healthy.is_empty() {
             return Vec::new();
         }
@@ -1231,19 +1265,13 @@ impl ClusterState {
         // Partial Fisher-Yates: swap a random remaining element into
         // position i, then keep the first n — every healthy member has
         // an equal chance of being selected each tick.
-        use rand_core::RngCore;
-        let mut buf = [0u8; 8];
         let count = n.min(healthy.len());
         for i in 0..count {
-            rand_core::OsRng.fill_bytes(&mut buf);
-            let j = (u64::from_le_bytes(buf) as usize) % (healthy.len() - i);
+            let j = self.random_index(healthy.len() - i);
             healthy.swap(i, i + j);
         }
         healthy.truncate(count);
         healthy
-            .into_iter()
-            .map(|info| (info.node_id, info.address))
-            .collect()
     }
 }
 

@@ -81,6 +81,21 @@ pub(crate) fn record_remote_ref(rt: &mut Runtime, node: NodeId, actor_id: u64) {
     rt.remote_refs.insert(actor_id, node);
 }
 
+/// Wall-clock millis for the wire heartbeat timestamp. With a virtual
+/// clock installed (DST), the timestamp is the virtual elapsed time, so a
+/// same-seed run emits byte-identical packets; the state machine never
+/// reads the value (it carries no semantics — `handle_heartbeat` takes no
+/// timestamp), so this is safe.
+fn heartbeat_timestamp(rt: &Runtime) -> u64 {
+    match &rt.virtual_clock {
+        Some(vc) => vc.elapsed().as_millis() as u64,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    }
+}
+
 /// Enable the distributed actor system, binding to `bind_addr` for incoming
 /// connections and advertising ourselves under this address.
 pub(crate) fn enable_distribution(
@@ -91,6 +106,16 @@ pub(crate) fn enable_distribution(
     let transport = Box::new(crate::runtime::network::TcpTransport::bind(
         bind_addr, tls_config,
     )?);
+    enable_distribution_with_transport(rt, transport)
+}
+
+/// Enable the distributed actor system over a caller-supplied transport
+/// (e.g. the in-memory `DeterministicNetworkTransport` for DST). The
+/// transport's node id and listen address become this node's identity.
+pub(crate) fn enable_distribution_with_transport(
+    rt: &mut Runtime,
+    transport: Box<dyn crate::runtime::NetworkTransport>,
+) -> std::io::Result<()> {
     let listen_addr = transport.listen_addr();
     let node_id = NodeId(transport.node_id().0);
     let mut cluster = ClusterState::new(node_id, listen_addr);
@@ -231,14 +256,12 @@ pub(crate) fn process_network(rt: &mut Runtime) {
     for action in actions {
         match action {
             ClusterAction::SendHeartbeat { to, addr } => {
+                let timestamp = heartbeat_timestamp(rt);
                 if let Some(transport) = &mut rt.distributed.transport {
                     let local_id = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
                     let packet = Packet::Heartbeat {
                         node_id: local_id,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
+                        timestamp,
                     };
                     transport.send(NodeId(to.0), addr, packet);
                 }
@@ -281,14 +304,12 @@ pub(crate) fn process_network(rt: &mut Runtime) {
                 // again, its own heartbeat replies re-promote it via
                 // `handle_heartbeat` — the self-healing path for a healed
                 // partition, no external rejoin needed.
+                let timestamp = heartbeat_timestamp(rt);
                 if let Some(transport) = &mut rt.distributed.transport {
                     let local_id = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
                     let packet = Packet::Heartbeat {
                         node_id: local_id,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
+                        timestamp,
                     };
                     transport.send(NodeId(to.0), addr, packet);
                 }

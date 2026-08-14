@@ -1676,11 +1676,31 @@ impl CapabilityAnalyzer {
             Expr::Unary { op, expr: e, .. } => {
                 match op {
                     UnOp::Ref(cap) => {
-                        let inner = self.infer_cap_tracked(ctx, e, consumed)?;
-                        // Reference creation: the ref itself has the requested
-                        // capability; we return that.  The inner expression
-                        // capability is checked separately.
-                        let _ = inner;
+                        // Unique constructors (lineariso, linear, iso, trn)
+                        // MOVE the operand into the reference: a bare-variable
+                        // operand is consumed exactly like `consume x`, so the
+                        // value is uniquely owned afterward (`x` is unavailable
+                        // on this path and a second `&iso x`/`&trn x` errors).
+                        // Shared constructors (ref, val, box, tag) alias the
+                        // operand without consuming it.
+                        let unique = matches!(
+                            cap,
+                            Capability::LinearIso
+                                | Capability::Linear
+                                | Capability::Iso
+                                | Capability::Trn
+                        );
+                        if unique {
+                            if let Expr::Var(name, var_span) = e.as_ref() {
+                                // Mark consumed regardless of capability —
+                                // mirror `consume x`'s at-most-once rule.
+                                self.consume_linear(name, *var_span, consumed)?;
+                            } else {
+                                let _ = self.infer_cap_tracked(ctx, e, consumed)?;
+                            }
+                        } else {
+                            let _ = self.infer_cap_tracked(ctx, e, consumed)?;
+                        }
                         Ok(*cap)
                     }
                     _ => self.infer_cap_tracked(ctx, e, consumed),
@@ -2809,6 +2829,102 @@ mod tests {
         };
         let cap = analyzer.infer_cap(&ctx, &expr).unwrap();
         assert_eq!(cap, Capability::Iso);
+    }
+
+    #[test]
+    fn test_cap_ref_creation_all_caps() {
+        // Every value-level `&cap` constructor yields a reference with the
+        // requested capability.
+        for (cap, want) in [
+            (Capability::Ref, Capability::Ref),
+            (Capability::Iso, Capability::Iso),
+            (Capability::Trn, Capability::Trn),
+            (Capability::Val, Capability::Val),
+            (Capability::Box, Capability::Box),
+            (Capability::Tag, Capability::Tag),
+            (Capability::LinearIso, Capability::LinearIso),
+            (Capability::Linear, Capability::Linear),
+        ] {
+            let mut analyzer = CapabilityAnalyzer::new();
+            let ctx = CapContext::new();
+            let expr = Expr::Unary {
+                op: UnOp::Ref(cap),
+                expr: Box::new(Expr::Literal(Literal::Int(42), s())),
+                span: s(),
+            };
+            let got = analyzer.infer_cap(&ctx, &expr).unwrap();
+            assert_eq!(got, want, "cap {cap}");
+        }
+    }
+
+    #[test]
+    fn test_cap_unique_ref_consumes_operand() {
+        // Unique constructors (iso/trn/lineariso/linear) MOVE a bare
+        // variable operand: a second `&iso x` on the same binding must
+        // fail, exactly like a second `consume x`.
+        for cap in [
+            Capability::Iso,
+            Capability::Trn,
+            Capability::LinearIso,
+            Capability::Linear,
+        ] {
+            let mut analyzer = CapabilityAnalyzer::new();
+            let ctx = CapContext::new().with_binding("x", Capability::Val);
+            let expr = Expr::Block {
+                exprs: vec![
+                    Expr::Unary {
+                        op: UnOp::Ref(cap),
+                        expr: Box::new(lvar("x")),
+                        span: s(),
+                    },
+                    Expr::Unary {
+                        op: UnOp::Ref(cap),
+                        expr: Box::new(lvar("x")),
+                        span: s(),
+                    },
+                ],
+                span: s(),
+            };
+            let result = analyzer.infer_cap(&ctx, &expr);
+            assert!(
+                result.is_err(),
+                "double {cap} reference must be rejected, got {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_cap_shared_ref_does_not_consume_operand() {
+        // Shared constructors (ref/val/box/tag) alias without consuming:
+        // repeated construction from the same binding is fine.
+        for cap in [
+            Capability::Ref,
+            Capability::Val,
+            Capability::Box,
+            Capability::Tag,
+        ] {
+            let mut analyzer = CapabilityAnalyzer::new();
+            let ctx = CapContext::new().with_binding("x", Capability::Val);
+            let expr = Expr::Block {
+                exprs: vec![
+                    Expr::Unary {
+                        op: UnOp::Ref(cap),
+                        expr: Box::new(lvar("x")),
+                        span: s(),
+                    },
+                    Expr::Unary {
+                        op: UnOp::Ref(cap),
+                        expr: Box::new(lvar("x")),
+                        span: s(),
+                    },
+                ],
+                span: s(),
+            };
+            analyzer
+                .infer_cap(&ctx, &expr)
+                .unwrap_or_else(|e| panic!("shared {cap} constructor must pass: {e}"));
+        }
     }
 
     #[test]

@@ -2732,34 +2732,18 @@ impl Parser {
                                     // Bare `&` defaults to `&ref` (backward compatible).
                     let ref_cap = if matches!(kind, TokenKind::Ampersand) {
                         match self.peek_kind() {
-                            TokenKind::Val => {
-                                self.advance();
-                                Capability::Val
-                            }
-                            TokenKind::Ref => {
-                                self.advance();
-                                Capability::Ref
-                            }
-                            TokenKind::Iso => {
-                                self.advance();
-                                Capability::Iso
-                            }
-                            TokenKind::Trn => {
-                                self.advance();
-                                Capability::Trn
-                            }
-                            TokenKind::Box => {
-                                self.advance();
-                                Capability::Box
-                            }
-                            TokenKind::Tag => {
-                                self.advance();
-                                Capability::Tag
-                            }
+                            TokenKind::Val
+                            | TokenKind::Ref
+                            | TokenKind::Iso
+                            | TokenKind::Trn
+                            | TokenKind::Box
+                            | TokenKind::Tag
+                            | TokenKind::LinearIso
+                            | TokenKind::Linear => self.parse_capability()?,
                             _ => Capability::Ref,
                         }
                     } else {
-                        Capability::Ref // unused for -, !, *
+                        Capability::Ref
                     };
                     let operand = self.parse_expr_with_prec(prec)?;
                     let span = self.current_span();
@@ -6640,6 +6624,41 @@ mod tests {
             match expr {
                 Expr::CapAnnotate { cap, .. } => assert_eq!(cap, want),
                 _ => panic!("Expected capability annotation for {src:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_cap_ref_value_constructors() {
+        // Value-level capability constructors: `&cap expr` must parse to
+        // `UnOp::Ref(cap)` for every capability, with bare `&` defaulting
+        // to `&ref`. Previously `&lineariso`/`&linear` failed with
+        // "Unexpected token in expression".
+        for (src, want) in [
+            ("&x", Capability::Ref),
+            ("&ref x", Capability::Ref),
+            ("&iso x", Capability::Iso),
+            ("&trn x", Capability::Trn),
+            ("&val x", Capability::Val),
+            ("&box x", Capability::Box),
+            ("&tag x", Capability::Tag),
+            ("&lineariso x", Capability::LinearIso),
+            ("&linear x", Capability::Linear),
+        ] {
+            let expr = parse_expr(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            match expr {
+                Expr::Unary {
+                    op: UnOp::Ref(cap),
+                    expr: inner,
+                    ..
+                } => {
+                    assert_eq!(cap, want, "capability for {src:?}");
+                    assert!(
+                        matches!(inner.as_ref(), Expr::Var(name, _) if name == "x"),
+                        "operand for {src:?}"
+                    );
+                }
+                other => panic!("{src:?}: expected Unary Ref, got {other:?}"),
             }
         }
     }

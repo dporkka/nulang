@@ -538,7 +538,8 @@ updated; see the changelog entry for the test evidence.
   (general call arity, event arity), not an exhaustive sweep.
 - **[~] Bullet 2 (DST) — single-node message-passing + timer determinism
   landed, seed-sweep invariant test landed; cluster/network determinism
-  still not started.** `src/dst.rs` was not even part of the
+  landed 2026-08-14 (see the "cluster/network determinism" addendum at
+  the end of this bullet).** `src/dst.rs` was not even part of the
   compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
   tests had never run). Fixed that first, then added
   `Runtime::run_scheduler_deterministic`/`pick_ready_actor_deterministic`:
@@ -568,11 +569,38 @@ updated; see the changelog entry for the test evidence.
   `max_steps` so timer-rearming loops stay bounded. WITHOUT a virtual
   clock the old contract holds (timer programs Quiesce with timers
   pending). `test_dst_timer_fires_under_virtual_clock` asserts both
-  sides. Not done: cluster/network determinism (cross-shard channels
-  and the real transport still key off wall-clock reads) and the
-  10⁴-seeds-per-commit CI job (the sweep is a single in-suite test,
-  not a nightly job; scaling the seed count to 10⁴ is a constant-factor
-  change of `SEEDS`).
+  sides. Not done: the 10⁴-seeds-per-commit CI job (the sweep is a
+  single in-suite test, not a nightly job; scaling the seed count to
+  10⁴ is a constant-factor change of `SEEDS`).
+
+  **Addendum (2026-08-14) — cluster/network determinism landed.**
+  The remaining gap — cross-shard channels and the real transport
+  keying off wall-clock reads — is closed:
+  - **Transport injection.** `Runtime::enable_distribution_with_transport`
+    accepts any `Box<dyn NetworkTransport>`; `enable_distribution` (TCP)
+    became a wrapper. DST tests run REAL `Runtime`s over the existing
+    in-memory `DeterministicNetworkTransport` (zero threads, zero sleeps).
+  - **Seeded cluster RNG.** `ClusterState::set_rng` — `pick_gossip_targets`
+    and `repair_active_view` draw from a seeded `Box<dyn RngCore>`
+    (`DeterministicRng` implements `rand_core::RngCore`) when installed,
+    so gossip/repair picks are bit-reproducible; `OsRng` remains the
+    production path.
+  - **Cross-shard determinism.** `run_scheduler_deterministic` now drains
+    `cross_shard_rx` at the top of every iteration (mirroring the
+    production scheduler), so `new_sharded` runtimes run deterministically
+    too. The with-RNG variant (`run_scheduler_deterministic_with_rng`)
+    lets a harness interleave nodes and actors from one seeded stream.
+  - **`DeterministicCluster` harness** (`src/runtime/cluster_dst.rs`,
+    test-gated): N real `Runtime`s over the in-memory fabric, per-node
+    virtual clocks advanced in lockstep, one master RNG permuting node
+    order per round + driving each node's actor selection, heartbeat wire
+    timestamps drawn from the virtual clock (byte-identical packets).
+    4 new tests: same-seed bit-reproducible evolution, a 50-seed remote
+    AtMostOnce delivery sweep over the fabric, a 3-node
+    partition→Failed-detection→heal→remote-delivery scenario through the
+    REAL failure detector, and a 30-seed cross-shard delivery sweep.
+    All 8 DST tests (including the 2000-seed single-node sweep) run in
+    ~45s in-suite.
 - **[~] Bullet 4 (chaos suite) — three real topologies landed + virtual-clock
   determinism, 5-node/split-brain/asymmetric done, seed-scale CI still
   open.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
@@ -623,10 +651,13 @@ updated; see the changelog entry for the test evidence.
   `has_seen_peer` gate: the resolver is consulted only after the node
   has ever received a heartbeat from any peer, so a node that has never
   contacted anyone is treated as bootstrapping, never as a partition
-  minority. Not done: running any of this across many seeds in CI — the
-  10³-seeds-per-commit target still needs a seed-driven loop over the
-  deterministic harness (the virtual-clock pump is the piece that makes
-  that feasible; the loop itself is not wired).
+  Not done: running any of this across many seeds in CI — the
+  10³-seeds-per-commit target needs the seed-driven loop over the
+  deterministic harness; the harness itself is now wired (2026-08-14:
+  `DeterministicCluster` in `cluster_dst.rs` drives the SAME real
+  `Runtime`/failure-detector machinery these real-TCP tests exercise,
+  over the in-memory fabric with seeded node/actor scheduling — see the
+  bullet-2 addendum; the seed-scale CI job itself is still open).
 - **[~] Bullet 8 (persistence recovery correctness) — one real bug
   found and fixed, one real gap found and documented, not the full
   "repeat for every StateModel" sweep.** `Runtime::recover_actor` never
@@ -652,11 +683,15 @@ updated; see the changelog entry for the test evidence.
 compiled binary).** The 41 rewritten SPEC2 blocks taught syntax the
 compiler rejects; most were doc drift, but seven are genuine language
 gaps now tracked:
-  1. **Capability references are annotation-only beyond `ref`.** `&expr`
-     always creates a `ref`-capability reference; `&iso T`/`&val T`/
-     `&trn T`/`&box T` are accepted in parameter/return annotations but
-     have no value-level constructor (SPEC2 §3.9 note added). This is
-     the capability system's biggest missing surface.
+  1. **Capability references are annotation-only beyond `ref`.**
+     **CLOSED 2026-08-14.** `&cap expr` now constructs a reference with
+     the requested capability for all eight capabilities; bare `&expr`
+     stays `&ref`. The unique constructors (`&lineariso`/`&linear`/
+     `&iso`/`&trn`) consume a bare-variable operand like `consume x`
+     (second use rejected); shared constructors alias. Erased to a plain
+     move at runtime; formatter prints `&cap`. SPEC2 §3.9 rewritten;
+     CHANGELOG entry; parser/analyzer/integration tests + differential
+     corpus.
   2. **Prelude types were unusable in annotations.** `let ok = Ok(42)`
      type-checked in every module while `fn f(x: Option[Int])` failed
      to parse ("Unknown type name") because the prelude's type decls

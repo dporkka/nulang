@@ -45,6 +45,40 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-14
+
+- **Cluster/network determinism (DST).** The deterministic harness now
+  drives multi-node clusters of real `Runtime`s with no wall-clock reads
+  affecting state: `Runtime::enable_distribution_with_transport` accepts
+  any transport (the in-memory `DeterministicNetworkTransport` for tests);
+  `ClusterState::set_rng` seeds gossip/repair picks; the deterministic
+  scheduler drains cross-shard channels and takes a caller-owned RNG
+  (`run_scheduler_deterministic_with_rng`); heartbeat wire timestamps
+  come from the virtual clock when one is installed. `DeterministicCluster`
+  (test-gated `src/runtime/cluster_dst.rs`) pumps N nodes with lockstep
+  virtual clocks and one seed-permuted node order. New tests: same-seed
+  bit-reproducible evolution, 50-seed remote AtMostOnce delivery sweep,
+  3-node partition→Failed→heal→deliver through the real failure detector,
+  30-seed cross-shard delivery sweep. PLAN.md Phase 1 bullet 2 (DST)
+  cluster/network determinism closed.
+
+- **Value-level capability constructors for every reference capability.**
+  `&cap expr` now constructs a reference with the requested capability for
+  all eight capabilities (`&iso`, `&trn`, `&val`, `&box`, `&tag`,
+  `&ref`, `&lineariso`, `&linear`); bare `&expr` remains `&ref`
+  (backward compatible). Previously `&expr` always produced a `ref`
+  reference while `&iso T`/`&val T`/`&trn T`/`&box T` were accepted in
+  annotations only — the capability system's biggest missing surface
+  (SPEC2 §3.9, PLAN.md "Gaps found by the doc pass" item 1). Semantics:
+  the unique constructors (`&lineariso`, `&linear`, `&iso`, `&trn`) move a
+  bare-variable operand exactly like `consume x` — a second `&iso x` on the
+  same binding is a capability error — while the shared constructors
+  (`&ref`, `&val`, `&box`, `&tag`) alias without consuming. Capabilities
+  are compile-time only, so every constructor erases to a plain value move
+  at runtime (`OpCode::Move`). The formatter now prints `&cap` (previously
+  every `&`-expression formatted as `ref`, breaking round-trips). Pinned by
+  parser/analyzer/integration tests and differential-corpus entries.
+
 ### Added since 1.0.0-frozen — 2026-08-13
 
 - **`lineariso`/`linear` capability annotations now parse.** The lexer emits
