@@ -471,18 +471,22 @@ updated; see the changelog entry for the test evidence.
   order/naming mismatches found by the `StdlibCollectionsString` wave;
   Chapter 14 was already headed "— Planned" so this didn't need the
   same "Stable-tier false claim" severity of fix CRDT got).
-- **[~] Bullet 6 (doc-example verification) — extended, not fully
-  closed.** `scripts/verify_doc_examples.sh` only ever scanned the Astro
-  docs site; now also scans `SPEC2.md`/`README.md`/
-  `docs/GETTING_STARTED.md`/`docs/TUTORIAL.md`, gated behind
-  `NULANG_DOC_VERIFY_INCLUDE_ROOT=1` rather than the default (and
-  therefore CI-blocking) invocation — turning it on by default today
-  would fail CI on 58 pre-existing SPEC2.md example fragments that
-  reference prose context rather than being self-contained, a separate,
-  larger gap (smarter fragment heuristic, or rewriting the examples)
-  left for follow-up. Not done: the `///` doc-comment coverage this
-  bullet also calls for (needs a Rust-source-aware extractor, not a
-  markdown-fence scanner).
+- **[X] Bullet 6 (doc-example verification) — closed 2026-08-13.** The
+  default CI invocation was red: 16 docs-site blocks (`language/syntax
+  .mdx`, `types.mdx`, `actors/overview.mdx`, `distribution.mdx`,
+  `tutorial.mdx`, `index.mdx`) taught invalid syntax — pre-`then` `if`
+  blocks, `Err(e)` (prelude ctor is `Error(e)`), recursive ADT payloads
+  as bare `List[T]` variant args (must be a tuple: `Cons((T, List[T]))`),
+  an un-closable `index.mdx` fence swallowing the `## Installation`
+  section, and `send x get(self)` (a `ref` capability is not sendable —
+  rewritten as `send self` from inside a behavior). All 16 rewritten to
+  self-contained programs against the current compiler and re-verified.
+  `///` doc-comment coverage landed: `verify_doc_examples.sh` now scans
+  every ```` ```nulang ```` block inside `///` doc comments of `.nula`
+  sources (always on — repo-controlled content), with a runnable
+  round-trip example pinned in `src/stdlib/json.nula`'s `parse` docs
+  (`PASS src/stdlib/json.nula#1 (run)`). Full default run now
+  54 passed / 0 failed / 0 skipped.
 - **[~] Bullet 7 (structured error quality) — phrase cleanup done,
   "verified by test" now landed for the fields that already existed,
   the "every variant" structural ask still isn't.** Removed the "not

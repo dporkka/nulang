@@ -55,7 +55,7 @@ perform IO.print(perform Int.to_string(distance(p3d)))  // OK — extra fields a
 An explicit annotation creates a **closed** record that requires an exact field count:
 
 ```nulang
-fn origin(): { x: Int, y: Int } = { x: 0, y: 0 }
+fn origin() -> { x: Int, y: Int } = { x: 0, y: 0 }
 ```
 
 Closed record annotations reject records with extra or missing fields. Use inferred parameters when you want row polymorphism.
@@ -88,8 +88,8 @@ Sum types via `type` declarations:
 
 ```nulang
 type Option[T] = Some(T) | None
-type Result[T, E] = Ok(T) | Err(E)
-type List[T] = Cons(T, List[T]) | Nil
+type Result[T, E] = Ok(T) | Error(E)
+type List[T] = Nil | Cons((T, List[T]))
 ```
 
 Generic type parameters use `[T, U, ...]` syntax and are inferred at call sites.

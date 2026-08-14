@@ -40,7 +40,8 @@ let pair = (x, y)  // Tuple: (Int, Int)
 `if` is an expression — it returns a value:
 
 ```nulang
-let status = if x > 0 { "positive" } else { "non-positive" }
+let x = 42
+let status = if x > 0 then "positive" else "non-positive"
 ```
 
 ### Match Expressions
@@ -61,6 +62,7 @@ fn unwrap_or(o: Option[Int], default: Int) -> Int {
 Match arms can have guards:
 
 ```nulang
+let value = 7
 match value {
     n if n > 0 => "positive",
     n if n < 0 => "negative",
@@ -92,7 +94,7 @@ Algebraic data types defined with `type ... = ... | ...`:
 ```nulang
 type Result[T, E] = Ok(T) | Err(E)
 
-type Tree[T] = Leaf(T) | Node(Tree[T], Tree[T])
+type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
 ```
 
 Construct and match:
@@ -102,7 +104,7 @@ let ok = Ok(42)
 
 match ok {
     Ok(v) => "Got " + perform Int.to_string(v),
-    Err(e) => "Error: " + e
+    Error(e) => "Error: " + e
 }
 ```
 
@@ -132,6 +134,11 @@ let dbl = fn(x) { x * 2 } in
 There are two syntaxes for sending a message to an actor:
 
 ```nulang
+actor Counter {
+    behavior inc() { 0 }
+}
+let counter = spawn Counter {}
+
 // Keyword form
 send counter inc()
 
@@ -142,9 +149,18 @@ counter ! inc()
 Both parse to the same AST. The `!` form is more concise; the `send` form is more readable for complex arguments:
 
 ```nulang
-w ! watch(v)
+actor Counter {
+    state count: Int = 0
+    behavior inc_by(n: Int) { self.count = self.count + n }
+    behavior watch(v: Int) { 0 }
+    behavior get() { self.count }
+}
+let counter = spawn Counter {}
+let w = spawn Counter {}
+
+w ! watch(7)
 send counter inc_by(5)
-send counter get(self)
+send counter get()
 ```
 
 ## Ask Operator
@@ -152,6 +168,10 @@ send counter get(self)
 `ask` is a synchronous request/reply call to an agent or actor behavior. The caller blocks until the target responds:
 
 ```nulang
+actor Assistant {
+    behavior ask(q: String) -> String { "answer to " + q }
+}
+
 let a = spawn Assistant {} in
 ask a ask("What is an actor model?")
 ```
