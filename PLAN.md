@@ -831,8 +831,9 @@ whole point of the Frozen tier.
 investigated this session; 3 concrete deliverables landed, 5 scoped and
 deferred (all multi-day/infrastructure-gated, not something a single
 session can responsibly rush). 5 commits this session.
-- **Bullet 1 (formal semantics) — documentation corrected, real proof
-  work still open.** Discovered `types.lean`'s three headline theorems
+- **[X] Bullet 1 (formal semantics) — the full soundness chain is
+  PROVED (2026-08-14); only the capabilities modeling gap remains.**
+  Discovered `types.lean`'s three headline theorems
   (`progress`, `preservation`, `type_soundness`) were silently regressed
   to `sorry` by a Lean 4.16.0 compatibility-fix commit (`ac9ef5d`,
   2026-07-26) three weeks before this session — that commit's own
@@ -853,12 +854,24 @@ session can responsibly rush). 5 commits this session.
   (`weakening_append_closed`) and proved; `progress` proved via
   induction + the existing `canonical_forms`; and
   `closed_type_under_closed_context` + `value_has_closed_type` proved
-  with the lookup-fv-subset/instantiate-closed lemmas. Remaining:
-  `substitution_lemma` (needs term-free-variable/context-invariance
-  machinery — the same statement-repair class as weakening),
-  `context_drop_shadowed` (needs a set-based generalize congruence),
-  `preservation`, `type_soundness` — genuinely hard proof-design work,
-  tracked with the documented root cause.
+  with the lookup-fv-subset/instantiate-closed lemmas. Then (same
+  day) the REMAINING chain was proved, completing the repair:
+  `substitution_lemma` needed a corrected statement (the naive form is
+  capture-prone) — the proved form requires `v` typed in the empty
+  context, `Γ` type-closed with monomorphic observable schemes
+  (`Context.Mono`), and closed annotations; the λ case uses the new
+  `HasType_permute` (head-binding swap, valid because the substituted
+  scheme is closed) and `drop_shadowed_closed` (shadowed-binding drop);
+  `lift_from_empty` lifts closed typings to type-closed contexts.
+  `preservation` + `type_soundness` follow by the standard induction,
+  with `step_preserves_closed`/`annotationsClosed_subst` keeping the
+  closedness invariant. Along the way a REAL semantic bug surfaced:
+  `binOpApply`'s div/mod-by-zero cases stepped to `.unitVal`, breaking
+  preservation (unit ≠ int) — corrected to Lean's total Int division
+  (x / 0 = 0). `lake build`: types.lean has ZERO sorries; the only
+  remaining `sorry` in the spec is `linear_at_most_once`
+  (capabilities.lean — a modeling gap: it needs the context-splitting
+  semantics, not a proof repair). CI ratchet baseline 9 → 1.
 - **[X] Bullet 2 (LinearIso must-use) — closed 2026-08-14.** Exactly-once
   (must-use) is enforced for `let`-bound linear values, with a
   transparent-rebind exemption (`let a = x` doesn't carry a second

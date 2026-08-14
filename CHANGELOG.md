@@ -63,19 +63,27 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
-- **Formal semantics: four soundness-support theorems proved.** The
-  naive head-form `weakening` is FALSE for open schemes (the `tLet`
-  rule generalizes over the larger context; `tVar` finds the new head
-  binding) — the documented root cause of the 2026-07-26 regression.
-  Corrected to the tail-append closed form
-  (`HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ`) and proved, along with
-  `progress`, `closed_type_under_closed_context`, and
-  `value_has_closed_type` in `spec/formal/types.lean` (sorry count 9 →
-  5; CI ratchet baseline updated). Remaining sorries are the
-  substitution→preservation→soundness chain, whose naive statements
-  carry the same capture subtlety and need term-free-variable /
-  context-invariance machinery — documented in the README regression
-  note.
+- **Formal semantics: the full Core type-soundness chain is PROVED.**
+  `spec/formal/types.lean` compiles with ZERO `sorry`s — the
+  2026-07-26 Lean 4.16.0 regression is fully repaired. The naive
+  head-form `weakening` was FALSE for open schemes (the `tLet` rule
+  generalizes over the larger context; `tVar` finds the new head) —
+  corrected to the tail-append closed form and proved. The
+  `substitution_lemma`'s naive statement was capture-prone — the
+  proved form requires the substituted value typed in the empty
+  context, a type-closed context with monomorphic observable schemes,
+  and closed annotations (all satisfied by preservation); the λ case
+  uses new `HasType_permute` (distinct-name head-binding swap) and
+  `drop_shadowed_closed` (shadowed-binding drop), and `lift_from_empty`
+  lifts closed typings to type-closed contexts. `preservation` and
+  `type_soundness` follow by the standard inductions with
+  `step_preserves_closed`/`annotationsClosed_subst`. A REAL semantic
+  bug surfaced and was fixed: `binOpApply`'s div/mod-by-zero cases
+  stepped to `.unitVal`, breaking preservation (unit ≠ int) —
+  corrected to Lean's total Int division (x / 0 = 0). The single
+  remaining `sorry` in the spec is `linear_at_most_once`
+  (capabilities.lean), which needs the context-splitting semantics —
+  a modeling gap. CI sorry-ratchet baseline 9 → 1.
 
 - **Parameter-level LinearIso must-use verified end-to-end.** 5 new
   conformance cases (cap_30–34) prove exactly-once enforcement for
