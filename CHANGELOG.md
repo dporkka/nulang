@@ -63,6 +63,14 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **DST seed sweeps are env-scalable; nightly 10⁴-seed job wired.**
+  `src/dst.rs::dst_seed_count` reads `NULANG_DST_SEEDS` (defaults:
+  2000 single-node, 50 cluster, 30 cross-shard in-suite).
+  `.github/workflows/dst-nightly.yml` runs the sweeps at 10⁴ seeds on a
+  nightly schedule + manual dispatch, failing loudly on any invariant
+  violation (quiescence, AtMostOnce delivery, cluster convergence) —
+  the PLAN.md Phase 1 bullet 2 "10⁴-seeds-per-commit" deliverable.
+
 - **Cluster/network determinism (DST).** The deterministic harness now
   drives multi-node clusters of real `Runtime`s with no wall-clock reads
   affecting state: `Runtime::enable_distribution_with_transport` accepts

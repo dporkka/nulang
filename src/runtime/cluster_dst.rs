@@ -346,10 +346,10 @@ mod tests {
     #[test]
     fn test_dst_cluster_remote_delivery_seed_sweep() {
         const MESSAGES: i64 = 30;
-        const SEEDS: u64 = 50;
+        let seeds = crate::dst::dst_seed_count(50);
         const ROUNDS: u64 = 40;
 
-        for seed in 0..SEEDS {
+        for seed in 0..seeds {
             let mut cluster = DeterministicCluster::new(&[addr(9111), addr(9112)], seed);
             // Converge membership before sending (resolver refuses to route
             // to a non-Healthy node).
@@ -490,9 +490,9 @@ mod tests {
     #[test]
     fn test_dst_cross_shard_delivery_seed_sweep() {
         const MESSAGES: i64 = 25;
-        const SEEDS: u64 = 30;
+        let seeds = crate::dst::dst_seed_count(30);
 
-        for seed in 0..SEEDS {
+        for seed in 0..seeds {
             let mut shards = Runtime::new_sharded(2);
             assert_eq!(shards.len(), 2);
             // Actor ids come from a process-global counter, so spawn on

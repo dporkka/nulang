@@ -569,9 +569,12 @@ updated; see the changelog entry for the test evidence.
   `max_steps` so timer-rearming loops stay bounded. WITHOUT a virtual
   clock the old contract holds (timer programs Quiesce with timers
   pending). `test_dst_timer_fires_under_virtual_clock` asserts both
-  sides. Not done: the 10⁴-seeds-per-commit CI job (the sweep is a
-  single in-suite test, not a nightly job; scaling the seed count to
-  10⁴ is a constant-factor change of `SEEDS`).
+  sides. The 10⁴-seeds-per-commit CI job is now wired (2026-08-14):
+  `.github/workflows/dst-nightly.yml` runs nightly (cron 04:00 + manual
+  dispatch) with `NULANG_DST_SEEDS=10000`; the seed counts are
+  env-configurable via `src/dst.rs::dst_seed_count` (in-suite defaults:
+  2000 single-node / 50 cluster / 30 cross-shard), so the same tests
+  scale from CI-fast to nightly-depth without editing code.
 
   **Addendum (2026-08-14) — cluster/network determinism landed.**
   The remaining gap — cross-shard channels and the real transport
@@ -651,13 +654,9 @@ updated; see the changelog entry for the test evidence.
   `has_seen_peer` gate: the resolver is consulted only after the node
   has ever received a heartbeat from any peer, so a node that has never
   contacted anyone is treated as bootstrapping, never as a partition
-  Not done: running any of this across many seeds in CI — the
-  10³-seeds-per-commit target needs the seed-driven loop over the
-  deterministic harness; the harness itself is now wired (2026-08-14:
-  `DeterministicCluster` in `cluster_dst.rs` drives the SAME real
-  `Runtime`/failure-detector machinery these real-TCP tests exercise,
-  over the in-memory fabric with seeded node/actor scheduling — see the
-  bullet-2 addendum; the seed-scale CI job itself is still open).
+  Not done: the seed-scale CI job is now wired (2026-08-14:
+  `.github/workflows/dst-nightly.yml`, `NULANG_DST_SEEDS=10000` over the
+  same `DeterministicCluster` harness — see the bullet-2 addendum).
 - **[~] Bullet 8 (persistence recovery correctness) — one real bug
   found and fixed, one real gap found and documented, not the full
   "repeat for every StateModel" sweep.** `Runtime::recover_actor` never

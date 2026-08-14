@@ -6146,9 +6146,9 @@ fn test_dst_timer_fires_under_virtual_clock() {
 #[test]
 fn test_dst_seed_sweep_at_most_once_delivery() {
     const MESSAGES: i64 = 200;
-    const SEEDS: u64 = 2000;
+    let seeds = crate::dst::dst_seed_count(2000);
 
-    for seed in 0..SEEDS {
+    for seed in 0..seeds {
         let mut rt = Runtime::new();
         rt.install_virtual_clock();
 

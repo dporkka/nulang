@@ -13,6 +13,19 @@
 
 use std::collections::{HashMap, VecDeque};
 
+/// Seed count for DST seed-sweep tests. Defaults to `default`; the
+/// `NULANG_DST_SEEDS` environment variable overrides it so CI can scale a
+/// sweep to 10⁴ seeds without editing the test (see
+/// `.github/workflows/dst-nightly.yml`). Same seed → same run, so a
+/// higher count is purely more interleavings covered.
+pub fn dst_seed_count(default: u64) -> u64 {
+    std::env::var("NULANG_DST_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
 /// A deterministic pseudo-random number generator (splitmix64).
 #[derive(Debug, Clone)]
 pub struct DeterministicRng {
