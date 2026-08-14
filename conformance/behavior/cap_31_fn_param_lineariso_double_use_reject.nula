@@ -1,0 +1,8 @@
+fn use_twice(lineariso x: Int) {
+    perform IO.print(x)
+    perform IO.print(x)
+}
+fn main() {
+    use_twice(42)
+    unit
+}

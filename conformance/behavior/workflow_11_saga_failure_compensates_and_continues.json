@@ -1,1 +1,1 @@
-{ "exit_code": 0, "stdout": "main-done\nstep-a\nstep-b\ncomp-b\ncomp-a\nstep-d" }
+{"exit_code": 1, "stdout": "main-done\nstep-a\nstep-b\ncomp-b\ncomp-a\nstep-d", "stderr": "non-exhaustive match.raise"}

@@ -63,6 +63,25 @@ two major versions.*
   prose removed — effect rows require braces; `! Type` is the typed-error
   surface (PLAN doc-pass gap 4 closed, doc side).
 
+- **Parameter-level LinearIso must-use verified end-to-end.** 5 new
+  conformance cases (cap_30–34) prove exactly-once enforcement for
+  `lineariso` function and behavior parameters through the compiled
+  binary: single use ok, double use rejected, never used rejected,
+  explicit `consume x` discharge ok, behavior-param consume ok.
+  Conformance suite: 305/305.
+
+- **Parser fix: `Nil`-led sum types.** The gap-5 type-declaration
+  routing sent `Nil` (a primitive type name) to the alias path,
+  breaking `type Stream[T] = Nil | Cons(...)` — `Nil` is the canonical
+  empty variant of a sum type, not a degenerate alias body. New
+  `type_decl_body_is_alias` exempts it; pinned by a parser unit test
+  and the generics_07/typeclass_08 conformance cases.
+
+- **Conformance contract updates:** generics_08's stderr assertion no
+  longer depends on internal fresh-type-var numbering; workflow_09/11
+  expect the deliberate post-2d56e33 contract (failing saga steps
+  surface a diagnostic and exit nonzero, compensation trace unchanged).
+
 - **LSP protocol-level integration tests.** 6 tests drive the full
   JSON-RPC dispatch path (`tower_lsp::LspService` with real `Request`
   objects — the same service the stdio server runs), closing the

@@ -848,12 +848,29 @@ session can responsibly rush). 5 commits this session.
   passes even with sorries. Actually re-proving the theorems is
   specialist Lean work or a fresh independent implementation; not
   attempted this session — genuinely hard, not "follow-up" spin.
-- **Bullet 2 (LinearIso must-use) — partially landed.** Exactly-once
-  (must-use) is now enforced for `let`-bound linear values, with a
+- **[X] Bullet 2 (LinearIso must-use) — closed 2026-08-14.** Exactly-once
+  (must-use) is enforced for `let`-bound linear values, with a
   transparent-rebind exemption (`let a = x` doesn't carry a second
   obligation) verified against all 6 existing lineariso conformance
   cases plus 8 new unit tests. Parameter-level must-use (a linear value
-  already in scope, e.g. a function argument) remains open.
+  already in scope, e.g. a function argument) is enforced and now
+  verified END-TO-END through the compiled binary with 5 new conformance
+  cases (cap_30–34): single use ok, double use rejected ("used after
+  being consumed"), never used rejected ("lineariso bindings must be
+  consumed exactly once"), explicit `consume x` discharge ok, and a
+  `lineariso` BEHAVIOR parameter consumed once. Syntax: prefix param
+  annotation (`fn f(lineariso x: Int)`); callers pass literals (val
+  promotes) or `consume`-created values. Along the way the conformance
+  suite surfaced and fixed a real parser regression from the gap-5 type
+  routing: `Nil` (a primitive type name) was routed to the alias path,
+  breaking `type Stream[T] = Nil | Cons(...)` — `Nil` is the canonical
+  empty variant of a sum type and is now exempt from alias routing
+  (`type_decl_body_is_alias`), pinned by a parser unit test. Full
+  conformance: 305/305 (was 300/300 + 5 new; also stabilized the
+  generics_08 stderr assertion that depended on internal fresh-var
+  numbering, and updated workflow_09/11 expected contracts to the
+  deliberate post-2d56e33 behavior — a failing saga step surfaces a
+  diagnostic and exits nonzero).
 - **Bullet 3 (backend traits) — verified already done, not a gap.**
   `src/backends/mod.rs`'s own header claims every trait
   (`JitBackend`/`WasmBackend`/`Transport`/`CryptoProvider`/

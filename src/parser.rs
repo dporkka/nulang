@@ -46,14 +46,25 @@ const PREC_EXP: u8 = 14; // ** (power, right-associative, tighter than unary -)
 const PREC_PREFIX: u8 = 11; // ! - & (prefix)
 
 /// True when `name` is a primitive type name (`Int`, `Float`, ...). These
-/// lex as `UpperIdent` (the typechecker resolves them by name), so type
-/// declarations must route them to the alias path rather than treating
-/// them as variant names.
+/// lex as `UpperIdent` (the typechecker resolves them by name). Routing
+/// decisions must use [`type_decl_body_is_alias`] below, which exempts
+/// `Nil` — the canonical empty variant of a sum type.
 fn is_primitive_type_name(name: &str) -> bool {
     matches!(
         name,
         "Int" | "Float" | "Bool" | "String" | "Nil" | "Unit" | "Never" | "Address"
     )
+}
+
+/// True when `name` (the first token of a `type` declaration body) must be
+/// routed to the ALIAS path rather than the variant path. `Nil` is
+/// deliberately NOT alias-routed: it is the canonical empty variant of a
+/// sum type (`type Stream[T] = Nil | Cons(...)`), so excluding it keeps
+/// `Nil | ...` bodies on the variant path. The remaining primitives
+/// (`Int`, `String`, `Unit`, ...) are degenerate as variant names and
+/// resolve as types everywhere else, so their declarations are aliases.
+fn type_decl_body_is_alias(first: &str) -> bool {
+    is_primitive_type_name(first) && first != "Nil"
 }
 
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
@@ -1946,7 +1957,10 @@ impl Parser {
             // UpperIdent, so they are excluded from the variant path — a
             // variant named after a primitive is degenerate, and resolving
             // them as types is what the typechecker does everywhere else.
-            TokenKind::UpperIdent(first) if is_primitive_type_name(&first) => {
+            // `Nil` is the one exception: it is the canonical empty variant
+            // of a sum type (`type Stream[T] = Nil | Cons(...)`), so it
+            // stays on the variant path.
+            TokenKind::UpperIdent(first) if type_decl_body_is_alias(&first) => {
                 // `first` is the body's first token (a primitive name);
                 // `name` (outer binding) is the alias name.
                 let body = self.parse_type()?;
@@ -6775,6 +6789,28 @@ mod tests {
         assert!(matches!(&ast.decls[0], Decl::VariantType { .. }));
         let ast = parse("type Point = { x: Int, y: Int }").unwrap();
         assert!(matches!(&ast.decls[0], Decl::RecordType { .. }));
+        // `Nil` is the canonical empty variant of a sum type and must stay
+        // on the variant path even though it is a primitive type name —
+        // routing it to the alias path regressed
+        // `type Stream[T] = Nil | Cons(...)` (generics_07/typeclass_08
+        // conformance cases).
+        let ast = parse("type Stream[T] = Nil | Cons((T, Stream[T]))").unwrap();
+        match &ast.decls[0] {
+            Decl::VariantType { name, variants, .. } => {
+                assert_eq!(name, "Stream");
+                assert_eq!(variants.len(), 2, "Nil + Cons variants");
+                assert_eq!(variants[0].0, "Nil");
+                assert_eq!(variants[1].0, "Cons");
+            }
+            other => panic!("expected VariantType for Nil-led sum type, got {other:?}"),
+        }
+        // Bare `Nil` still routes to variants (single Nil variant), never
+        // to the alias path.
+        let ast = parse("type A = Nil").unwrap();
+        assert!(matches!(&ast.decls[0], Decl::VariantType { .. }));
+        // `type T = Int` stays an alias (primitive, not a variant name).
+        let ast = parse("type T = Int").unwrap();
+        assert!(matches!(&ast.decls[0], Decl::TypeAlias { .. }));
     }
 
     #[test]
