@@ -292,6 +292,44 @@ mod tests {
     }
 
     #[test]
+    fn test_let_rec_module_level() {
+        // Doc-pass gap 3: `let rec f(x) = ... in ...` at module level used
+        // to fail in `parse_module_let` ("Expected =" on the parameter
+        // list); it now rewinds to the expression path. Recursion works
+        // through the full VM.
+        assert_int(
+            "let rec f(n) = if n <= 1 then 1 else n * f(n - 1) in f(5)",
+            120,
+        );
+        assert_int(
+            "fn main() { let rec fib(n) = if n <= 1 then n else fib(n - 1) + fib(n - 2) in fib(10) }",
+            55,
+        );
+    }
+
+    #[test]
+    fn test_type_decl_alias_bodies() {
+        // Doc-pass gap 5: `type X = <full type>` now accepts array,
+        // primitive, function, and reference bodies (previously only
+        // variants/records parsed; `type Buffer = [Int]` failed with
+        // "Expected variant name").
+        assert_int(
+            "type Buffer = [Int]\nlet b: Buffer = [1, 2, 3]\nperform Array.length(b)",
+            3,
+        );
+        assert_int("type T = Int\nlet x: T = 5\nx + 1", 6);
+        assert_int(
+            "type F = (Int) -> Int\nlet inc: F = fn(n) n + 1\ninc(41)",
+            42,
+        );
+        // Variants still parse as variants.
+        assert_int(
+            "type Option[T] = Some(T) | None\nlet o: Option[Int] = Some(5)\nmatch o { | Some(v) => v | None => 0 }",
+            5,
+        );
+    }
+
+    #[test]
     fn test_cap_ref_value_constructors() {
         // Value-level capability constructors: every capability parses as
         // `&cap expr`, erases to a plain move at runtime (capabilities are

@@ -45,6 +45,17 @@ const PREC_BITOR: u8 = 13; // |
 const PREC_EXP: u8 = 14; // ** (power, right-associative, tighter than unary -)
 const PREC_PREFIX: u8 = 11; // ! - & (prefix)
 
+/// True when `name` is a primitive type name (`Int`, `Float`, ...). These
+/// lex as `UpperIdent` (the typechecker resolves them by name), so type
+/// declarations must route them to the alias path rather than treating
+/// them as variant names.
+fn is_primitive_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Int" | "Float" | "Bool" | "String" | "Nil" | "Unit" | "Never" | "Address"
+    )
+}
+
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
     match op {
         TokenKind::Minus | TokenKind::Not | TokenKind::Bang => Some((PREC_PREFIX, true)),
@@ -1911,9 +1922,9 @@ impl Parser {
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Assign)?;
 
-        // Look ahead to determine if it's a record or variant
+        // Look ahead to determine if it's a record, variant, or alias body
         self.skip_newlines();
-        match self.peek_kind() {
+        match self.peek_kind().clone() {
             TokenKind::LBrace => {
                 // Record type
                 self.advance(); // '{'
@@ -1926,13 +1937,45 @@ impl Parser {
                     span,
                 })
             }
-            _ => {
-                // Variant type: A | B | C
+            // Variants start with a variant name (UpperIdent) or an optional
+            // leading pipe. Any other shape is an alias body (`type Buffer =
+            // [Int]`, `type T = Int`, `type F = (Int) -> Int`): parse the
+            // full type exactly like `type alias`/`opaque type` do. The
+            // typechecker already handles `Decl::TypeAlias` with arbitrary
+            // bodies. Primitive type names (`Int`, `String`, ...) lex as
+            // UpperIdent, so they are excluded from the variant path — a
+            // variant named after a primitive is degenerate, and resolving
+            // them as types is what the typechecker does everywhere else.
+            TokenKind::UpperIdent(first) if is_primitive_type_name(&first) => {
+                // `first` is the body's first token (a primitive name);
+                // `name` (outer binding) is the alias name.
+                let body = self.parse_type()?;
+                Ok(Decl::TypeAlias {
+                    name,
+                    type_params,
+                    body,
+                    opaque: false,
+                    public,
+                    span,
+                })
+            }
+            TokenKind::UpperIdent(_) | TokenKind::Pipe => {
                 let variants = self.parse_variants()?;
                 Ok(Decl::VariantType {
                     name,
                     type_params,
                     variants,
+                    public,
+                    span,
+                })
+            }
+            _ => {
+                let body = self.parse_type()?;
+                Ok(Decl::TypeAlias {
+                    name,
+                    type_params,
+                    body,
+                    opaque: false,
                     public,
                     span,
                 })
@@ -2186,6 +2229,20 @@ impl Parser {
         self.skip_newlines();
         let name = self.expect_ident("binding name")?;
         self.skip_newlines();
+        // Function-parameter binding (`let rec f(x) = ... in ...` or the
+        // plain `let f(x) = ... in ...` form) is EXPRESSION-position
+        // syntax: rewind to the `let` token and signal a zero-consumption
+        // error so `parse_module`'s expression fallback routes it through
+        // `parse_primary`'s let arm → `parse_let_rec_named`. Without this,
+        // the `(` after the name fails here with "Expected =" and the
+        // module parser (consumed > 0) never reaches the expression path.
+        if self.peek_kind() == &TokenKind::LParen {
+            self.pos = saved_pos;
+            return Err(NuError::parse_error(
+                "let with function parameters is expression-position syntax".to_string(),
+                span,
+            ));
+        }
         let type_ann = if self.consume_if(&TokenKind::Colon) {
             self.skip_newlines();
             Some(self.parse_type()?)
@@ -6661,6 +6718,63 @@ mod tests {
                 other => panic!("{src:?}: expected Unary Ref, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_parse_let_rec_expression_position() {
+        // `let rec f(x) = ... in ...` is expression-position syntax
+        // (SPEC2 §6.5 recursive local bindings). At module level it must
+        // fall back to the expression path instead of failing with
+        // "Expected =" on the parameter list.
+        let expr = parse_expr("let rec f(n) = n * 2 in f(3)").unwrap();
+        match expr {
+            Expr::LetRec { name, params, .. } => {
+                assert_eq!(name, "f");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "n");
+            }
+            other => panic!("expected LetRec, got {other:?}"),
+        }
+        // Same through a full module (the __main wrapper).
+        let ast = parse("let rec f(n) = n * 2 in f(3)").unwrap();
+        assert!(
+            ast.decls
+                .iter()
+                .any(|d| matches!(d, Decl::Function { name, .. } if name == "__main")),
+            "module-level let rec must land in __main, got {:?}",
+            ast.decls
+        );
+    }
+
+    #[test]
+    fn test_parse_type_decl_alias_bodies() {
+        // `type X = <full type>` now accepts any type body (array,
+        // primitive, function, reference), not just variants and records.
+        // Previously `type Buffer = [Int]` failed with
+        // "Expected variant name, found [".
+        for (src, want_name) in [
+            ("type T = Int", "T"),
+            ("type Buffer = [Int]", "Buffer"),
+            ("type F = (Int) -> Int", "F"),
+            ("type R = &ref Int", "R"),
+        ] {
+            let ast = parse(src).unwrap();
+            match &ast.decls[0] {
+                Decl::TypeAlias { name, body, .. } => {
+                    assert_eq!(name, want_name, "alias for {src}");
+                    assert!(
+                        !matches!(body, crate::types::Type::Var(_)),
+                        "body must parse"
+                    );
+                }
+                other => panic!("{src}: expected TypeAlias, got {other:?}"),
+            }
+        }
+        // Variants and records still route to their own decl shapes.
+        let ast = parse("type Option[T] = Some(T) | None").unwrap();
+        assert!(matches!(&ast.decls[0], Decl::VariantType { .. }));
+        let ast = parse("type Point = { x: Int, y: Int }").unwrap();
+        assert!(matches!(&ast.decls[0], Decl::RecordType { .. }));
     }
 
     #[test]

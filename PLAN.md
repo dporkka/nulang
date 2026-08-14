@@ -702,12 +702,32 @@ gaps now tracked:
      `test_prelude_types_resolve_in_annotations` and
      `test_local_type_shadows_prelude_in_annotation`.
   3. **`let rec` is unsupported** (SPEC2 §6.5 taught it); recursive
-     local bindings are written as functions.
+     local bindings are written as functions. **CLOSED 2026-08-14.**
+     `let rec f(x) = ... in ...` already worked in expression position
+     (`parse_let_rec_named`); the gap was module-level entry — the
+     `parse_module_let` path failed on the parameter list ("Expected =")
+     with the parser already past the `let` token, so `parse_module`'s
+     zero-consumption expression fallback never fired. `parse_module_let`
+     now rewinds to the `let` token when the name is followed by `(` and
+     the expression path handles it. Pinned by parser + integration
+     tests (module-level and fn-body recursion through the VM).
   4. **Bare single-effect rows (`! IO`) are rejected**; braces required
      (`! {IO}`). SPEC2 §4.5.1 claimed equivalence that did not hold.
+     **CLOSED 2026-08-14 (doc side, deliberately).** `! Name` is the
+     typed-error surface (`! Type`) — load-bearing (error-type tests,
+     catch/fail); effect rows require braces, disambiguating the two.
+     §4.5.1's stale "shorthand" prose removed; the example comment
+     (braces required) is now the whole story.
   5. **Array/record alias bodies are rejected** (`type Buffer = [Int]`
      → "Expected variant name"); aliases expand only to variant/nominal
-     shapes.
+     shapes. **CLOSED 2026-08-14.** `parse_type_decl_variant_or_record`
+     now routes any non-variant/non-record body through `parse_type()`
+     into a `Decl::TypeAlias` (records already parsed; `type alias`
+     already accepted arbitrary bodies — the bare `type X =` keyword
+     path just never reached it). Primitive-named bodies (`type T = Int`)
+     lex as `UpperIdent`, so they are special-cased to the alias path
+     too. Variants (`Some(T) | None`) and records are untouched. Pinned
+     by parser + integration tests.
   6. **`state`, `rec`, `ref` are reserved words** — SPEC2 examples used
      them as identifiers (now fixed); `let rec` and `let ref` cannot be
      written.

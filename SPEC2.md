@@ -1310,7 +1310,7 @@ Effect rows describe the set of effects a function may perform. They support pol
 
 ### 4.5.1 Closed Effect Rows
 
-A closed effect row enumerates exactly the effects a function performs, in braces. As a shorthand, a single effect may be written bare without braces:
+A closed effect row enumerates exactly the effects a function performs, in braces. Effect rows always use braces; a bare `! Name` after the return type is the typed-error surface (`! Type`), never a row shorthand — the two are disambiguated by the braces:
 
 ```nulang
 fn pure_function(x: Int) -> Int { x + 1 }
@@ -1323,7 +1323,7 @@ fn multi_effect() -> Unit ! {Console, FileSystem, Rand} {
   perform Console.print("Starting...")
 }
 
-// single-effect row (the bare `! IO` form is not accepted — braces required)
+// single-effect row (braces required — the bare `! IO` form is not accepted)
 fn log_once(msg: String) -> Unit ! {IO} {
   perform IO.print(msg)
 }

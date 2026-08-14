@@ -47,6 +47,22 @@ two major versions.*
 
 ### Added since 1.0.0-frozen — 2026-08-14
 
+- **`let rec f(x) = ... in ...` works at module level.** Recursive local
+  bindings already parsed in expression position; module-level entry
+  failed because `parse_module_let` hit the parameter list ("Expected =")
+  with the parser already past the `let` token, blocking the expression
+  fallback. `parse_module_let` now rewinds to `let` when the name is
+  followed by `(`. Pinned by parser + integration tests (PLAN doc-pass
+  gap 3 closed).
+- **`type X = <full type>` accepts any alias body.** `type Buffer =
+  [Int]`, `type T = Int`, `type F = (Int) -> Int`, `type R = &ref Int`
+  now parse as aliases (previously "Expected variant name, found [");
+  variants (`Some(T) | None`) and records are unchanged. Primitive type
+  names lex as `UpperIdent`, so they are routed to the alias path too
+  (PLAN doc-pass gap 5 closed). SPEC2 §4.5.1's stale bare-row shorthand
+  prose removed — effect rows require braces; `! Type` is the typed-error
+  surface (PLAN doc-pass gap 4 closed, doc side).
+
 - **Cluster/network determinism (DST).** The deterministic harness now
   drives multi-node clusters of real `Runtime`s with no wall-clock reads
   affecting state: `Runtime::enable_distribution_with_transport` accepts

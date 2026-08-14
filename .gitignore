@@ -1,6 +1,5 @@
 /target
 /.target-disk
-/.build-target
 /.build-tmp
 check_lib
 cargo_check.log
@@ -49,3 +48,6 @@ lake-manifest.json
 # Local bootstrap build cache
 .target-bootstrap/
 src/jit/mir_compiler.rs
+
+# Session-local build cache (CARGO_TARGET_DIR override when /tmp is tight)
+/.build-target/
