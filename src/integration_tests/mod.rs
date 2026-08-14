@@ -3465,6 +3465,45 @@ match { a: 2, b: 9 } with {
         }
     }
 
+    /// SPEC2 §10 known-issue #5: a failing workflow step used to be
+    /// silent (exit 0, no diagnostic). The runtime now records a durable
+    /// `StepFailed` event (readable via `Runtime::workflow_failures`),
+    /// which the CLI surfaces with a nonzero exit.
+    #[test]
+    fn test_workflow_step_failure_is_recorded_and_surfaced() {
+        let source = r#"
+            workflow FailWF {
+                step ok {
+                    (self.step_index = self.step_index + 1, perform IO.print("step ok"))
+                }
+                step boom {
+                    perform Fail.now()
+                }
+            }
+            fn main() {
+                let w = spawn FailWF {}
+                send w ok()
+                send w boom()
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        run_source_with_runtime(source, rt.clone()).unwrap();
+        rt.borrow_mut().run_scheduler();
+
+        let failures = rt.borrow().workflow_failures();
+        assert_eq!(
+            failures.len(),
+            1,
+            "exactly one step failure must be recorded: {failures:?}"
+        );
+        assert_eq!(failures[0].0, "boom", "the failing step's name");
+        assert!(
+            failures[0].1.contains("Fail.now"),
+            "the error message must surface: {}",
+            failures[0].1
+        );
+    }
+
     #[test]
     fn test_saga_compensation_runs_in_reverse_order() {
         // A three-step saga where the third step fails. The first two steps

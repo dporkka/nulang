@@ -1602,6 +1602,15 @@ fn run_source(
             });
             let value = if has_actors {
                 let (value, runtime) = run_with_runtime(m, metrics_port)?;
+                // Surface workflow step failures: a failed step used to be
+                // silent (exit 0, no diagnostic) — SPEC2 §10 known-issue #5.
+                let failures = runtime.borrow().workflow_failures();
+                if !failures.is_empty() {
+                    for (step_name, error) in &failures {
+                        eprintln!("workflow step '{}' failed: {}", step_name, error);
+                    }
+                    std::process::exit(1);
+                }
                 if verbose {
                     let rt = runtime.borrow();
                     let snap = rt.metrics_snapshot();

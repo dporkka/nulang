@@ -2792,11 +2792,24 @@ impl Runtime {
                         self.persist_suspension_marker(actor_id);
                         processed = false;
                     }
-                    Err(_) => {
+                    Err(e) => {
                         self.checkpoint_actor(actor_id);
-                        // A workflow step failed: run saga compensations for previously
-                        // completed steps in reverse order.
+                        // A workflow step failed: record the failure (durable
+                        // StepFailed event — SPEC2 §10 known-issue #5: step
+                        // failures were silent, exit 0, no diagnostic), then
+                        // run saga compensations for previously completed
+                        // steps in reverse order.
                         if self.actor_is_workflow(actor_id) {
+                            let seq = self.next_sequence(actor_id);
+                            let step_name = self.step_name_for(actor_id, behavior_idx);
+                            let _ = self.persistence.append_workflow_event(
+                                actor_id,
+                                WorkflowEvent::StepFailed {
+                                    sequence: seq,
+                                    step_name,
+                                    error: format!("{}", e),
+                                },
+                            );
                             self.run_saga_compensation(actor_id, behavior_idx);
                         }
                         processed = false;
@@ -3802,6 +3815,31 @@ impl Runtime {
         }
     }
 
+    /// Workflow step failures recorded since the runtime started, as
+    /// `(step_name, error)` — surfaced by the CLI so a failing step is no
+    /// longer silent (SPEC2 §10 known-issue #5). Reads the durable
+    /// `StepFailed` events for every workflow actor.
+    pub fn workflow_failures(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let actor_ids: Vec<u64> = self
+            .actors
+            .iter()
+            .filter(|(_, a)| a.is_workflow)
+            .map(|(id, _)| *id)
+            .collect();
+        for actor_id in actor_ids {
+            for event in self.persistence.read_workflow_events(actor_id) {
+                if let WorkflowEvent::StepFailed {
+                    step_name, error, ..
+                } = event
+                {
+                    out.push((step_name, error));
+                }
+            }
+        }
+        out
+    }
+
     /// Return the step name for a workflow behavior index.
     fn step_name_for(&self, actor_id: u64, behavior_idx: usize) -> String {
         if let Some(actor) = self.actors.get(&actor_id) {
@@ -4316,6 +4354,9 @@ impl Runtime {
             // Foundation: timer events are persisted but their runtime
             // scheduling is handled by the timer feature scope.
             WorkflowEvent::TimerSet { .. } | WorkflowEvent::TimerFired { .. } => {}
+            // A failed step is a terminal marker; replay does not re-run
+            // it (the failure was already compensated live).
+            WorkflowEvent::StepFailed { .. } => {}
             WorkflowEvent::SignalReceived { name, payload, .. } => {
                 actor.received_signals.push((name.clone(), payload.clone()));
             }
