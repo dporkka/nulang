@@ -233,7 +233,7 @@ The **Registry** is the central package index at `registry.nulang.org`. It store
 |  |   CLI Interface  |  |   Commands       |  |   Output                |  |
 |  |                  |  |                  |  |                         |  |
 |  |  nula new          |  |  - new           |  |  - Console output        |  |
-|  |  nula build    |  |  - build         |  |  - Progress bars         |  |
+|  |  nula build        |  |  - build         |  |  - Progress bars         |  |
 |  |  nula test         |  |  - test          |  |  - Error formatting      |  |
 |  |  nula add          |  |  - add/remove    |  |  - JSON output (--json)  |  |
 |  |  nula publish      |  |  - publish       |  |  - Colored output        |  |
