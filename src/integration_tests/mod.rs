@@ -2854,21 +2854,23 @@ match { a: 2, b: 9 } with {
         );
     }
 
-    /// PLAN.md bullet 8: "repeat for every StateModel" -- the `crdt`
-    /// case. SPEC2.md documents (§9.10, §12.5, and this session's
-    /// earlier truth-in-advertising correction) that `crdt` is accepted
-    /// syntax tracked as a state-model tag but not yet wired to the
-    /// eight built-in CRDT types or their merge semantics -- it behaves
-    /// as `durable` today. Verifies that concretely: a `crdt` field
-    /// survives crash+recovery via the same snapshot+journal path as
-    /// `durable` (checkpoint_actor includes both `Durable` and `Crdt`
-    /// fields in the snapshot), not via any CRDT merge machinery.
+    /// `crdt` fields survive crash+recovery as *materialized* `state_data`
+    /// (snapshotted by `checkpoint_actor`'s Durable|Crdt filter). The
+    /// `Crdt.*` effect module is the live-actor mutation path, but
+    /// `recover_actor` does not rebuild `CrdtManager.field_map`, so
+    /// `perform Crdt.*` is a silent nil no-op on a recovered actor — this
+    /// test pins that actual behavior: `state_data["count"]` survives, but a
+    /// post-recovery `inc` does not bump it.
     #[test]
-    fn test_crdt_state_recovery_behaves_as_durable_today() {
+    fn test_crdt_field_survives_recovery() {
         let source = r#"
             persistent actor Counter {
                 state crdt count: Int = 0
-                behavior inc() { self.count = self.count + 1 }
+                state ticks: Int = 0
+                behavior inc() {
+                    perform Crdt.increment("count")
+                    self.ticks = self.ticks + 1
+                }
                 behavior get() { self.count }
             }
             spawn Counter {}
@@ -2898,6 +2900,29 @@ match { a: 2, b: 9 } with {
         rt1.borrow_mut().send_message(actor_id, "inc", &[]);
         rt1.borrow_mut().run_scheduler();
 
+        // The increments must have materialized into state_data.
+        assert_eq!(
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "Crdt.increment must materialize count=2 into state_data before recovery"
+        );
+
+        assert_eq!(
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("ticks")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "the statement after `perform Crdt.increment` must run (no abort)"
+        );
+
         let snapshot_before_recovery = store.load_snapshot(actor_id).unwrap();
         assert!(
             snapshot_before_recovery.state.contains_key("count"),
@@ -2923,8 +2948,101 @@ match { a: 2, b: 9 } with {
                 .get_state_field("count")
                 .and_then(|v| v.as_int()),
             Some(2),
-            "crdt field survives recovery via the durable snapshot path \
-             today -- no CRDT merge machinery is exercised"
+            "crdt field's materialized value survives recovery via the snapshot path"
+        );
+
+        // Pin the recovery gap: `recover_actor` restores the materialized
+        // value and the CrdtManager entries but not `field_map`, so a
+        // post-recovery `Crdt.increment` is a silent no-op (get_field_id
+        // returns None) and `state_data["count"]` stays at 2.
+        rt2.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt2.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "post-recovery Crdt.increment must be a no-op: field_map is not rebuilt"
+        );
+
+        // The statement AFTER the no-op `perform` must still run — if the
+        // behavior aborted with an unhandled effect, `ticks` would stay 0.
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("ticks")
+                .and_then(|v| v.as_int()),
+            Some(1),
+            "post-recovery Crdt.increment returns nil and the behavior continues"
+        );
+    }
+
+    /// The `Crdt.*` effect module is the only mutation path for CRDT-backed
+    /// fields. `increment` works and materializes the value into `state_data`,
+    /// while an op outside the field's per-type operation set (`decrement` on
+    /// a `gcounter`) and a raw `self.field = expr` assignment are both ignored
+    /// so they cannot silently corrupt the replicated entry.
+    #[test]
+    fn test_crdt_effect_module_enforces_operation_sets() {
+        let source = r#"
+            actor Counter {
+                state crdt gcounter count = 0
+                state ticks: Int = 0
+                behavior inc() { perform Crdt.increment("count") }
+                behavior dec() {
+                    perform Crdt.decrement("count")
+                    self.ticks = self.ticks + 1
+                }
+                behavior bad() {
+                    self.count = 99
+                    self.ticks = self.ticks + 1
+                }
+            }
+            spawn Counter {}
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (module, _ty) = compile_source(source).unwrap();
+        let actor_id = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+        rt.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt.borrow_mut().send_message(actor_id, "dec", &[]);
+        rt.borrow_mut().send_message(actor_id, "bad", &[]);
+        rt.borrow_mut().run_scheduler();
+
+        let count = rt
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            count,
+            Some(2),
+            "gcounter must accept only increment: decrement and raw assignment are no-ops"
+        );
+
+        let ticks = rt
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("ticks")
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            ticks,
+            Some(2),
+            "the statement after the rejected perform/assignment must still run (no abort)"
         );
     }
 

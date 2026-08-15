@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The nulang node exposes Prometheus exposition format at GET /metrics
+  # on the port given to `nulang --metrics-port <N>`. From inside the
+  # docker-compose network, reach a node running on the host via
+  # host.docker.internal (Docker Desktop / Docker Engine >= 20.10).
+  #
+  # Scrape multiple nodes by adding more targets (one per `--metrics-port`).
+  - job_name: nulang
+    static_configs:
+      - targets:
+          - "host.docker.internal:9100"

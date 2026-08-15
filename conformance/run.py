@@ -3,7 +3,13 @@ import os, subprocess, json, sys
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)) + "/..")
 subprocess.run(["cargo", "build", "--quiet"], check=True)
-nulang_bin = "./target/debug/nulang"
+# Resolve the binary through cargo so the repo's `target-dir` override in
+# `.cargo/config.toml` (currently `/tmp/cargo-target`) is respected — a
+# hardcoded `./target/debug/nulang` runs a stale or missing binary.
+target_dir = json.loads(
+    subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"])
+)["target_directory"]
+nulang_bin = os.path.join(target_dir, "debug", "nulang")
 
 passed = 0
 failed = 0

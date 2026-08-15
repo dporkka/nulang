@@ -215,6 +215,17 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
             if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                // CRDT-backed fields mutate only through the `Crdt.*` effect
+                // module; a raw `self.field = expr` assignment is ignored so it
+                // cannot silently orphan `state_data` from the replicated entry.
+                if actor
+                    .state_models
+                    .get(field)
+                    .map(|m| m.is_crdt())
+                    .unwrap_or(false)
+                {
+                    return;
+                }
                 actor.set_state_field(field, value);
             }
         }
@@ -471,9 +482,10 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             return rt.perform_python_builtin(op_name, constants, regs);
         }
-        if effect_name == "CRDT" {
+        if effect_name == "Crdt" {
             let mut rt = self.runtime.borrow_mut();
-            return rt.perform_crdt_builtin(op_name, constants, regs);
+            let actor_id = rt.current_actor;
+            return rt.perform_crdt_builtin(actor_id, op_name, constants, regs);
         }
         self.perform_effect(effect_name, regs)
     }
@@ -892,6 +904,17 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn set_state_field(&mut self, field: &str, value: crate::vm::Value) {
         unsafe {
             if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
+                // CRDT-backed fields mutate only through the `Crdt.*` effect
+                // module; a raw `self.field = expr` assignment is ignored so it
+                // cannot silently orphan `state_data` from the replicated entry.
+                if actor
+                    .state_models
+                    .get(field)
+                    .map(|m| m.is_crdt())
+                    .unwrap_or(false)
+                {
+                    return;
+                }
                 actor.set_state_field(field, value);
             }
         }
@@ -985,6 +1008,15 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
             if effect_name == "Actor" {
                 return (*self.runtime).perform_actor_builtin(
+                    Some(self.actor_id),
+                    op_name,
+                    constants,
+                    regs,
+                );
+            }
+
+            if effect_name == "Crdt" {
+                return (*self.runtime).perform_crdt_builtin(
                     Some(self.actor_id),
                     op_name,
                     constants,

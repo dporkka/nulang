@@ -1,10 +1,11 @@
 # RFC 0012: Cross-Node Actor Supervision
 
-- **Status:** Draft
+- **Status:** Implemented
 - **Tier:** Stable (extends Stable-tier actor surface)
 - **Author:** AI assistant
 - **Created:** 2026-08-03
 - **Language-version at effect:** 1.0.0-frozen
+- **Implemented:** 2026-08-04 (commit `0ab2c42`)
 - **Supersedes:** none
 
 ## Summary

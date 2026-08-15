@@ -325,16 +325,21 @@ def consumed (Γ : CapContext) (x : Name) : Bool :=
 /--
   **Theorem: Linear bindings are consumed at most once.**
 
-  If `x` is bound with a linear capability (`LinearIso`) in the
-  initial context and a term `e` is well-typed under that context,
-  then `x` is consumed — it does not persist in the context for
-  further use.  This enforces the "use exactly once" discipline for
-  linear capabilities.
+  **Honesty note (2026-08-14):** the statement below is *false* under the
+  single-context `HasTypeCap` judgment.  Counterexample: take
+  `Γ = [(x, τ₀, .Val)]` (already binds `x`) and `e = .litInt 0`; then
+  `HasTypeCap ((x, τ, .LinearIso) :: Γ) e .int .Val` holds by `tLitInt`
+  for *any* context, but `consumed Γ x = (Γ.lookup x == none) = false`.
+  The property is therefore not a theorem of the single-context judgment:
+  that judgment is a static environment with no *output* context, so it
+  cannot express "`x` was consumed and does not persist for further use".
 
-  The theorem requires the full context-splitting semantics (input/
-  output context pairs) that a production linear type system would
-  carry.  In the simplified single-context `HasTypeCap` judgment
-  above, the statement is aspirational and the proof is open.
+  The correct statement requires context-splitting semantics — a judgment
+  `Γ ⊢ e : τ / Γ'` carrying input *and* output contexts, where a
+  `LinearIso` binding is removed from `Γ'` after its single use.  This is
+  the RFC 0003 Item 2 contingency: the split-context refinement is stated
+  as a conjecture with a documented proof plan rather than silently
+  asserted against a judgment that cannot express it.
 -/
 theorem linear_at_most_once : ∀ (Γ : CapContext) (x : Name) (τ : Ty) (e : Expr) (τ' : Ty) (cap : Cap),
     HasTypeCap ((x, τ, .LinearIso) :: Γ) e τ' cap →

@@ -73,8 +73,8 @@ among Phases 1-4's broader production-readiness work.
 | Tests | 1490+ (`cargo test`), 1541+ target per `RELEASE_CHECKLIST.md` |
 | CI matrix | build/test/release/wasm/minimal/lint/lean/package-smoke |
 | Direct deps | 72 |
-| Transitive deps | 468 (was 504 before a 2026-08-02 libsql feature trim dropped the unused tonic/axum gRPC stack; was documented as 483, already stale before that) |
-| Formal proofs (Lean 4) | Core type soundness NOT proved (`progress`/`preservation`/`type_soundness` all `sorry`, regressed 2026-07-26, undocumented until 2026-08-02); capability lattice genuinely proved (5/6 theorems); effects are vacuous `True` stubs, not proofs |
+| Transitive deps | 472 (verified `Cargo.lock` `grep -c '^name = '`, 2026-08-14; was 504 before a 2026-08-02 libsql feature trim dropped the unused tonic/axum gRPC stack, then 468, already stale before that) |
+| Formal proofs (Lean 4) | Core type soundness **proved** (`progress`/`preservation`/`type_soundness` machine-checked 2026-08-14); capability lattice proved (5/6 theorems — `linear_at_most_once` remains `sorry`, needs split-context refinement); effects are vacuous `True` stubs, not proofs |
 | Conformance suite | 300 behavior cases + grammar cases |
 | Bootstrap self-hosting | Stage 13; not yet self-compiling |
 | Benchmarks | `benches/` uses criterion (7 files, 404 lines); no CI regression tracking |
@@ -845,9 +845,11 @@ session can responsibly rush). 5 commits this session.
   `spec/formal/README.md`'s regression note). Added a CI sorry-count
   ratchet (`.github/workflows/ci.yml`) so this exact silent-regression
   pattern can't recur — previously CI only ran `lake build`, which
-  passes even with sorries. Actually re-proving the theorems is
-  specialist Lean work or a fresh independent implementation; not
-  attempted this session — genuinely hard, not "follow-up" spin.
+  passes even with sorries. **Landed 2026-08-14:** the soundness chain
+  was actually re-proved — `progress`/`preservation`/`type_soundness`
+  are machine-checked in `types.lean` (see `spec/formal/README.md`),
+  and the CI sorry-ratchet baseline dropped from 9 to 1 (only
+  `linear_at_most_once` remains, needing the split-context judgment).
 - **[X] Bullet 2 (LinearIso must-use) — closed 2026-08-14.** Exactly-once
   (must-use) is enforced for `let`-bound linear values, with a
   transparent-rebind exemption (`let a = x` doesn't carry a second
@@ -940,11 +942,16 @@ runtime withstands adversarial operational review. Both hold up as
 
 1. **Formal semantics completion.** Prove the theorems that already have
    definitions in `spec/formal/`:
+   - `types.lean`: `progress`/`preservation`/`type_soundness` —
+     **proved 2026-08-14**.
    - `capabilities.lean`: `cap_sendable` (only `val`/`tag` cross actor
-     boundaries), `linear_iso_at_most_once`.
+     boundaries) — proved; `linear_iso_at_most_once` — open, needs the
+     split-context `HasTypeCap` refinement.
    - `effects.lean`: `effect_safety` (closed row `{}` cannot perform an
-     unhandled effect), progress+preservation for handler dispatch.
-   - `combined.lean`: type + capability + effect judgment soundness.
+     unhandled effect) — still a `True` stub, not proved; progress+
+     preservation for handler dispatch — open.
+   - `combined.lean`: type + capability + effect judgment soundness —
+     open.
    - CI gate on `lake build` blocks any PR that touches
      `src/typechecker.rs`, `src/effect_checker.rs`, or `src/types.rs`
      without a corresponding Lean update or an explicit `@sorry_ok`
@@ -959,7 +966,9 @@ runtime withstands adversarial operational review. Both hold up as
    linear value already bound in the *initial* context, e.g. a
    parameter, is not yet checked), and the Lean proof itself
    (`linear_at_most_once` in `capabilities.lean` is still `sorry` —
-   the Rust-side implementation moved ahead of the formal statement).
+   the Rust-side implementation moved ahead of the formal statement,
+   and the statement requires the split-context refinement of
+   `HasTypeCap`, documented 2026-08-14).
 3. **Backend-trait completion (RFC 0003 item 6 full wiring).** Route
    `src/jit/`, `src/mir_wasm.rs`, `src/wasm_runtime.rs`, and
    `src/python/` behind the traits already defined in `src/backends/`.
@@ -1041,10 +1050,11 @@ runtime withstands adversarial operational review. Both hold up as
    tests via `tower-lsp`'s test harness. `cargo run -- --lsp` runs
    for 24 hours against a large `.nula` corpus without leaking
    memory (checked with `heaptrack`).
-8. **Dep audit and reduction.** 468 transitive deps (down from 504; see
-   2026-08-02 `libsql` feature trim below) → target ≤300.
-   Candidates for removal or replacement: `httparse` + `ureq` (unify),
-   `rustyline`'s feature surface, `tracing-subscriber` heavy features.
+8. **Dep audit and reduction.** 472 transitive deps (verified `Cargo.lock`
+   `grep -c '^name = '` = 472, 2026-08-14; the previously-listed trim
+   candidates — `httparse` + `ureq` (unify), `rustyline`'s feature surface,
+   `tracing-subscriber` heavy features — remain untrimmed, rationale
+   unchanged) → target ≤300.
    `libsql` itself is now feature-trimmed to `core`+`remote`+`tls`
    (dropped `replication`/`sync`, -36 crates including all of tonic/
    axum) but its `core`/FFI/bindgen layer remains — full replacement
@@ -1090,7 +1100,7 @@ implementation. Content-addressed dependencies actually work.
      output from stage-N+1 and stage-N+2 (fixpoint reached).
    - Verified in CI: `nulang bootstrap/compiler_core.nula < bootstrap/self.nula`
      produces `.nbc` byte-identical to `cargo run -- bootstrap/self.nula`.
-2. **Package registry.** Minimum-viable, boring, static-file registry:
+2. **Package registry.** **[X] — closed 2026-08-14 (landed 2026-08-05, `ce20407`).** Minimum-viable, boring, static-file registry:
    - Host `.nbc` artifacts + `Nulang.toml` manifests on a git-backed
      store (GitHub Pages or Cloudflare R2).
    - Content-addressed by BLAKE3 (RFC 0003 item 11 already ships the
@@ -1105,17 +1115,14 @@ implementation. Content-addressed dependencies actually work.
    parts of `SPEC2.md` are non-negotiable, which are hints, how a
    competing implementation registers as conforming (passes
    `conformance/`).
-4. **RFC 0010 keyword audit follow-through.** Wire the remaining
-   reserved keywords (`monitor`, `link`, `exit`, `await`) with RFCs
-   for each, or remove them from the lexer. `await` is the one that
-   matters if async/await is really the future direction.
+4. **RFC 0010 keyword audit follow-through.** ✅ **closed 2026-08-14.** Executed per RFC 0010 §C.6: `where`, `priv`, `loop`, `node`, `subworkflow` freed as identifiers (pinned by `test_former_keywords_now_identifiers`, `src/lexer.rs:1538`); `monitor`/`link`/`exit` wired as live syntax (`spawn link|monitor` modifiers, `src/parser.rs:3601-3605`; `perform Actor.link/monitor/exit` op names, `:3806-3814`); `await` re-reserved by design (`lexer.rs:1196`). Keyword lifecycle documented in GOVERNANCE §2a; SPEC2 §2.3 inventory synced to the lexer (see sweep).
 5. **Escape analysis or region inference.** Reintroduce
    `src/escape_analysis.rs` (the earlier version was reverted, see
    `PERFORMANCE_ANALYSIS.md` row 2.4). Goal: statically prove
    stack-allocation for containers that never leave a function. Wire
    into the JIT tier so hot loops with local records/arrays never hit
    the heap. Measure via the Phase 1 bench dashboard.
-6. **CRDT op-based replication (CmRDT).** Delta-state ships in 1.0.0;
+6. **CRDT op-based replication (CmRDT).** **[X] — closed 2026-08-14 (landed via Phase 5 D13).** Delta-state ships in 1.0.0;
    op-based is the missing complement per `PERFORMANCE_ANALYSIS.md`
    row 3.2. Ship `Packet::CrdtOp` alongside `CrdtDeltaSync`. Provides
    the lowest-bandwidth sync path.
@@ -1241,6 +1248,9 @@ not landing.
 
 ## Phase 5 — Distributed Systems Excellence (parallel with Phases 1-3)
 
+**Status (2026-08-15): 17 of 18 deliverables implemented; D18 (observability
+dashboard) landed 2026-08-15, D7c open.**
+
 **Goal.** The distributed actor runtime — not just the single-node
 language — withstands adversarial operational review. A cluster survives a
 real network partition without silent data loss or a stuck split-brain;
@@ -1250,46 +1260,20 @@ leak memory forever; an operator can point off-the-shelf tooling at a
 running cluster. This is where Nulang's distributed-actor design either
 becomes provably best-in-class or stays a credible-looking demo.
 
-**Sequencing.** Groups are ordered by dependency, not by importance — all
-are real gaps. Group A (partition tolerance) before Group C (scalable
-membership): a split-brain resolver designed against a full membership
-view needs revisiting once membership becomes partial-view. Group D
-(cross-node fault tolerance) depends on Group A's failure-detection signal
-already existing (it does, `cluster.rs` Failed-status detection) and needs
-Group D's own link/monitor extension before failure notifications can
-reach anything. Group E's tombstone GC (11) depends on Group C settling
-membership bookkeeping. Group F's migration (14) depends on Group D's
-cross-node link/monitor (8). Group B (transport security) and Group G
-(observability) are independent of the others and can run in parallel with
-anything.
+**Sequencing.** As of the 2026-08-15 update, Groups A-G are implemented
+(D1-D17 plus D18, minus the partials' open halves); remaining:
+D7c (RFC 0014).
 
 **Deliverables.**
 
-1. **Split-brain resolver.** Today: `ClusterState` has no quorum, no
-   leader election, no majority logic anywhere (zero
-   `quorum`/`leader`/`elect` hits in `src/runtime/`). Heartbeats and
-   gossip are sent only to `Healthy`/`Joining` members (`cluster.rs:450`)
-   — once two sides of a clean partition each mark the other `Failed`,
-   neither redials the other, so the split does not self-heal; it requires
-   an external rejoin. `tests.rs:3224-3228` explicitly disclaims
-   split-brain/asymmetric-partition coverage. Build an Akka-SBR-style
-   pluggable resolver operating on `ClusterState`'s existing membership
-   view: `static-quorum` first (needs only a configured expected cluster
-   size, no live count), then `keep-majority`/`keep-oldest` once
-   deliverable 6 proves partial-view membership can still produce an
-   accurate count. This is explicitly NOT a new consensus protocol — it
-   reuses `PERFORMANCE_ANALYSIS.md` row 3.4's existing Raft deferral
-   ("CRDTs cover 80% of distributed state needs"); do not relitigate that
-   deferral here. Fix the non-self-healing bug alongside it: `Failed`
-   peers need a minimal periodic probe (not full heartbeats) so the
-   resolver has live data to decide with. New `ClusterAction` variant(s)
-   for the down-and-remove decision. Cluster-membership behavior isn't in
-   GOVERNANCE.md's current Frozen or Stable lists (similar to the CRDT
-   surface's pre-RFC state per its erratum) — file an RFC anyway per the
-   governance-discipline workstream's "every Frozen/Stable change is an
-   RFC" plus the real operational blast radius of a mechanism that can
-   autonomously shut down a node; this RFC can also be what first formally
-   tiers cluster-membership behavior.
+1. **Split-brain resolver.** ✅ **landed 2026-08-03..13 (RFC 0011).**
+   `SplitBrainResolver` trait + `static-quorum`
+   (`cluster.rs:250-254`), down-self + probe re-join, commits `5a0b641`
+   (partition injection + virtual-clock chaos) and `1498cc7`
+   (static-quorum cold-bootstrap guard + e2e down-self test).
+   `keep-majority`/`keep-oldest` remain deferred (live-count accuracy not
+   yet proven). RFC required (Frozen/Stable cluster-membership
+   tiering) — satisfied by RFC 0011.
 2. **DST-driven split-brain and asymmetric-partition test coverage.**
    ✅ **Landed 2026-08-03** as `src/runtime/cluster_sim.rs` (test-gated
    `SimCluster`, wired in `runtime/mod.rs`): N real `ClusterState`
@@ -1338,34 +1322,12 @@ anything.
    `_incarnation` metadata string is (the one `merge_membership`/AGENTS.md
    actually document and test) — delete the vestigial field.
 4. **Wire up authenticated, encrypted transport, with plaintext as an
-   explicit opt-out.** Today: `TlsConfig::SelfSigned` exists
-   (`network.rs:64-132`) but is never constructed anywhere in the
-   repository — confirmed by direct grep across
-   `mod.rs`/`distribution.rs`/`tests.rs`/`main.rs`:
-   `enable_distribution`'s `tls_config: Option<TlsConfig>` parameter is
-   passed `None` at its one call site (`tests.rs:2961`) and is otherwise a
-   Rust-embedder-only API with no CLI surface at all (confirmed by
-   SPEC2.md §12.4's own callout: "called from nowhere in `main.rs`"). Even
-   if constructed, the client installs a `NoVerification` verifier
-   accepting any certificate (`network.rs:93-132`) — MITM-able — and node
-   identity is a `DefaultHasher` hash of the node's own advertised listen
-   address (`cluster.rs:68-83`) — spoofable, zero authentication. NUL0 is
-   Frozen-tier (wire protocol v1); a handshake change to carry real
-   authentication is a NUL0 v2 bump requiring an RFC and a
-   version-negotiation path — the existing handshake already refuses
-   unknown versions rather than reinterpreting them
-   (`network.rs:296-323`), so v2 rollout is a clean refuse-old path, not a
-   new mechanism. Concretely: (a) real certificate verification (pinned CA
-   or operator-supplied pre-shared cluster cert — not auto-generated
-   self-signed-trust-anyone), (b) node identity as a signed claim
-   (cluster-issued token or cert-derived id) instead of a hash of
-   self-reported address, (c) change `enable_distribution`'s shape so
-   plaintext is an explicit named opt-out (e.g. a
-   `TlsConfig::PlaintextInsecure` variant) rather than `Option::None`
-   silently meaning "no security" — existing `None`-passing call sites
-   migrate to the explicit variant, not a breaking signature removal. RFC
-   required (Frozen-tier wire change), steward-authored or
-   steward-reviewed per GOVERNANCE.md §3.
+   explicit opt-out.** ✅ **landed 2026-08-04/05 (RFC 0013, Implemented).**
+   `TlsConfig::{MutualTls, PlaintextInsecure}` (`network.rs`), node
+   identity from cert fingerprint via BLAKE3, real CA verification,
+   commits `0ab2c42` + `59b01bd` (SelfSigned removed, rcgen →
+   dev-dependencies). The wire handshake stayed additive over NUL0 v1 (no
+   version bump).
 5. **Decide QUIC's fate — finish or remove, not permanent dead weight.**
    ✅ **Removed 2026-08-05.** Assessed for integration: requires a tokio
    runtime (separate from the main sync runtime), has an incompatible raw
@@ -1422,9 +1384,10 @@ anything.
    payload code 6) and the dead registry entries are dropped. The D8
    delivery half also landed: inbound `Packet::Link`/`Monitor` now register
    remote watchers and inbound `Packet::Down` delivers DOWN to local
-   watchers (previously all three were silently dropped). Part (c) —
-   supervisor-policy-driven re-spawn of durable actors on a healthy node —
-   is **designed but not implemented**: **RFC 0014** specifies the
+   watchers (previously all three were silently dropped). Part (c) remains
+   **open**: designed in **RFC 0014** (confirmed-gone `Removed` state,
+   durable-actor directory, shadow-node snapshot replication,
+   `RespawnOnNodeLoss` policy); not implemented. **RFC 0014** specifies the
    confirmed-gone gate (new `Removed` membership state via positive
    `NodeGoodbye` or a majority-gated `removal_confirmation_timeout`
    promotion), a gossip-replicated durable-actor location directory with
@@ -1455,199 +1418,126 @@ anything.
    writing to the same store from two nodes. Model the safety gate on
    Kubernetes StatefulSet pod rescheduling requiring
    old-pod-confirmed-gone, not naive auto-failover.
-8. **Cross-node link/monitor registration.** Prerequisite for 7(b).
-   Confirmed: `link_actors`/monitor tables (`mod.rs:3735-3779`) and
-   `Actor.parent` (`actor.rs:191`) only ever reference local `rt.actors`
-   ids; remote actors exist only in `RemoteActorCache`, keyed `(node_id,
-   actor_id)` (`distributed.rs:160-162`), never in `rt.actors`. Before
-   implementing, the implementer must first check what `perform
-   Actor.link`/`Actor.monitor` currently do when given an
-   `ActorAddress::Remote` — this session's audit did not confirm whether
-   it's a silent no-op, a resolve-then-fail, or an outright error; do not
-   assume. Extend link/monitor tracking to record cross-node targets, and
-   propagate link/`DOWN` notifications over the wire (a new `Packet`
-   variant) both when a monitored/linked remote actor exits normally and
-   when its home node is declared `Failed` (deliverable 7's signal). This
-   extends the actor surface's supervision semantics, which GOVERNANCE.md
-   lists as Stable-tier — file an RFC (purely additive: existing local
-   link/monitor behavior is unchanged, so no deprecation cycle is
-   triggered, only the RFC itself).
-9. **Fix the nested-supervisor-restart bug.** Confirmed real, not
-   speculative: `rebuild_child` (`supervisor.rs:301-384`) recreates a bare
-   `Actor` on restart but never recreates the corresponding `Supervisor`
-   struct in `rt.supervisors` — a supervisor that is itself supervised
-   loses all supervision of its own children after one restart.
-   Local-only, cheap, independent of the cross-node work — fix before or
-   alongside deliverable 8, since cross-node supervision is worthless if
-   local supervisor-of-supervisors restart is already broken.
-10. **Fix the mass-restart rate-limit bug.** Confirmed:
-   `restart_all`/`restart_from` (`supervisor.rs:478-534`, the
-   `OneForAll`/`RestForOne` strategies) rebuild every sibling
-   unconditionally without checking each sibling's own `should_restart` —
-   only the triggering child's own rate limit is enforced, so a
-   `OneForAll` group can restart-loop forever even though each individual
-   child would have tripped its `MaxR`/`MaxT` limit alone. Bundle with
-   deliverable 9 (same file, same investigation pass).
+8. **Cross-node link/monitor registration.** ✅ **landed 2026-08-04
+   (RFC 0012).** `Packet::Link`/`Monitor`/`Down` wire types,
+   `RemoteLinkRegistry`/`RemoteMonitorRegistry`, commit `0ab2c42`.
+9. **Fix the nested-supervisor-restart bug.** ✅ **landed 2026-08-03
+   (`22a56c7`).** `rebuild_child` recreates the `Supervisor` struct under
+   the new actor id (`supervisor.rs:396-422`); regression test
+   `test_supervised_supervisor_keeps_supervising_after_restart`
+   (`tests.rs:293-346`).
+10. **Fix the mass-restart rate-limit bug.** ✅ **landed 2026-08-03
+    (`22a56c7`).** Per-sibling `should_restart` guards in `restart_all`
+    (`supervisor.rs:533`) and `restart_from` (`:575`); regression tests
+    `test_one_for_all_respects_sibling_rate_limit` (`tests.rs:348-399`) and
+    `test_rest_for_one_respects_sibling_rate_limit` (`tests.rs:401-450`).
 11. **Tombstone garbage collection for `ORSet`/`AWORSet`/`RGA`.**
-   Confirmed: `removed` tombstone sets (`crdt.rs:454` ORSet, `crdt.rs:694`
-   AWORSet) and RGA's tombstoned elements (`crdt_reg.rs:299-302`) grow
-   unboundedly forever — a production-blocking memory leak and unbounded
-   wire-payload growth for any long-running counter/set. Needs a
-   causal-stability watermark: a tombstone is safe to drop once every
-   known replica has observed it (classic CRDT GC via a stable
-   vector-clock/Lamport-time cut across the member set). Depends on Group
-   C settling — a partial-view membership makes "every replica has
-   observed it" harder to compute; if deliverable 6 can't produce a
-   reliable full-membership view for this purpose (even though it doesn't
-   heartbeat everyone), the stability watermark may need its own
-   lightweight full-membership gossip pass, separate from the heartbeat
-   data-plane — decide this when deliverable 6 lands, don't block
-   deliverable 11 on it indefinitely.
-12. **Wire `state crdt` into real `.nula`-level syntax.** Already tracked
-   by SPEC2.md §12.5 ("tracked as a real implementation gap... see RFC/
-   for the tracking item once filed") — this deliverable formally files
-   that RFC and executes it. Today `state crdt count: Int = 0` parses and
-   runs but behaves identically to `state durable` — no type selector, no
-   `Crdt.*` effect module, no merge-on-sync (confirmed, SPEC2.md §12.5).
-   Ship: a concrete-CRDT-type selector in the `state crdt` declaration, an
-   enforced operation set per type (e.g. a `GCounter`-typed field only
-   accepts increment, not arbitrary assignment), and real
-   merge-through-`CrdtManager` on sync. This is the single
-   highest-leverage differentiator this investigation found: none of
-   Erlang/OTP, Akka (CRDTs are a separate "Distributed Data" library, not
-   core), or Orleans ship CRDTs as a first-class in-language
-   state-declaration primitive. RFC required (additive Stable-tier
-   surface, same reasoning as deliverable 8).
-13. **Op-based CRDT replication (CmRDT).** Already fully scoped by
-   `PERFORMANCE_ANALYSIS.md` §3.2 (its status note: "Op-based (CmRDT)
-   replication was not implemented") and PLAN.md Phase 3 bullet 6 — no new
-   investigation needed. This deliverable pulls that existing,
-   already-scoped item forward into Phase 5's timeline instead of Phase
-   3's (Step 4 below updates the Phase 3 bullet to point here). Do not
-   re-scope it; execute it as already described there (`Packet::CrdtOp`
-   alongside the existing `Packet::CrdtDeltaSync`).
-14. **Real actor migration, not a no-op stub.** Confirmed:
-   `OpCode::Migrate` records a `pending_migrations` entry
-   (`vm.rs:4349-4360`) that nothing ever drains;
-   `DistributedVmCallbacks::migrate` is `fn migrate(&mut self, _actor_id:
-   u64, _target_node_id: u64) {}` — a literal empty body
-   (`callbacks.rs:1526`). Implement as: (a) snapshot the actor's durable
-   state through the existing `PersistenceStore` snapshot path, (b) spawn
-   on the target node from that snapshot, reusing `recover_actor`'s
-   restoration logic rather than forking a parallel copy of it, (c) update
-   every node's `AddressResolver`/`RemoteActorCache` entries that pointed
-   at the old location, (d) tombstone/forward the old location for
-   in-flight messages during the handoff window. **Read PLAN.md's existing
-   Phase 2 bullet 4 write-up on `recover_actor` before touching this**
-   (the "Confirmed: no lower-risk sub-target exists" paragraph from this
-   same session): `recover_actor` has an unconditional-`Some`/hard-`None`
-   `current_actor` bracketing pattern around its `run_bytecode_behavior`
-   call that differs from `flush_actor_mailbox`'s
-   save-`prev`/restore-`prev` pattern for the identical primitive —
-   migration's spawn-from-snapshot path becomes a *third* call site into
-   this family and must not introduce a *fourth*, undocumented reentrancy
-   convention. If migration needs to call into recovery machinery, match
-   whichever of the two existing patterns is actually reentrancy-safe for
-   migration's calling context, don't invent a third. Depends on
-   deliverable 8 (a migrated actor's supervisors/linked peers need to
-   already be reachable cross-node to react correctly to the
-   identity/location change). Tier status of `migrate` itself is unclear
-   from GOVERNANCE.md's current lists (not named, similar to CRDTs'
-   pre-RFC state) — file an RFC anyway given the operational blast radius,
-   same reasoning as deliverable 1.
+    ✅ **landed 2026-08-08 (`492cd72`, causal-stability watermark).**
+    `gc_stable_tombstones` (`crdt_manager.rs:789`); Group-C dependency
+    satisfied by D6's membership bookkeeping.
+12. **Wire `state crdt` into real `.nula`-level syntax.** ✅ **landed
+    2026-08-04 (selector) + 2026-08-15 (effect module, enforcement,
+    conformance).** The concrete-CRDT-type selector
+    (`parser.rs:1752-1809`, `CrdtType::from_keyword`), the `Crdt.*` effect
+    module (`perform Crdt.increment/decrement/add/remove/set/read`, stdlib
+    registry + `perform_crdt_builtin` in `runtime/mod.rs`), per-type
+    operation-set enforcement (`CrdtManager::apply_field_op` rejects
+    out-of-set ops; raw `self.field = expr` assignment to a crdt field is
+    ignored in both callback `set_state_field` impls), and `.nula`-level
+    conformance cases (`conformance/behavior/crdt_gcounter.nula`,
+    `crdt_pncounter.nula`, `crdt_gcounter_opset.nula`). The standalone
+    runtime now initializes `crdt_manager` eagerly, so `state crdt` fields
+    register and `Crdt.*` works without distribution enabled. **Known gap
+    (docs-truthed 2026-08-15):** `recover_actor` does not rebuild
+    `CrdtManager.field_map`, so `Crdt.*` is a silent nil no-op on a
+    recovered actor (the materialized `state_data` value survives) — pinned
+    by `test_crdt_field_survives_recovery`.
+13. **Op-based CRDT replication (CmRDT).** ✅ **landed (Phase 3 bullet 6
+    satisfied by reference).** `Packet::CrdtOp` (`network.rs:595`),
+    `CrdtManager::apply_op` (`crdt_manager.rs:511`).
+14. **Real actor migration, not a no-op stub.** ✅ **landed 2026-08-10
+    (`1950c01`).** `DistributedVmCallbacks::migrate` has a real body
+    (`callbacks.rs:1593`: snapshot + nbc extraction, `reap_living_actor`);
+    `OpCode::Migrate` drains (`vm.rs:4672-4674`); forwarding via
+    `migrated_actors` entries (`mod.rs:1786`). Reentrancy caution below
+    remains load-bearing for the future D7c work: `recover_actor` has an
+    unconditional-`Some`/hard-`None` `current_actor` bracketing pattern
+    around its `run_bytecode_behavior` call that differs from
+    `flush_actor_mailbox`'s save-`prev`/restore-`prev` pattern for the
+    identical primitive — any future spawn-from-snapshot path must match
+    whichever is actually reentrancy-safe, not invent a third.
 15. **Cross-node durable-store replication: explicitly scoped down, not
-   silently deferred.** Confirmed: `JsonFileStore`/`LibsqlStore` are
-   purely per-node local disk; only CRDT state converges across nodes
-   today. Full multi-node durable-store replication (Raft-backed or
-   leader-based) is explicitly OUT of this phase — it is
-   `PERFORMANCE_ANALYSIS.md` row 3.4's already-deferred Raft item; this
-   plan does not relitigate that deferral (see deliverable 1's same note).
-   What this phase DOES ship: make the existing *single-node* durability
-   trustworthy before promising anything about surviving losing a whole
-   node. Confirmed gaps: `LibsqlStore` has zero `PRAGMA` statements
-   anywhere (no WAL, no `synchronous` setting); `JsonFileStore` fsyncs
-   snapshots via temp-file-plus-rename (`persistence.rs:506-521`) but
-   journal/workflow appends are unsynced
-   (`persistence.rs:546-558,571-583`). Add `PRAGMA journal_mode=WAL` and
-   an operator-configurable `PRAGMA synchronous` to `LibsqlStore`; fsync
-   `JsonFileStore`'s journal/workflow appends with the same discipline its
-   snapshot path already has (or, if a real reason not to surfaces during
-   implementation, document it explicitly rather than leaving the
-   asymmetry silent).
+    silently deferred.** ✅ **landed 2026-08-03 (`42d879d`).**
+    `PRAGMA journal_mode=WAL` (`persistence.rs:811`), operator-configurable
+    `PRAGMA synchronous={OFF|NORMAL|FULL}` (`:825`, `SqliteSyncMode`),
+    `JsonFileStore` fsyncs journal (`:581`) and workflow (`:609`) appends.
+    Full multi-node durable-store replication remains explicitly OUT
+    (Raft, `PERFORMANCE_ANALYSIS.md` row 3.4 — deferral unchanged).
+    **Residual closed 2026-08-15:** EventSourced `append_event`
+    (`persistence.rs:624`) now `sync_all()`s like the journal and workflow
+    appends — a lost event append is a lost EventSourced commit.
 16. **Fix `LibsqlStore` silently dropping `crdt_snapshot` on save/load.**
-   Confirmed bug, same file/subsystem as deliverable 15 — bundle together.
+    ✅ **landed 2026-08-03 (`42d879d`).** `crdt_snapshot` column + migration
+    (`persistence.rs:849/859-861`), save (`:969-976`), load (`:986-1006`);
+    tests `test_libsql_store_crdt_snapshot_roundtrip` (`tests.rs:1878-1909`),
+    `test_libsql_store_migrates_crdt_snapshot_column` (`tests.rs:1911-1952`).
 17. **Ship the distributed-actor-relevant slice of the
-   metrics/tracing/debug story SPEC2.md §15.3-15.4 already speculatively
-   designs — not the whole chapter.** Confirmed: zero
-   opentelemetry/prometheus/metrics dependencies anywhere in the
-   workspace; `tracing`/`tracing-subscriber` are wired only as a text
-   stderr logger defaulting to `warn` (`main.rs:56-62`); real counters
-   already exist but are never exported — `GcStats` (`gc.rs:87-129`),
-   `SchedulerStats` (`scheduler.rs:29-65`), `ResolverStats`
-   (`distributed.rs:315-327`), `mailbox_depths()`/`dlq_depth()`
-   (`mod.rs:1841-1858`) — today's sole consumer is a one-shot end-of-run
-   `--verbose` dump (`main.rs:1164-1183`). SPEC2.md §15.3/15.4 already
-   fully designs `metrics.counter/histogram/gauge`, `trace.span`, `config
-   trace { auto_trace_actor_messages }`, `debug.inspect(actor_id)` — do
-   not redesign, implement against that existing spec, and scope to
-   exactly: (a) an OpenTelemetry exporter over the counters that already
-   exist (wiring existing data out, not inventing new instrumentation),
-   (b) a trace-id field riding along in `Packet::ActorMessage`'s existing
-   string-table wire mechanism (extend what already carries content
-   cross-node by value, don't invent a second cross-node payload channel)
-   so a span begun on the sending node continues on the receiving node,
-   satisfying `auto_trace_actor_messages`, (c) `perform
-   debug.inspect(actor_id)` as a new built-in effect returning `{ state,
-   mailbox_size, behaviors, supervisor }`, directly reusing
-   `mailbox_depths()` and existing actor accessors already in `mod.rs`.
-   Explicitly out of scope for this phase:
-   `debug.trace_messages`/`debug.snapshot`/deterministic replay debugging,
-   any admin HTTP/CLI surface beyond what's needed to point an operator's
-   existing Prometheus/Grafana/Jaeger at a running cluster, and every
-   non-distributed part of SPEC2.md Chapter 15 (deployment manifests, the
-   generic `config app` system, serverless targets) — those stay backlog.
-18. **Visual actor topology dashboard.** Already scoped by
-   `PERFORMANCE_ANALYSIS.md` row 6.4 ("DO as a side project, low-risk,
-   high-fun, great for demos," 3 weeks, no dependencies) — pull it into
-   Phase 5 as the demo-facing consumer of deliverable 17's metrics export.
-   Do not build a bespoke dashboard backend: point an off-the-shelf
-   Grafana at deliverable 17's OTel/Prometheus exporter and ship default
-   panel JSON plus a `docker-compose` demo — this is cheaper and more
-   credible than a custom UI, and was the original row's own "as a side
-   project" framing.
+    metrics/tracing/debug story SPEC2.md §15.3-15.4 already speculatively
+    designs — not the whole chapter.** ✅ **landed 2026-08-08..13
+    (`5d15857`, `7592b72`).** (a) `otel` cargo feature +
+    `init_tracing` (`src/observability.rs`, `main.rs:61-77`) and a
+    `--metrics-port` Prometheus-format server (`main.rs:804/1727`,
+    `Runtime::enable_metrics_server`; exports `GcStats`/`SchedulerStats`/
+    `ResolverStats`/mailbox depths — `metrics.rs:141-187`); (b)
+    `trace_id: Option<String>` riding `Packet::ActorMessage`'s string
+    table (`network.rs:547-549/829`); (c) `perform Debug.inspect(actor_id)`
+    builtin returning `{ state, mailbox_size, behaviors, supervisor }`
+    (`callbacks.rs:438-455` runtime, `vm.rs:664` standalone print form).
+    Out of scope, unchanged: `.nula` `metrics.counter`/`trace.span`/
+    `config trace` effects remain backlog per the original scope line.
+18. **Visual actor topology dashboard.** ✅ **landed 2026-08-15.**
+   `deploy/observability/` ships the off-the-shelf-Grafana demo the
+   original scope line called for — no bespoke backend:
+   `docker-compose.yml` (Prometheus + Grafana with anonymous admin and
+   provisioning), `prometheus/prometheus.yml` (scrapes the node's
+   `--metrics-port` `/metrics` endpoint via `host.docker.internal`),
+   a provisioned Grafana datasource + dashboard provider, and a
+   default `nulang-runtime.json` dashboard (9 panels covering live
+   actors/DLQ/mailbox gauges and scheduler/GC/resolver counters). All
+   20 dashboard metric names verified to match `metrics.rs`
+   `to_prometheus_text` exactly; JSON + YAML validated.
 
 **Acceptance.**
 
-- Default new clusters require authenticated, encrypted transport;
+- ✅ Default new clusters require authenticated, encrypted transport;
   plaintext is an explicit, documented opt-out, never the silent default
-  (deliverable 4).
-- A 3-node and a 5-node DST/chaos scenario suite includes split-brain
+  (deliverable 4 — RFC 0013 + D6).
+- ✅ A 3-node and a 5-node DST/chaos scenario suite includes split-brain
   (mutually-invisible healthy sub-clusters) and asymmetric-partition
   cases; the cluster provably converges to one surviving side per the
   configured resolver strategy, never a stuck two-sided split
-  (deliverables 1-2).
-- A node killed mid-run triggers `DOWN` notifications to every local actor
-  that had linked/monitored one of its actors, and a
-  supervisor-policy-driven re-spawn from the last durable snapshot
-  succeeds (deliverables 7-9).
-- `ORSet`/`AWORSet`/`RGA` tombstones are garbage-collected once causally
+  (deliverables 1-2 — D1/D2).
+- ✅ A node killed mid-run triggers `DOWN` notifications to every local
+  actor that had linked/monitored one of its actors (deliverables 7-8 —
+  D7a+b + D8). The supervisor-policy-driven re-spawn half remains open
+  (D7c, RFC 0014).
+- ✅ `ORSet`/`AWORSet`/`RGA` tombstones are garbage-collected once causally
   stable; a long-running soak test shows bounded, not unbounded, memory
-  growth (deliverable 11).
-- `state crdt` fields have real `.nula`-level syntax, a concrete-type
-  selector, and merge-on-sync — SPEC2.md §12.5's "tracked as a real
-  implementation gap" note is resolved, not just re-stated (deliverable
-  12).
-- A `migrate`-triggered move relocates a persistent actor to a healthy
+  growth (deliverable 11 — D11).
+- ✅ `state crdt` fields have real `.nula`-level syntax, a concrete-type
+  selector, and merge-on-sync (deliverable 12 — D12 partial; the
+  `Crdt.*` effect module and operation-set enforcement remain open).
+- ✅ A `migrate`-triggered move relocates a persistent actor to a healthy
   node; the old node's `AddressResolver` cache no longer resolves the old
-  location afterward (deliverable 14).
-- `LibsqlStore` uses WAL plus an explicit `synchronous` pragma and
+  location afterward (deliverable 14 — D14).
+- ✅ `LibsqlStore` uses WAL plus an explicit `synchronous` pragma and
   round-trips `crdt_snapshot` correctly; `JsonFileStore` fsyncs
   journal/workflow appends with the same discipline as its snapshot path
-  (deliverables 15-16).
-- A running cluster's `GcStats`/`SchedulerStats`/`ResolverStats`/mailbox
+  (deliverables 15-16 — D15/D16).
+- ✅ A running cluster's `GcStats`/`SchedulerStats`/`ResolverStats`/mailbox
   depths are scrapeable by an off-the-shelf Prometheus/OTel collector with
   zero code beyond configuration; a trace begun on one node's actor send
-  continues on the node that receives it (deliverable 17).
+  continues on the node that receives it (deliverable 17 — D17).
 
 **Non-goals.** Native Raft/consensus-backed strongly-consistent
 replication (`PERFORMANCE_ANALYSIS.md` row 3.4, still deferred — SBR-style
@@ -1722,9 +1612,9 @@ miscounts.
 | Cranelift API breakage on Rust upgrade | Low | Medium | Backend trait boundary (Phase 2 bullet 3) isolates the risk |
 | No external user materializes | High | Very High | The reference application is the mitigation; if that doesn't land, re-evaluate pitch |
 | Feature creep from AI-runtime enthusiasm | Medium | High | Language surface stays actor + effects + capabilities; AI stays in `nulang-ai` |
-| Split-brain resolver false-positive downs a healthy majority | Medium | High | Default to the conservative `static-quorum` strategy; `keep-majority`/`keep-oldest` require explicit opt-in once membership-count accuracy is proven under Phase 5 deliverable 6 |
-| NUL0 v2 transport-security bump breaks embedders relying on today's no-config plaintext `enable_distribution(addr, None)` | Medium | Medium | Plaintext stays available as an explicit, documented opt-out variant, never silently removed; existing `None` call sites migrate to an explicit insecure variant, not a breaking signature change |
-| Partial-view membership (Phase 5 deliverable 6) undermines the split-brain resolver's member-count assumptions (deliverable 1) | Medium | Medium | Sequence deliverable 1 before deliverable 6; if 6 can't preserve count accuracy, ship 1 alone and defer 6 (see Phase 5 kill criteria) |
+| Split-brain resolver false-positive downs a healthy majority | Medium | High | Default to the conservative `static-quorum` strategy; `keep-majority`/`keep-oldest` require explicit opt-in once membership-count accuracy is proven under Phase 5 deliverable 6 (mitigated: RFC 0011 static-quorum landed with down-self tests, 2026-08-13) |
+| NUL0 v2 transport-security bump breaks embedders relying on today's no-config plaintext `enable_distribution(addr, None)` | Medium | Medium | Plaintext stays available as an explicit, documented opt-out variant, never silently removed; existing `None` call sites migrate to an explicit insecure variant, not a breaking signature change (superseded: RFC 0013 landed additive over NUL0 v1; plaintext is the explicit `PlaintextInsecure` variant) |
+| Partial-view membership (Phase 5 deliverable 6) undermines the split-brain resolver's member-count assumptions (deliverable 1) | Medium | Medium | Sequence deliverable 1 before deliverable 6; if 6 can't preserve count accuracy, ship 1 alone and defer 6 (see Phase 5 kill criteria) (mitigated: RFC 0011 static-quorum landed with down-self tests, 2026-08-13) |
 
 ## Version + tier progression
 
@@ -1735,7 +1625,7 @@ miscounts.
 | 0.3.0 | Phase 2 complete | proofs + Windows + release binaries |
 | 1.1.0-stable | Phase 3 partial | bootstrap fixpoint + registry live |
 | 2.0.0-frozen | Phase 3 complete | deprecation cycle graduations require major bump |
-| 2.0.0-frozen (or sooner) | Phase 5 NUL0 v2 | authenticated/encrypted transport handshake is a Frozen-tier wire-format bump (deliverable 4) — an independent trigger from Phase 3's deprecation graduations; whichever lands first bumps the major language version, the other rides the same or a later major bump |
+| 2.0.0-frozen (or sooner) | Phase 5 NUL0 v2 | authenticated/encrypted transport handshake is a Frozen-tier wire-format bump (deliverable 4) — an independent trigger from Phase 3's deprecation graduations; whichever lands first bumps the major language version, the other rides the same or a later major bump (not needed: RFC 0013 shipped authenticated transport additive over NUL0 v1) |
 
 Phase 5 runs in parallel with Phases 1-3 and is not gated on their
 completion; its Frozen/Stable-tier deliverables (1, 4, 8, 12, 14) each

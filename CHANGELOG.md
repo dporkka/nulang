@@ -45,6 +45,60 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-14 (docs-truth sweep)
+
+- **RFC 0011 — split-brain resolver (`static-quorum`)** (Experimental,
+  `src/runtime/cluster.rs`). `SplitBrainResolver` trait +
+  `StaticQuorumResolver` down a node that falls below configured quorum;
+  `Failed`-peer probing self-heals a clean partition without external
+  rejoin. Down-self + probe re-join covered by DST/chaos scenarios.
+  Commits `5a0b641`, `1498cc7` (2026-08-13).
+- **RFC 0012 — cross-node link/monitor supervision** (Stable,
+  `src/runtime/supervision.rs`). `RemoteLinkRegistry`/
+  `RemoteMonitorRegistry` track cross-node watchers; `Packet::Link`/
+  `Monitor`/`Down` wire types propagate link/`DOWN` across nodes.
+  Commit `0ab2c42` (2026-08-04).
+- **Tombstone GC for `ORSet`/`AWORSet`/`RGA`** (Stable,
+  `src/runtime/crdt_manager.rs`). Causal-stability watermark
+  (`gc_stable_tombstones`) reclaims `removed` sets and RGA tombstones once
+  every healthy replica has observed them. Commit `492cd72` (2026-08-08).
+- **OpenTelemetry observability + `--metrics-port`** (Experimental,
+  `src/observability.rs`, `src/main.rs`). `otel` cargo feature +
+  `init_tracing`; `--metrics-port` Prometheus-format server exports
+  `GcStats`/`SchedulerStats`/`ResolverStats`/mailbox depths. Commits
+  `5d15857` (2026-08-08), `7592b72` (2026-08-13).
+- **Runtime observability dashboard demo** (Experimental,
+  `deploy/observability/`). Off-the-shelf Grafana pointed at the
+  `--metrics-port` Prometheus exporter — `docker-compose.yml` (Prometheus
+  + Grafana), a scrape config, provisioned datasource + dashboard
+  provider, and a default 9-panel `nulang-runtime.json` dashboard
+  (live-actor/DLQ/mailbox gauges + scheduler/GC/resolver counters). No
+  bespoke backend, per PLAN.md D18 (2026-08-15).
+- **Op-based CRDT replication** (Stable, `src/runtime/crdt_manager.rs`,
+  `network.rs`). `Packet::CrdtOp` ships individual `CrdtOp`s alongside
+  `CrdtDeltaSync` (lowest-bandwidth sync path); `CrdtManager::apply_op`
+  merges inbound ops. Commit `f97b28d` (2026-08-04).
+- **`Crdt.*` effect module + per-type operation-set enforcement** (Stable,
+  `src/runtime/crdt_manager.rs`, `src/runtime/mod.rs`, `src/stdlib.rs`).
+  `perform Crdt.increment/decrement/add/remove/set/read` is the `.nula`-level
+  mutation path for `state crdt` fields, validated per type by
+  `CrdtManager::apply_field_op` (e.g. `decrement` on a `gcounter` is a
+  nil no-op); a raw `self.field = expr` assignment to a crdt field is
+  ignored so it cannot orphan `state_data` from the replicated entry.
+  The standalone runtime initializes `crdt_manager` eagerly, so `state
+  crdt` fields register without distribution. Conformance cases in
+  `conformance/behavior/crdt_*.nula` (2026-08-15).
+- **Durable-store hardening** (Stable, `src/runtime/persistence.rs`).
+  `LibsqlStore` applies `PRAGMA journal_mode=WAL` + operator-configurable
+  `PRAGMA synchronous`; `crdt_snapshot` column round-trips save/load;
+  `JsonFileStore` fsyncs journal/workflow appends. Commit `42d879d`
+  (2026-08-03).
+- **Supervisor restart fixes** (Stable, `src/runtime/supervisor.rs`).
+  `rebuild_child` recreates the `Supervisor` struct so a nested supervisor
+  keeps supervising after restart; `restart_all`/`restart_from` check each
+  sibling's `should_restart` (per-sibling rate limit). Commit `22a56c7`
+  (2026-08-03).
+
 ### Added since 1.0.0-frozen — 2026-08-14
 
 - **`let rec f(x) = ... in ...` works at module level.** Recursive local
@@ -358,6 +412,16 @@ in this version; they are recorded here to establish their tier.
   theorems); only `linear_at_most_once` there is `sorry`. `effects.lean`'s
   two theorems are vacuous `True` stubs, not proofs. See
   `spec/formal/README.md` for the corrected, per-theorem scope table.
+- **Formal semantics: Core soundness chain re-proved (2026-08-14).**
+  `types.lean`'s `progress`/`preservation`/`type_soundness` are machine-checked
+  again (the 8 Core `sorry`s regressed by `ac9ef5d` were replaced with real
+  proofs). The capability lattice laws, `cap_sendable`, and
+  `discharge_sendable` are proved. Two items remain open:
+  `linear_at_most_once` (`capabilities.lean`), which requires the split-context
+  (input/output) refinement of `HasTypeCap` — the single-context statement is
+  false (counterexample documented in-file) — and `effects.lean`'s two
+  `effect_safety` theorems, which remain vacuous `True` stubs, not proofs.
+  CI sorry-ratchet baseline lowered 9 → 1. See `spec/formal/README.md`.
 
 - **RFC 0013 — Authenticated, encrypted transport (2026-08-05).**
   `TlsConfig` enum (`MutualTls`/`SelfSigned`/`PlaintextInsecure`) replaces
@@ -798,7 +862,8 @@ in this version; they are recorded here to establish their tier.
   union), `Syntax.lean` (Core expression AST, free vars, capture-avoiding
   substitution), `Typing.lean` (typing context, judgment Γ ⊢ e : τ).
   Soundness theorems (Substitution Lemma, Preservation, Progress, Type
-  Soundness) are stated as conjectures. `lake build` passes.
+  Soundness) are machine-checked in the top-level `types.lean` (2026-08-14).
+  `lake build` passes.
   (RFC 0003 Item 2)
 - **`.nbc` dependency type in `nula` package manager** (Experimental,
   `src/package/`). `nbc` field in `Nulang.toml` `[dependencies]`.
