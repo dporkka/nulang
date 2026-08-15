@@ -40,8 +40,8 @@ use crate::jit::compiler::{emit_arr_load, emit_yield_pc, CompileError};
 // ---------------------------------------------------------------------------
 
 use crate::cranelift_utils::{
-    emit_sext48, emit_tag_bool, emit_tag_int, PAYLOAD_MASK_I64, TAG_BOOL_I64, TAG_INT_I64,
-    TAG_NIL_I64,
+    emit_bitcast_f64_to_i64_canonicalized, emit_sext48, emit_tag_bool, emit_tag_int,
+    PAYLOAD_MASK_I64, TAG_BOOL_I64, TAG_INT_I64, TAG_NIL_I64,
 };
 pub use crate::type_metadata::{KnownType, TypeMetadata};
 // Bytecode-level type inference
@@ -465,8 +465,9 @@ fn emit_typed_ibinop(
 /// 1. Load raw i64 values from registers
 /// 2. Bitcast to f64
 /// 3. Perform the CLIF float operation
-/// 4. Bitcast result back to i64
-/// 5. Store back (already a proper NaN-tagged float)
+/// 4. Bitcast result back to i64, canonicalizing NaN to the reserved
+///    tag-free pattern (a raw hardware NaN would alias TAG_NIL/TAG_PTR/...)
+/// 5. Store back (a proper boxed float)
 fn emit_typed_fbinop(
     builder: &mut FunctionBuilder,
     regs_ptr: Value,
@@ -487,7 +488,7 @@ fn emit_typed_fbinop(
         TypedFloatOp::Mul => builder.ins().fmul(a, b),
     };
 
-    let result_bits = emit_bitcast_f64_to_i64(builder, result);
+    let result_bits = emit_bitcast_f64_to_i64_canonicalized(builder, result);
     store_reg(builder, regs_ptr, dst, result_bits);
 }
 
