@@ -913,7 +913,11 @@ impl Repl {
 
     fn print_error(&self, err: &NuError) {
         if std::io::stderr().is_terminal() {
-            eprint!("{}", err.format_rich());
+            if let Some(rendered) = crate::diagnostic::render(err, true) {
+                eprint!("{rendered}");
+            } else {
+                eprint!("{}", err.format_rich());
+            }
         } else {
             eprintln!("Error: {}", err);
         }
