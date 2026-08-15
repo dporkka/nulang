@@ -41,7 +41,7 @@
     },
     "operators": {
       "patterns": [
-        { "name": "keyword.operator.nulang", "match": "(->|=>|\\|>|!=|==|<=|>=|&&|\\|\\|[+\\-*/%<>=!|&^])" }
+        { "name": "keyword.operator.nulang", "match": "(->|=>|\\|>|!=|==|<=|>=|&&|\\|\\||[+\\-*/%<>=!|&^])" }
       ]
     },
     "numbers": {
