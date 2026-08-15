@@ -1,0 +1,2 @@
+// Negative case: neg_effect_missing_name — must be rejected by the parser.
+effect { op: -> Int }

@@ -1,0 +1,2 @@
+// Negative case: neg_const_missing_value — must be rejected by the parser.
+const x = 
