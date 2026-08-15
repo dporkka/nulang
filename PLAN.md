@@ -1465,8 +1465,9 @@ D7c (RFC 0014), D18.
     `JsonFileStore` fsyncs journal (`:581`) and workflow (`:609`) appends.
     Full multi-node durable-store replication remains explicitly OUT
     (Raft, `PERFORMANCE_ANALYSIS.md` row 3.4 — deferral unchanged).
-    **Residual tracked (open):** EventSourced `append_event`
-    (`persistence.rs:624-636`) is the one append without `sync_all`.
+    **Residual closed 2026-08-15:** EventSourced `append_event`
+    (`persistence.rs:624`) now `sync_all()`s like the journal and workflow
+    appends — a lost event append is a lost EventSourced commit.
 16. **Fix `LibsqlStore` silently dropping `crdt_snapshot` on save/load.**
     ✅ **landed 2026-08-03 (`42d879d`).** `crdt_snapshot` column + migration
     (`persistence.rs:849/859-861`), save (`:969-976`), load (`:986-1006`);

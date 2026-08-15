@@ -632,6 +632,11 @@ impl PersistenceStore for JsonFileStore {
         let json = serde_json::to_string(&entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(file, "{}", json)?;
+        // fsync before returning so the event is durable, not just in the
+        // page cache (same discipline as append_journal/append_workflow_event
+        // and save_snapshot's temp file). EventSourced state reconstructs
+        // from this log on recovery, so a lost append is a lost commit.
+        file.sync_all()?;
         Ok(())
     }
 
