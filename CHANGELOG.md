@@ -395,6 +395,16 @@ in this version; they are recorded here to establish their tier.
   theorems); only `linear_at_most_once` there is `sorry`. `effects.lean`'s
   two theorems are vacuous `True` stubs, not proofs. See
   `spec/formal/README.md` for the corrected, per-theorem scope table.
+- **Formal semantics: Core soundness chain re-proved (2026-08-14).**
+  `types.lean`'s `progress`/`preservation`/`type_soundness` are machine-checked
+  again (the 8 Core `sorry`s regressed by `ac9ef5d` were replaced with real
+  proofs). The capability lattice laws, `cap_sendable`, and
+  `discharge_sendable` are proved. Two items remain open:
+  `linear_at_most_once` (`capabilities.lean`), which requires the split-context
+  (input/output) refinement of `HasTypeCap` — the single-context statement is
+  false (counterexample documented in-file) — and `effects.lean`'s two
+  `effect_safety` theorems, which remain vacuous `True` stubs, not proofs.
+  CI sorry-ratchet baseline lowered 9 → 1. See `spec/formal/README.md`.
 
 - **RFC 0013 — Authenticated, encrypted transport (2026-08-05).**
   `TlsConfig` enum (`MutualTls`/`SelfSigned`/`PlaintextInsecure`) replaces
@@ -835,7 +845,8 @@ in this version; they are recorded here to establish their tier.
   union), `Syntax.lean` (Core expression AST, free vars, capture-avoiding
   substitution), `Typing.lean` (typing context, judgment Γ ⊢ e : τ).
   Soundness theorems (Substitution Lemma, Preservation, Progress, Type
-  Soundness) are stated as conjectures. `lake build` passes.
+  Soundness) are machine-checked in the top-level `types.lean` (2026-08-14).
+  `lake build` passes.
   (RFC 0003 Item 2)
 - **`.nbc` dependency type in `nula` package manager** (Experimental,
   `src/package/`). `nbc` field in `Nulang.toml` `[dependencies]`.

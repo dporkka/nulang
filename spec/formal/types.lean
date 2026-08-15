@@ -227,7 +227,7 @@ abbrev Context := List (Name × Scheme)
 def Context.lookup (Γ : Context) (x : Name) : Option Scheme :=
   match Γ with
   | [] => none
-  | (y, σ) :: rest => if x == y then some σ else rest.lookup x
+  | (y, σ) :: rest => if x == y then some σ else Context.lookup rest x
 
 /-- The empty context. -/
 def Context.empty : Context := []
@@ -365,8 +365,12 @@ def binOpApply (op : BinOp) (n₁ n₂ : Int) : Expr :=
   | .add => .litInt (n₁ + n₂)
   | .sub => .litInt (n₁ - n₂)
   | .mul => .litInt (n₁ * n₂)
-  | .div => if n₂ == 0 then .unitVal else .litInt (n₁ / n₂)
-  | .mod => if n₂ == 0 then .unitVal else .litInt (n₁ % n₂)
+  -- NB: Lean's Int division/mods are total (x / 0 = 0, x % 0 = x by
+  -- convention), so the result stays an Int literal and preservation
+  -- holds. (The runtime's nil-on-div-zero is a different, untagged
+  -- semantics that this Core model does not represent.)
+  | .div => .litInt (n₁ / n₂)
+  | .mod => .litInt (n₁ % n₂)
   | .eq  => .litBool (n₁ == n₂)
   | .neq => .litBool (n₁ != n₂)
   | .lt  => .litBool (n₁ < n₂)
@@ -460,17 +464,375 @@ def annotationsClosed : Expr → Prop
 | .app e₁ e₂ | .strConcat e₁ e₂ | .binOp _ e₁ e₂ => annotationsClosed e₁ ∧ annotationsClosed e₂
 | .letIn _ e₁ e₂ => annotationsClosed e₁ ∧ annotationsClosed e₂
 | .ifThenElse e₁ e₂ e₃ => annotationsClosed e₁ ∧ annotationsClosed e₂ ∧ annotationsClosed e₃
-theorem weakening {Γ : Context} {x : Name} {σ : Scheme} {e : Expr} {τ : Ty}
-    (h : HasType Γ e τ) :
-    HasType ((x, σ) :: Γ) e τ := by
-  sorry
 
-theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : Expr}
-    (h : HasType ((x, ⟨[], τ₁⟩) :: Γ) e τ₂)
-    (hv : HasType Γ v τ₁)
-    (h_fv : τ₁.fv = []) :
-    HasType Γ (subst x v e) τ₂ := by
-  sorry
+-- ==================================================================
+-- Structural lemmas
+-- ==================================================================
+
+theorem Context.lookup_append_left {Γ Δ : Context} {x : Name} {σ : Scheme}
+    (h : Context.lookup Γ x = some σ) :
+    Context.lookup (Γ ++ Δ) x = some σ := by
+  induction Γ with
+  | nil => simp [Context.lookup] at h
+  | cons p Γs ih =>
+      cases p with
+      | mk y sy =>
+          simp [Context.lookup] at h ⊢
+          by_cases hxy : x = y
+          · simp [hxy] at h ⊢
+            exact h
+          · simp [hxy] at h ⊢
+            exact ih h
+
+theorem Context.freeTypeVars_append (Γ Δ : Context) :
+    Context.freeTypeVars (Γ ++ Δ) = Context.freeTypeVars Γ ++ Context.freeTypeVars Δ := by
+  induction Γ with
+  | nil => simp [Context.freeTypeVars]
+  | cons p Γs ih =>
+      cases p with
+      | mk y sy =>
+          simp [Context.freeTypeVars, ih, List.append_assoc]
+
+theorem Ty.subst_nil (τ : Ty) : τ.subst [] = τ := by
+  induction τ with
+  | var v => simp [Ty.subst]
+  | prim p => simp [Ty.subst]
+  | fn a b ha hb => simp [Ty.subst, ha, hb]
+  | unit => simp [Ty.subst]
+
+
+theorem Scheme.instantiate_closed (σ : Scheme) (h : σ.params = []) :
+    (σ.instantiate defaultFresh).1 = σ.body := by
+  unfold Scheme.instantiate
+  simp [h, Ty.subst_nil]
+
+theorem Context.lookup_body_fv_subset {Γ : Context} {x : Name} {σ : Scheme}
+    (h : Context.lookup Γ x = some σ) :
+    σ.body.fv ⊆ Context.freeTypeVars Γ := by
+  induction Γ with
+  | nil => simp [Context.lookup] at h
+  | cons p Γs ih =>
+      cases p with
+      | mk y sy =>
+          simp [Context.lookup] at h
+          by_cases hxy : x = y
+          · simp [hxy] at h
+            rw [← h]
+            intro v hv
+            simp [Context.freeTypeVars, List.mem_append, hv]
+          · simp [hxy] at h
+            intro v hv
+            simp [Context.freeTypeVars, List.mem_append]
+            right
+            exact ih h hv
+
+theorem Scheme.generalize_closed {Γ : Context} {τ₁ : Ty}
+    (h : τ₁.fv = []) :
+    (Scheme.generalize (Context.freeTypeVars Γ) τ₁).params = [] := by
+  unfold Scheme.generalize
+  simp [h]
+
+abbrev Context.Mono (Γ : Context) : Prop :=
+  ∀ (x : Name) (σ : Scheme), Context.lookup Γ x = some σ → σ.params = []
+
+theorem weakening_append_closed {Γ : Context} {x : Name} {τ₀ : Ty} {e : Expr} {τ : Ty}
+    (h : HasType Γ e τ) (hτ₀ : τ₀.fv = []) :
+    HasType (Γ ++ [(x, ⟨[], τ₀⟩)]) e τ := by
+  induction h with
+  | tVar hlookup hinst =>
+      exact .tVar (Context.lookup_append_left hlookup) hinst
+  | tLitInt => exact .tLitInt
+  | tLitBool => exact .tLitBool
+  | tLitString => exact .tLitString
+  | tLambda hbody ih =>
+      exact .tLambda ih
+  | tApp h₁ h₂ ih₁ ih₂ =>
+      exact .tApp ih₁ ih₂
+  | tLet h₁ h₂ ih₁ ih₂ =>
+      exact .tLet ih₁ (by
+        simpa [Context.freeTypeVars, Context.freeTypeVars_append, hτ₀] using ih₂)
+  | tIf h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      exact .tIf ih₁ ih₂ ih₃
+  | tBinOpIntArith hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpIntArith hop ih₁ ih₂
+  | tBinOpIntCmp hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpIntCmp hop ih₁ ih₂
+  | tBinOpBoolLogic hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpBoolLogic hop ih₁ ih₂
+  | tStrConcat h₁ h₂ ih₁ ih₂ =>
+      exact .tStrConcat ih₁ ih₂
+  | tUnit =>
+      exact .tUnit
+
+theorem closed_type_under_closed_context {Γ : Context} {e : Expr} {τ : Ty}
+    (h : HasType Γ e τ) (hΓ : Context.freeTypeVars Γ = [])
+    (h_params : ∀ (x : Name) (σ : Scheme), Context.lookup Γ x = some σ → σ.params = [])
+    (h_closed : annotationsClosed e) :
+    τ.fv = [] := by
+  induction h
+  case tVar Γ' x' τ' σ' hlookup hinst =>
+      have hparams : σ'.params = [] := h_params x' σ' hlookup
+      have hinst' : (σ'.instantiate defaultFresh).1 = σ'.body :=
+        Scheme.instantiate_closed σ' hparams
+      have hτ : τ' = σ'.body := hinst.symm.trans hinst'
+      rw [hτ]
+      have hsub : σ'.body.fv ⊆ Context.freeTypeVars Γ' :=
+        Context.lookup_body_fv_subset hlookup
+      rw [hΓ] at hsub
+      apply List.eq_nil_iff_forall_not_mem.mpr
+      intro v hv
+      have : v ∈ ([] : List Var) := hsub hv
+      simp at this
+  case tLitInt => rfl
+  case tLitBool => rfl
+  case tLitString => rfl
+  case tLambda Γ' x' τ₁' e' τ₂' hbody ih =>
+      have hτ₂ : τ₂'.fv = [] := ih
+        (by simp [Context.freeTypeVars, hΓ, h_closed.1])
+        (by
+          intro x'' σ'' hl
+          simp [Context.lookup] at hl
+          by_cases hxx : x'' = x'
+          · simp [hxx] at hl
+            simpa using (congrArg Scheme.params hl).symm
+          · simp [hxx] at hl
+            exact h_params x'' σ'' hl)
+        h_closed.2
+      simp [Ty.fv, h_closed.1, hτ₂]
+  case tApp Γ' e₁' e₂' τ₁' τ₂' h₁ h₂ ih₁ ih₂ =>
+      have hfn : (Ty.fn τ₂' τ₁').fv = [] := ih₁ hΓ h_params h_closed.1
+      simp [Ty.fv] at hfn
+      exact hfn.2
+  case tLet Γ' x' e₁' e₂' τ₁' τ₂' h₁ h₂ ih₁ ih₂ =>
+      have hτ₁ : τ₁'.fv = [] := ih₁ hΓ h_params h_closed.1
+      exact ih₂
+        (by simp [Context.freeTypeVars, Scheme.generalize, hΓ, hτ₁])
+        (by
+          intro x'' σ'' hl
+          simp [Context.lookup] at hl
+          by_cases hxx : x'' = x'
+          · simp [hxx] at hl
+            have hgen : (Scheme.generalize (Context.freeTypeVars Γ') τ₁').params = [] :=
+              Scheme.generalize_closed hτ₁
+            simpa [hgen] using (congrArg Scheme.params hl).symm
+          · simp [hxx] at hl
+            exact h_params x'' σ'' hl)
+        h_closed.2
+  case tIf Γ' e₁' e₂' e₃' τ' h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      exact ih₂ hΓ h_params h_closed.2.1
+  case tBinOpIntArith Γ' op' e₁' e₂' hop h₁ h₂ ih₁ ih₂ => rfl
+  case tBinOpIntCmp Γ' op' e₁' e₂' hop h₁ h₂ ih₁ ih₂ => rfl
+  case tBinOpBoolLogic Γ' op' e₁' e₂' hop h₁ h₂ ih₁ ih₂ => rfl
+  case tStrConcat Γ' e₁' e₂' h₁ h₂ ih₁ ih₂ => rfl
+  case tUnit => rfl
+
+theorem value_has_closed_type {v : Expr} {τ : Ty}
+    (h : HasType Context.empty v τ) (_hv : isValue v) (h_closed : annotationsClosed v) :
+    τ.fv = [] := by
+  exact closed_type_under_closed_context h rfl
+    (by
+      intro x σ hl
+      simp [Context.lookup, Context.empty] at hl)
+    h_closed
+
+theorem Context.lookup_swap_head {Γ : Context} {a b : Name} {σₐ σ_b : Scheme}
+    (hab : a ≠ b) :
+    Context.lookup ((a, σₐ) :: (b, σ_b) :: Γ) =
+    Context.lookup ((b, σ_b) :: (a, σₐ) :: Γ) := by
+  funext x
+  simp [Context.lookup]
+  by_cases hxa : x = a
+  · simp [hxa]
+    by_cases hxb : x = b
+    · exfalso; apply hab; exact hxa.symm.trans hxb
+    · intro h
+      exfalso; exact hab h
+  · simp [hxa]
+
+theorem Context.lookup_permute {Δ Γ : Context} {a b : Name} {σₐ σ_b : Scheme}
+    (hab : a ≠ b) :
+    Context.lookup (Δ ++ (a, σₐ) :: (b, σ_b) :: Γ) =
+    Context.lookup (Δ ++ (b, σ_b) :: (a, σₐ) :: Γ) := by
+  induction Δ with
+  | nil => exact Context.lookup_swap_head hab
+  | cons p Δs ih =>
+      cases p with
+      | mk y sy =>
+          funext x
+          simp [Context.lookup]
+          by_cases hxy : x = y
+          · simp [hxy]
+          · simp [hxy]
+            exact congrFun ih x
+
+theorem Context.lookup_drop_shadow {Γ : Context} {x : Name} {σ σ' : Scheme} :
+    Context.lookup ((x, σ') :: (x, σ) :: Γ) =
+    Context.lookup ((x, σ') :: Γ) := by
+  funext y
+  simp [Context.lookup]
+  by_cases hyx : y = x <;> simp [hyx]
+
+theorem Context.lookup_drop_shadow_append {Δ Γ : Context} {x : Name} {σ σ' : Scheme} :
+    Context.lookup (Δ ++ (x, σ') :: (x, σ) :: Γ) =
+    Context.lookup (Δ ++ (x, σ') :: Γ) := by
+  induction Δ with
+  | nil => exact Context.lookup_drop_shadow
+  | cons p Δs ih =>
+      cases p with
+      | mk y sy =>
+          funext z
+          simp [Context.lookup]
+          by_cases hzy : z = y
+          · simp [hzy]
+          · simp [hzy]
+            exact congrFun ih z
+
+-- One-directional subcontext: lookup-mono + equal free type vars.
+theorem Context.lookup_mono_extend {Γ₁ Γ₂ : Context} {x : Name} {σ₁ σ₂ : Scheme}
+    (hσ : σ₁ = σ₂)
+    (hmono : ∀ y σ, Context.lookup Γ₁ y = some σ → Context.lookup Γ₂ y = some σ) :
+    ∀ y σ, Context.lookup ((x, σ₁) :: Γ₁) y = some σ → Context.lookup ((x, σ₂) :: Γ₂) y = some σ := by
+  intro y σ hl
+  simp [Context.lookup] at hl
+  by_cases hy : y = x
+  · subst y
+    simp [Context.lookup, hσ] at hl ⊢
+    exact hl
+  · simp [Context.lookup, hy] at hl ⊢
+    exact hmono y σ hl
+
+theorem Context.freeTypeVars_extend {Γ₁ Γ₂ : Context} {x : Name} {σ₁ σ₂ : Scheme}
+    (hσ : σ₁ = σ₂) (hftv : Context.freeTypeVars Γ₁ = Context.freeTypeVars Γ₂) :
+    Context.freeTypeVars ((x, σ₁) :: Γ₁) = Context.freeTypeVars ((x, σ₂) :: Γ₂) := by
+  simp [Context.freeTypeVars, hσ, hftv]
+
+theorem HasType_subctx {Γ₁ Γ₂ : Context} {e : Expr} {τ : Ty}
+    (hmono : ∀ x σ, Context.lookup Γ₁ x = some σ → Context.lookup Γ₂ x = some σ)
+    (hftv : Context.freeTypeVars Γ₁ = Context.freeTypeVars Γ₂)
+    (h : HasType Γ₁ e τ) :
+    HasType Γ₂ e τ := by
+  induction h generalizing Γ₂ with
+  | tVar hlookup hinst =>
+      rename_i Γ₁' x' τ' σ'
+      exact .tVar (hmono x' σ' hlookup) hinst
+  | tLitInt => exact .tLitInt
+  | tLitBool => exact .tLitBool
+  | tLitString => exact .tLitString
+  | tLambda hbody ih =>
+      exact .tLambda (ih
+        (Context.lookup_mono_extend rfl hmono)
+        (Context.freeTypeVars_extend rfl hftv))
+  | tApp h₁ h₂ ih₁ ih₂ =>
+      exact .tApp (ih₁ hmono hftv) (ih₂ hmono hftv)
+  | tLet h₁ h₂ ih₁ ih₂ =>
+      rename_i Γ₁' x' e₁ e₂ τ₁ τ₂
+      have hσ : Scheme.generalize (Context.freeTypeVars Γ₁') τ₁ =
+                Scheme.generalize (Context.freeTypeVars Γ₂) τ₁ := by
+        rw [hftv]
+      exact .tLet (ih₁ hmono hftv) (ih₂
+        (Context.lookup_mono_extend hσ hmono)
+        (Context.freeTypeVars_extend hσ hftv))
+  | tIf h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      exact .tIf (ih₁ hmono hftv) (ih₂ hmono hftv) (ih₃ hmono hftv)
+  | tBinOpIntArith hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpIntArith hop (ih₁ hmono hftv) (ih₂ hmono hftv)
+  | tBinOpIntCmp hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpIntCmp hop (ih₁ hmono hftv) (ih₂ hmono hftv)
+  | tBinOpBoolLogic hop h₁ h₂ ih₁ ih₂ =>
+      exact .tBinOpBoolLogic hop (ih₁ hmono hftv) (ih₂ hmono hftv)
+  | tStrConcat h₁ h₂ ih₁ ih₂ =>
+      exact .tStrConcat (ih₁ hmono hftv) (ih₂ hmono hftv)
+  | tUnit => exact .tUnit
+
+theorem HasType_permute {Δ Γ : Context} {a b : Name} {σₐ σ_b : Scheme} {e : Expr} {τ : Ty}
+    (hab : a ≠ b) (hσb : σ_b.body.fv = [])
+    (h : HasType (Δ ++ (a, σₐ) :: (b, σ_b) :: Γ) e τ) :
+    HasType (Δ ++ (b, σ_b) :: (a, σₐ) :: Γ) e τ := by
+  exact HasType_subctx (Γ₁ := Δ ++ (a, σₐ) :: (b, σ_b) :: Γ) (Γ₂ := Δ ++ (b, σ_b) :: (a, σₐ) :: Γ)
+    (by
+      intro x σ hl
+      simpa [← Context.lookup_permute hab] using hl)
+    (by simp [Context.freeTypeVars, Context.freeTypeVars_append, hσb])
+    h
+
+theorem drop_shadowed_closed {Δ Γ : Context} {x : Name} {σ σ' : Scheme} {e : Expr} {τ : Ty}
+    (hσ : σ.body.fv = [])
+    (h : HasType (Δ ++ (x, σ') :: (x, σ) :: Γ) e τ) :
+    HasType (Δ ++ (x, σ') :: Γ) e τ := by
+  apply HasType_subctx
+  · intro y σy hl
+    have hlookup := Context.lookup_drop_shadow_append (Δ := Δ) (Γ := Γ) (x := x) (σ := σ) (σ' := σ')
+    rw [← hlookup]
+    exact hl
+  · simp [Context.freeTypeVars, Context.freeTypeVars_append, hσ]
+  · exact h
+
+theorem lift_from_empty {Γ : Context} {v : Expr} {τ₁ : Ty}
+    (hv : HasType Context.empty v τ₁)
+    (hΓ : Context.freeTypeVars Γ = [])
+    (_h_closed : annotationsClosed v) :
+    HasType Γ v τ₁ := by
+  exact HasType_subctx (Γ₁ := Context.empty) (Γ₂ := Γ)
+    (by
+      intro x σ hl
+      simp [Context.lookup, Context.empty] at hl)
+    (by simp [Context.freeTypeVars, Context.empty, hΓ])
+    hv
+
+theorem annotationsClosed_subst {e v : Expr} {x : Name}
+    (he : annotationsClosed e) (hv : annotationsClosed v) :
+    annotationsClosed (subst x v e) := by
+  induction e with
+  | litInt => trivial
+  | litBool => trivial
+  | litString => trivial
+  | var y =>
+      by_cases hxy : x = y <;> simp [subst, hxy, annotationsClosed, hv]
+  | lambda y τ e' ih =>
+      by_cases hxy : x = y
+      · subst y
+        simpa [subst] using he
+      · simp [annotationsClosed, subst, hxy]
+        exact ⟨he.1, ih he.2⟩
+  | app e₁ e₂ ih₁ ih₂ =>
+      simp [annotationsClosed, subst]
+      exact ⟨ih₁ he.1, ih₂ he.2⟩
+  | letIn y e₁ e₂ ih₁ ih₂ =>
+      by_cases hxy : x = y
+      · subst y
+        simp [annotationsClosed, subst]
+        exact ⟨ih₁ he.1, he.2⟩
+      · simp [annotationsClosed, subst, hxy]
+        exact ⟨ih₁ he.1, ih₂ he.2⟩
+  | ifThenElse e₁ e₂ e₃ ih₁ ih₂ ih₃ =>
+      simp [annotationsClosed, subst]
+      exact ⟨ih₁ he.1, ih₂ he.2.1, ih₃ he.2.2⟩
+  | binOp op e₁ e₂ ih₁ ih₂ =>
+      simp [annotationsClosed, subst]
+      exact ⟨ih₁ he.1, ih₂ he.2⟩
+  | strConcat e₁ e₂ ih₁ ih₂ =>
+      simp [annotationsClosed, subst]
+      exact ⟨ih₁ he.1, ih₂ he.2⟩
+  | unitVal => trivial
+
+theorem step_preserves_closed {e e' : Expr} (hs : Step e e') (h : annotationsClosed e) :
+    annotationsClosed e' := by
+  induction hs
+  case appFun e₁ e₁' e₂ hs₁ ih => exact ⟨ih h.1, h.2⟩
+  case appArg v e₂ e₂' hv₂ hs₂ ih => exact ⟨h.1, ih h.2⟩
+  case appBeta x τ₀ e v hv => exact annotationsClosed_subst h.1.2 h.2
+  case letBind x e₁ e₁' e₂ hs₁ ih => exact ⟨ih h.1, h.2⟩
+  case letSubst x v e₂ hv => exact annotationsClosed_subst h.2 h.1
+  case ifGuard e₁ e₁' e₂ e₃ hs₁ ih => exact ⟨ih h.1, h.2.1, h.2.2⟩
+  case ifTrue e₂ e₃ => exact h.2.1
+  case ifFalse e₂ e₃ => exact h.2.2
+  case binOpLeft op e₁ e₁' e₂ hs₁ ih => exact ⟨ih h.1, h.2⟩
+  case binOpRight op v e₂ e₂' hv₂ hs₂ ih => exact ⟨h.1, ih h.2⟩
+  case binOpEval op n₁ n₂ => cases op <;> simp [binOpApply, annotationsClosed]
+  case binOpEvalBool op b₁ b₂ hop => cases op <;> simp [binOpApplyBool, annotationsClosed]
+  case strConcatLeft e₁ e₁' e₂ hs₁ ih => exact ⟨ih h.1, h.2⟩
+  case strConcatRight v e₂ e₂' hv₂ hs₂ ih => exact ⟨h.1, ih h.2⟩
+  case strConcatEval s₁ s₂ => trivial
 
 theorem canonical_forms {v : Expr} {τ : Ty}
     (h : HasType Context.empty v τ)
@@ -484,8 +846,8 @@ theorem canonical_forms {v : Expr} {τ : Ty}
   cases h
   · -- tVar: impossible, empty context
     rename_i h_lookup h_inst
-    simp [Context.lookup] at h_lookup
-    injection h_lookup
+    simp [Context.lookup, Context.empty] at h_lookup
+
   · -- tLitInt
     left; exact ⟨_, rfl, rfl⟩
   · -- tLitBool
@@ -514,29 +876,348 @@ theorem canonical_forms {v : Expr} {τ : Ty}
 
 theorem progress {e : Expr} {τ : Ty} (h : HasType Context.empty e τ) :
     isValue e ∨ (∃ e', Step e e') := by
-  sorry
-
-
-theorem context_drop_shadowed {Γ : Context} {x : Name} {σ σ' : Scheme} {e : Expr} {τ : Ty}
-    (h_sigma : σ.body.fv ⊆ Context.freeTypeVars ((x, σ') :: Γ))
-    (h : HasType ((x, σ') :: (x, σ) :: Γ) e τ) :
-    HasType ((x, σ') :: Γ) e τ := by
-  sorry
-theorem closed_type_under_closed_context {Γ : Context} {e : Expr} {τ : Ty}
-    (h : HasType Γ e τ) (hΓ : Context.freeTypeVars Γ = [])
-    (h_params : ∀ (x : Name) (σ : Scheme), Context.lookup Γ x = some σ → σ.params = [])
-    (h_closed : annotationsClosed e) :
-    τ.fv = [] := by
-  sorry
-theorem value_has_closed_type {v : Expr} {τ : Ty}
-    (h : HasType Context.empty v τ) (hv : isValue v) (h_closed : annotationsClosed v) :
-    τ.fv = [] := by
-  sorry
+  generalize hE : Context.empty = Γ₀ at h
+  induction h
+  case tVar Γ' x' τ' σ' hlookup hinst =>
+      rw [← hE] at hlookup
+      simp [Context.lookup, Context.empty] at hlookup
+  case tLitInt => left; rfl
+  case tLitBool => left; rfl
+  case tLitString => left; rfl
+  case tLambda Γ' x' τ₁' e' τ₂' hbody => left; rfl
+  case tApp Γ' e₁ e₂ τ₁ τ₂ h₁ h₂ ih₁ ih₂ =>
+      have h₁' : HasType Context.empty e₁ (.fn τ₂ τ₁) := by simpa [← hE] using h₁
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ hE with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁' hv₁ with
+            ⟨n, heq, hty⟩ | ⟨b, heq, hty⟩ | ⟨s, heq, hty⟩ |
+            ⟨x, τ₀, e₀, heq, hty⟩ | ⟨heq, hty⟩
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁
+            right; exact ⟨subst x e₂ e₀, .appBeta hv₂⟩
+          · subst e₁; cases h₁'
+        · right; exact ⟨.app e₁ e₂', .appArg hv₁ step₂⟩
+      · right; exact ⟨.app e₁' e₂, .appFun step₁⟩
+  case tLet Γ' x' e₁ e₂ τ₁ τ₂ h₁ h₂ ih₁ ih₂ =>
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · right; exact ⟨subst x' e₁ e₂, .letSubst hv₁⟩
+      · right; exact ⟨.letIn x' e₁' e₂, .letBind step₁⟩
+  case tIf Γ' e₁ e₂ e₃ τ' h₁ h₂ h₃ ih₁ ih₂ ih₃ =>
+      have h₁' : HasType Context.empty e₁ .bool := by simpa [← hE] using h₁
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · rcases canonical_forms h₁' hv₁ with ⟨n, heq, hty⟩ | ⟨b, heq, hty⟩ | ⟨s, heq, hty⟩ | ⟨x, τ₀, e₀, heq, hty⟩ | ⟨heq, hty⟩
+        · subst e₁; cases h₁'
+        · subst e₁
+          right
+          cases b
+          · exact ⟨e₃, .ifFalse⟩
+          · exact ⟨e₂, .ifTrue⟩
+        · subst e₁; cases h₁'
+        · subst e₁; cases h₁'
+        · subst e₁; cases h₁'
+      · right; exact ⟨.ifThenElse e₁' e₂ e₃, .ifGuard step₁⟩
+  case tBinOpIntArith Γ' op' e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
+      have h₁' : HasType Context.empty e₁ .int := by simpa [← hE] using h₁
+      have h₂' : HasType Context.empty e₂ .int := by simpa [← hE] using h₂
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ hE with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁' hv₁ with
+            ⟨n, heq, hty⟩ | ⟨b, heq, hty⟩ | ⟨s, heq, hty⟩ |
+            ⟨x, τ₀, e₀, heq, hty⟩ | ⟨heq, hty⟩
+          · subst e₁
+            rcases canonical_forms h₂' hv₂ with
+              ⟨m, heq₂, hty₂⟩ | ⟨b₂, heq₂, hty₂⟩ | ⟨s₂, heq₂, hty₂⟩ |
+              ⟨x₂, τ₀₂, e₀₂, heq₂, hty₂⟩ | ⟨heq₂, hty₂⟩
+            · subst e₂; right; exact ⟨binOpApply op' n m, .binOpEval⟩
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+        · right; exact ⟨.binOp op' e₁ e₂', .binOpRight hv₁ step₂⟩
+      · right; exact ⟨.binOp op' e₁' e₂, .binOpLeft step₁⟩
+  case tBinOpIntCmp Γ' op' e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
+      have h₁' : HasType Context.empty e₁ .int := by simpa [← hE] using h₁
+      have h₂' : HasType Context.empty e₂ .int := by simpa [← hE] using h₂
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ hE with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁' hv₁ with
+            ⟨n, heq, hty⟩ | ⟨b, heq, hty⟩ | ⟨s, heq, hty⟩ |
+            ⟨x, τ₀, e₀, heq, hty⟩ | ⟨heq, hty⟩
+          · subst e₁
+            rcases canonical_forms h₂' hv₂ with
+              ⟨m, heq₂, hty₂⟩ | ⟨b₂, heq₂, hty₂⟩ | ⟨s₂, heq₂, hty₂⟩ |
+              ⟨x₂, τ₀₂, e₀₂, heq₂, hty₂⟩ | ⟨heq₂, hty₂⟩
+            · subst e₂; right; exact ⟨binOpApply op' n m, .binOpEval⟩
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+        · right; exact ⟨.binOp op' e₁ e₂', .binOpRight hv₁ step₂⟩
+      · right; exact ⟨.binOp op' e₁' e₂, .binOpLeft step₁⟩
+  case tBinOpBoolLogic Γ' op' e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
+      have h₁' : HasType Context.empty e₁ .bool := by simpa [← hE] using h₁
+      have h₂' : HasType Context.empty e₂ .bool := by simpa [← hE] using h₂
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ hE with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁' hv₁ with
+            ⟨n, heq, hty⟩ | ⟨b₁, heq, hty⟩ | ⟨s, heq, hty⟩ |
+            ⟨x, τ₀, e₀, heq, hty⟩ | ⟨heq, hty⟩
+          · subst e₁; cases h₁'
+          · subst e₁
+            rcases canonical_forms h₂' hv₂ with
+              ⟨m, heq₂, hty₂⟩ | ⟨b₂, heq₂, hty₂⟩ | ⟨s₂, heq₂, hty₂⟩ |
+              ⟨x₂, τ₀₂, e₀₂, heq₂, hty₂⟩ | ⟨heq₂, hty₂⟩
+            · subst e₂; cases h₂'
+            · subst e₂; right; exact ⟨binOpApplyBool op' b₁ b₂, .binOpEvalBool hop⟩
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+        · right; exact ⟨.binOp op' e₁ e₂', .binOpRight hv₁ step₂⟩
+      · right; exact ⟨.binOp op' e₁' e₂, .binOpLeft step₁⟩
+  case tStrConcat Γ' e₁ e₂ h₁ h₂ ih₁ ih₂ =>
+      have h₁' : HasType Context.empty e₁ .string := by simpa [← hE] using h₁
+      have h₂' : HasType Context.empty e₂ .string := by simpa [← hE] using h₂
+      rcases ih₁ hE with hv₁ | ⟨e₁', step₁⟩
+      · rcases ih₂ hE with hv₂ | ⟨e₂', step₂⟩
+        · rcases canonical_forms h₁' hv₁ with
+            ⟨n, heq, hty⟩ | ⟨b, heq, hty⟩ | ⟨s₁, heq, hty⟩ |
+            ⟨x, τ₀, e₀, heq, hty⟩ | ⟨heq, hty⟩
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+          · subst e₁
+            rcases canonical_forms h₂' hv₂ with
+              ⟨m, heq₂, hty₂⟩ | ⟨b₂, heq₂, hty₂⟩ | ⟨s₂, heq₂, hty₂⟩ |
+              ⟨x₂, τ₀₂, e₀₂, heq₂, hty₂⟩ | ⟨heq₂, hty₂⟩
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+            · subst e₂; right; exact ⟨.litString (s₁ ++ s₂), .strConcatEval⟩
+            · subst e₂; cases h₂'
+            · subst e₂; cases h₂'
+          · subst e₁; cases h₁'
+          · subst e₁; cases h₁'
+        · right; exact ⟨.strConcat e₁ e₂', .strConcatRight hv₁ step₂⟩
+      · right; exact ⟨.strConcat e₁' e₂, .strConcatLeft step₁⟩
+  case tUnit Γ' => left; rfl
+theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : Expr}
+    (h : HasType ((x, ⟨[], τ₁⟩) :: Γ) e τ₂)
+    (hv : HasType Context.empty v τ₁)
+    (h_fv : τ₁.fv = [])
+    (hΓ : Context.freeTypeVars Γ = [])
+    (hΓ_mono : Context.Mono Γ)
+    (h_closed_e : annotationsClosed e)
+    (h_closed_v : annotationsClosed v) :
+    HasType Γ (subst x v e) τ₂ := by
+  induction e generalizing Γ τ₂ hΓ hΓ_mono with
+  | litInt => cases h; exact .tLitInt
+  | litBool => cases h; exact .tLitBool
+  | litString => cases h; exact .tLitString
+  | var y =>
+      cases h with
+      | tVar hlookup hinst =>
+        rename_i σ
+        by_cases hxy : x = y
+        · have hyx : y = x := hxy.symm
+          simp [Context.lookup, hyx] at hlookup
+          have hσ : σ = ⟨[], τ₁⟩ := hlookup.symm
+          have hτ : τ₂ = τ₁ := by
+            rw [hσ] at hinst
+            rw [Scheme.instantiate_closed ⟨[], τ₁⟩ rfl] at hinst
+            exact hinst.symm
+          rw [hτ]
+          simpa [subst, hxy] using (lift_from_empty hv hΓ h_closed_v)
+        · have hyx : ¬ y = x := fun h => hxy h.symm
+          simp [Context.lookup, hyx] at hlookup
+          simpa [subst, hxy] using (.tVar hlookup hinst)
+  | lambda y τ₀ e' ih =>
+      cases h with
+      | tLambda hbody =>
+        by_cases hxy : x = y
+        · subst y
+          have hdrop : HasType ((x, ⟨[], τ₀⟩) :: Γ) e' _ :=
+            drop_shadowed_closed (Γ := Γ) (Δ := []) h_fv hbody
+          simpa [subst] using (.tLambda hdrop)
+        · have hyx : y ≠ x := fun h => hxy h.symm
+          have hperm : HasType ((x, ⟨[], τ₁⟩) :: (y, ⟨[], τ₀⟩) :: Γ) e' _ :=
+            HasType_permute (Δ := []) (Γ := Γ) hyx h_fv hbody
+          have hih : HasType ((y, ⟨[], τ₀⟩) :: Γ) (subst x v e') _ :=
+            ih hperm (by simp [Context.freeTypeVars, hΓ, h_closed_e.1])
+              (by
+                intro x' σ' hl
+                simp [Context.lookup] at hl
+                by_cases hxx : x' = y
+                · simp [hxx] at hl
+                  simpa using (congrArg Scheme.params hl).symm
+                · simp [hxx] at hl
+                  exact hΓ_mono x' σ' hl)
+              h_closed_e.2
+          simpa [subst, hxy] using (.tLambda hih)
+  | app e₁ e₂ ih₁ ih₂ =>
+      cases h with
+      | tApp hfun harg =>
+        exact .tApp (ih₁ hfun hΓ hΓ_mono h_closed_e.1) (ih₂ harg hΓ hΓ_mono h_closed_e.2)
+  | letIn y e₁ e₂ ih₁ ih₂ =>
+      cases h with
+      | tLet h₁ h₂ =>
+        rename_i τ₀
+        have hτ₀ : τ₀.fv = [] :=
+          closed_type_under_closed_context (Γ := (x, ⟨[], τ₁⟩) :: Γ) (e := e₁) (τ := τ₀) h₁
+            (by simp [Context.freeTypeVars, hΓ, h_fv])
+            (by
+              intro x' σ' hl
+              simp [Context.lookup] at hl
+              by_cases hxx : x' = x
+              · simp [hxx] at hl
+                simpa using (congrArg Scheme.params hl).symm
+              · simp [hxx] at hl
+                exact hΓ_mono x' σ' hl)
+            h_closed_e.1
+        by_cases hxy : x = y
+        · subst y
+          have hσ : Scheme.generalize (Context.freeTypeVars Γ) τ₀ = ⟨[], τ₀⟩ := by
+            unfold Scheme.generalize
+            simp [hτ₀]
+          have h₂' : HasType ((x, ⟨[], τ₀⟩) :: Γ) e₂ τ₂ := by
+            have h2ctx : HasType ((x, Scheme.generalize (Context.freeTypeVars Γ) τ₀) :: (x, ⟨[], τ₁⟩) :: Γ) e₂ τ₂ := by
+              simpa [Context.freeTypeVars, h_fv] using h₂
+            have hdrop : HasType ((x, Scheme.generalize (Context.freeTypeVars Γ) τ₀) :: Γ) e₂ τ₂ :=
+              drop_shadowed_closed (Γ := Γ) (Δ := []) h_fv h2ctx
+            simpa [hσ] using hdrop
+          simpa [subst] using (.tLet (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) (by simpa [hσ] using h₂'))
+        · have hyx : y ≠ x := fun h => hxy h.symm
+          have hperm : HasType ((x, ⟨[], τ₁⟩) :: (y, Scheme.generalize (Context.freeTypeVars Γ) τ₀) :: Γ) e₂ τ₂ := by
+            exact HasType_permute (Δ := []) (Γ := Γ) hyx h_fv (by
+              simpa [Context.freeTypeVars, h_fv] using h₂)
+          have hih₂ : HasType ((y, Scheme.generalize (Context.freeTypeVars Γ) τ₀) :: Γ) (subst x v e₂) τ₂ :=
+            ih₂ hperm (by simp [Context.freeTypeVars, Scheme.generalize, hΓ, hτ₀])
+              (by
+                intro x' σ' hl
+                simp [Context.lookup] at hl
+                by_cases hxx : x' = y
+                · simp [hxx] at hl
+                  have hgen : (Scheme.generalize (Context.freeTypeVars Γ) τ₀).params = [] :=
+                    Scheme.generalize_closed hτ₀
+                  simpa [hgen] using (congrArg Scheme.params hl).symm
+                · simp [hxx] at hl
+                  exact hΓ_mono x' σ' hl)
+              h_closed_e.2
+          simpa [subst, hxy] using (.tLet (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) hih₂)
+  | ifThenElse e₁ e₂ e₃ ih₁ ih₂ ih₃ =>
+      cases h with
+      | tIf h₁ h₂ h₃ =>
+        exact .tIf (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) (ih₂ h₂ hΓ hΓ_mono h_closed_e.2.1) (ih₃ h₃ hΓ hΓ_mono h_closed_e.2.2)
+  | binOp op e₁ e₂ ih₁ ih₂ =>
+      cases h with
+      | tBinOpIntArith hop h₁ h₂ =>
+        exact .tBinOpIntArith hop (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) (ih₂ h₂ hΓ hΓ_mono h_closed_e.2)
+      | tBinOpIntCmp hop h₁ h₂ =>
+        exact .tBinOpIntCmp hop (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) (ih₂ h₂ hΓ hΓ_mono h_closed_e.2)
+      | tBinOpBoolLogic hop h₁ h₂ =>
+        exact .tBinOpBoolLogic hop (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) (ih₂ h₂ hΓ hΓ_mono h_closed_e.2)
+  | strConcat e₁ e₂ ih₁ ih₂ =>
+      cases h with
+      | tStrConcat h₁ h₂ =>
+        exact .tStrConcat (ih₁ h₁ hΓ hΓ_mono h_closed_e.1) (ih₂ h₂ hΓ hΓ_mono h_closed_e.2)
+  | unitVal => cases h; exact .tUnit
 
 theorem preservation {e e' : Expr} {τ : Ty} (ht : HasType Context.empty e τ) (hs : Step e e')
     (h_closed : annotationsClosed e) :
     HasType Context.empty e' τ := by
-  sorry
+  induction hs generalizing τ with
+  | appFun hs₁ ih =>
+      cases ht with
+      | tApp hf ha => exact .tApp (ih hf h_closed.1) ha
+  | appArg hv₂ hs₂ ih =>
+      cases ht with
+      | tApp hf ha => exact .tApp hf (ih ha h_closed.2)
+  | appBeta hv =>
+      rename_i x τ₀ e v
+      cases ht with
+      | tApp hf ha =>
+          cases hf with
+          | tLambda hbody =>
+              exact substitution_lemma (Γ := Context.empty) hbody ha h_closed.1.1 rfl
+                (by
+                  intro x σ hl
+                  simp [Context.lookup, Context.empty] at hl) h_closed.1.2 h_closed.2
+  | letBind hs₁ ih =>
+      cases ht with
+      | tLet h₁ h₂ => exact .tLet (ih h₁ h_closed.1) h₂
+  | letSubst hv =>
+      cases ht with
+      | tLet h₁ h₂ =>
+        rename_i τ₁
+        have hτ₁ : τ₁.fv = [] :=
+          closed_type_under_closed_context h₁ rfl (by
+            intro x σ hl
+            simp [Context.lookup, Context.empty] at hl) h_closed.1
+        have hσ : Scheme.generalize (Context.freeTypeVars Context.empty) τ₁ = ⟨[], τ₁⟩ := by
+          unfold Scheme.generalize
+          simp [hτ₁]
+        exact substitution_lemma (Γ := Context.empty) (by simpa [hσ] using h₂) h₁ hτ₁ rfl
+          (by
+            intro x σ hl
+            simp [Context.lookup, Context.empty] at hl) h_closed.2 h_closed.1
+  | ifGuard hs₁ ih =>
+      cases ht with
+      | tIf h₁ h₂ h₃ => exact .tIf (ih h₁ h_closed.1) h₂ h₃
+  | ifTrue =>
+      cases ht with
+      | tIf h₁ h₂ h₃ => exact h₂
+  | ifFalse =>
+      cases ht with
+      | tIf h₁ h₂ h₃ => exact h₃
+  | binOpLeft hs₁ ih =>
+      cases ht with
+      | tBinOpIntArith hop h₁ h₂ => exact .tBinOpIntArith hop (ih h₁ h_closed.1) h₂
+      | tBinOpIntCmp hop h₁ h₂ => exact .tBinOpIntCmp hop (ih h₁ h_closed.1) h₂
+      | tBinOpBoolLogic hop h₁ h₂ => exact .tBinOpBoolLogic hop (ih h₁ h_closed.1) h₂
+  | binOpRight hv₂ hs₂ ih =>
+      cases ht with
+      | tBinOpIntArith hop h₁ h₂ => exact .tBinOpIntArith hop h₁ (ih h₂ h_closed.2)
+      | tBinOpIntCmp hop h₁ h₂ => exact .tBinOpIntCmp hop h₁ (ih h₂ h_closed.2)
+      | tBinOpBoolLogic hop h₁ h₂ => exact .tBinOpBoolLogic hop h₁ (ih h₂ h_closed.2)
+  | binOpEval =>
+      rename_i op n₁ n₂
+      cases ht with
+      | tBinOpIntArith hop h₁ h₂ =>
+          have hop' : op = .add ∨ op = .sub ∨ op = .mul ∨ op = .div ∨ op = .mod := by
+            simpa using hop
+          rcases hop' with rfl | rfl | rfl | rfl | rfl <;> exact .tLitInt
+      | tBinOpIntCmp hop h₁ h₂ =>
+          have hop' : op = .eq ∨ op = .neq ∨ op = .lt ∨ op = .le ∨ op = .gt ∨ op = .ge := by
+            simpa using hop
+          rcases hop' with rfl | rfl | rfl | rfl | rfl | rfl <;> exact .tLitBool
+      | tBinOpBoolLogic hop h₁ h₂ => cases h₁
+  | binOpEvalBool hop =>
+      rename_i op b₁ b₂
+      cases ht with
+      | tBinOpIntArith hop' h₁ h₂ => cases h₁
+      | tBinOpIntCmp hop' h₁ h₂ => cases h₁
+      | tBinOpBoolLogic hop' h₁ h₂ =>
+          have hop₂ : op = .and ∨ op = .or := by simpa using hop'
+          rcases hop₂ with rfl | rfl <;> exact .tLitBool
+  | strConcatLeft hs₁ ih =>
+      cases ht with
+      | tStrConcat h₁ h₂ => exact .tStrConcat (ih h₁ h_closed.1) h₂
+  | strConcatRight hv₂ hs₂ ih =>
+      cases ht with
+      | tStrConcat h₁ h₂ => exact .tStrConcat h₁ (ih h₂ h_closed.2)
+  | strConcatEval =>
+      cases ht with
+      | tStrConcat h₁ h₂ => exact .tLitString
 
 theorem type_soundness {e v : Expr} {τ : Ty}
     (ht : HasType Context.empty e τ)
@@ -544,6 +1225,13 @@ theorem type_soundness {e v : Expr} {τ : Ty}
     (hv : isValue v)
     (h_closed : annotationsClosed e) :
     HasType Context.empty v τ := by
-  sorry
+  induction hs with
+  | refl => exact ht
+  | step hs₁ hs₂ ih =>
+      rename_i e₁ e₂ e₃
+      have h₂ : HasType Context.empty e₂ τ := preservation ht hs₁ h_closed
+      have h₂cl : annotationsClosed e₂ := step_preserves_closed hs₁ h_closed
+      exact ih h₂ hv h₂cl
 
 end Nulang
+

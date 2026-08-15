@@ -74,7 +74,7 @@ among Phases 1-4's broader production-readiness work.
 | CI matrix | build/test/release/wasm/minimal/lint/lean/package-smoke |
 | Direct deps | 72 |
 | Transitive deps | 472 (verified `Cargo.lock` `grep -c '^name = '`, 2026-08-14; was 504 before a 2026-08-02 libsql feature trim dropped the unused tonic/axum gRPC stack, then 468, already stale before that) |
-| Formal proofs (Lean 4) | Core type soundness NOT proved (`progress`/`preservation`/`type_soundness` all `sorry`, regressed 2026-07-26, undocumented until 2026-08-02); capability lattice genuinely proved (5/6 theorems); effects are vacuous `True` stubs, not proofs |
+| Formal proofs (Lean 4) | Core type soundness **proved** (`progress`/`preservation`/`type_soundness` machine-checked 2026-08-14); capability lattice proved (5/6 theorems — `linear_at_most_once` remains `sorry`, needs split-context refinement); effects are vacuous `True` stubs, not proofs |
 | Conformance suite | 300 behavior cases + grammar cases |
 | Bootstrap self-hosting | Stage 13; not yet self-compiling |
 | Benchmarks | `benches/` uses criterion (7 files, 404 lines); no CI regression tracking |
@@ -845,9 +845,11 @@ session can responsibly rush). 5 commits this session.
   `spec/formal/README.md`'s regression note). Added a CI sorry-count
   ratchet (`.github/workflows/ci.yml`) so this exact silent-regression
   pattern can't recur — previously CI only ran `lake build`, which
-  passes even with sorries. Actually re-proving the theorems is
-  specialist Lean work or a fresh independent implementation; not
-  attempted this session — genuinely hard, not "follow-up" spin.
+  passes even with sorries. **Landed 2026-08-14:** the soundness chain
+  was actually re-proved — `progress`/`preservation`/`type_soundness`
+  are machine-checked in `types.lean` (see `spec/formal/README.md`),
+  and the CI sorry-ratchet baseline dropped from 9 to 1 (only
+  `linear_at_most_once` remains, needing the split-context judgment).
 - **[X] Bullet 2 (LinearIso must-use) — closed 2026-08-14.** Exactly-once
   (must-use) is enforced for `let`-bound linear values, with a
   transparent-rebind exemption (`let a = x` doesn't carry a second
@@ -940,11 +942,16 @@ runtime withstands adversarial operational review. Both hold up as
 
 1. **Formal semantics completion.** Prove the theorems that already have
    definitions in `spec/formal/`:
+   - `types.lean`: `progress`/`preservation`/`type_soundness` —
+     **proved 2026-08-14**.
    - `capabilities.lean`: `cap_sendable` (only `val`/`tag` cross actor
-     boundaries), `linear_iso_at_most_once`.
+     boundaries) — proved; `linear_iso_at_most_once` — open, needs the
+     split-context `HasTypeCap` refinement.
    - `effects.lean`: `effect_safety` (closed row `{}` cannot perform an
-     unhandled effect), progress+preservation for handler dispatch.
-   - `combined.lean`: type + capability + effect judgment soundness.
+     unhandled effect) — still a `True` stub, not proved; progress+
+     preservation for handler dispatch — open.
+   - `combined.lean`: type + capability + effect judgment soundness —
+     open.
    - CI gate on `lake build` blocks any PR that touches
      `src/typechecker.rs`, `src/effect_checker.rs`, or `src/types.rs`
      without a corresponding Lean update or an explicit `@sorry_ok`
@@ -959,7 +966,9 @@ runtime withstands adversarial operational review. Both hold up as
    linear value already bound in the *initial* context, e.g. a
    parameter, is not yet checked), and the Lean proof itself
    (`linear_at_most_once` in `capabilities.lean` is still `sorry` —
-   the Rust-side implementation moved ahead of the formal statement).
+   the Rust-side implementation moved ahead of the formal statement,
+   and the statement requires the split-context refinement of
+   `HasTypeCap`, documented 2026-08-14).
 3. **Backend-trait completion (RFC 0003 item 6 full wiring).** Route
    `src/jit/`, `src/mir_wasm.rs`, `src/wasm_runtime.rs`, and
    `src/python/` behind the traits already defined in `src/backends/`.
