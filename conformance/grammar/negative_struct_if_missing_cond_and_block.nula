@@ -1,0 +1,2 @@
+// Negative case: neg_struct_if_missing_cond_and_block — must be rejected by the parser.
+fn f() { if }

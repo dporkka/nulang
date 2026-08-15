@@ -1,0 +1,2 @@
+// Negative case: neg_spawn_missing_init — must be rejected by the parser.
+fn f() { spawn Counter }
