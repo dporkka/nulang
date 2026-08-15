@@ -2866,7 +2866,11 @@ match { a: 2, b: 9 } with {
         let source = r#"
             persistent actor Counter {
                 state crdt count: Int = 0
-                behavior inc() { perform Crdt.increment("count") }
+                state ticks: Int = 0
+                behavior inc() {
+                    perform Crdt.increment("count")
+                    self.ticks = self.ticks + 1
+                }
                 behavior get() { self.count }
             }
             spawn Counter {}
@@ -2906,6 +2910,17 @@ match { a: 2, b: 9 } with {
                 .and_then(|v| v.as_int()),
             Some(2),
             "Crdt.increment must materialize count=2 into state_data before recovery"
+        );
+
+        assert_eq!(
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("ticks")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "the statement after `perform Crdt.increment` must run (no abort)"
         );
 
         let snapshot_before_recovery = store.load_snapshot(actor_id).unwrap();
@@ -2952,6 +2967,19 @@ match { a: 2, b: 9 } with {
             Some(2),
             "post-recovery Crdt.increment must be a no-op: field_map is not rebuilt"
         );
+
+        // The statement AFTER the no-op `perform` must still run — if the
+        // behavior aborted with an unhandled effect, `ticks` would stay 0.
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("ticks")
+                .and_then(|v| v.as_int()),
+            Some(1),
+            "post-recovery Crdt.increment returns nil and the behavior continues"
+        );
     }
 
     /// The `Crdt.*` effect module is the only mutation path for CRDT-backed
@@ -2964,9 +2992,16 @@ match { a: 2, b: 9 } with {
         let source = r#"
             actor Counter {
                 state crdt gcounter count = 0
+                state ticks: Int = 0
                 behavior inc() { perform Crdt.increment("count") }
-                behavior dec() { perform Crdt.decrement("count") }
-                behavior bad() { self.count = 99 }
+                behavior dec() {
+                    perform Crdt.decrement("count")
+                    self.ticks = self.ticks + 1
+                }
+                behavior bad() {
+                    self.count = 99
+                    self.ticks = self.ticks + 1
+                }
             }
             spawn Counter {}
         "#;
@@ -2995,6 +3030,19 @@ match { a: 2, b: 9 } with {
             count,
             Some(2),
             "gcounter must accept only increment: decrement and raw assignment are no-ops"
+        );
+
+        let ticks = rt
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("ticks")
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            ticks,
+            Some(2),
+            "the statement after the rejected perform/assignment must still run (no abort)"
         );
     }
 

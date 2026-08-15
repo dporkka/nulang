@@ -4774,25 +4774,50 @@ impl Runtime {
                 _ => None,
             }
         };
-        let actor_id = actor_id?;
+
+        // Unrecognized op: fall through to other built-in/user handlers
+        // (returning `None`). Everything below is a recognized `Crdt.*` op.
         let op = op_name?;
-        let field = string_arg(0)?;
+        if !matches!(
+            op,
+            "increment" | "decrement" | "add" | "remove" | "set" | "read"
+        ) {
+            return None;
+        }
+
+        // A recognized op on a missing actor/field/manager, or an op outside
+        // the field's type's operation set, is a *silent nil no-op* — never an
+        // `Unhandled effect` abort, which would kill the enclosing behavior.
+        let Some(actor_id) = actor_id else {
+            return Some(Value::nil());
+        };
+        let Some(field) = string_arg(0) else {
+            return Some(Value::nil());
+        };
         let arg = string_arg(1);
 
         // Apply the op against the CrdtManager entry; the borrow is scoped
-        // so the actor can be mutated afterwards.
+        // so the actor can be mutated afterwards. `None` from
+        // `apply_field_op` means the field is unknown or the op is out of
+        // the type's set — a nil no-op, not an abort.
         let outcome = {
             let Some(manager) = self.crdt_manager.as_mut() else {
                 return Some(Value::nil());
             };
-            manager.apply_field_op(actor_id, &field, op, arg.as_deref())?
+            match manager.apply_field_op(actor_id, &field, op, arg.as_deref()) {
+                Some(v) => v,
+                None => return Some(Value::nil()),
+            }
         };
 
         // Materialize the value: intern register strings into the actor heap.
         let value = match outcome {
             crate::runtime::crdt_manager::CrdtValue::Int(i) => Value::int(i),
             crate::runtime::crdt_manager::CrdtValue::Str(s) => {
-                self.actors.get_mut(&actor_id)?.allocate_string(&s)
+                match self.actors.get_mut(&actor_id) {
+                    Some(actor) => actor.allocate_string(&s),
+                    None => return Some(Value::nil()),
+                }
             }
         };
 
