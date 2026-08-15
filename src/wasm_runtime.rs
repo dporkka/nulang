@@ -443,7 +443,7 @@ fn host_str_eq(mut caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64,
 /// ops route here.
 fn host_arith_fi(a: u64, b: u64, fop: fn(f64, f64) -> f64, iop: fn(i64, i64) -> i64) -> i64 {
     if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
-        fop(f64::from_bits(a), f64::from_bits(b)).to_bits() as i64
+        value_layout::float_bits(fop(f64::from_bits(a), f64::from_bits(b))) as i64
     } else {
         // Non-float, non-string operands (e.g. arrays) → 0, matching the
         // interpreter's `as_int().unwrap_or(0)`.
@@ -486,7 +486,7 @@ fn host_div(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
         if denom == 0.0 {
             return Ok(value_layout::TAG_NIL as i64);
         }
-        Ok((f64::from_bits(a) / denom).to_bits() as i64)
+        Ok(value_layout::float_bits(f64::from_bits(a) / denom) as i64)
     } else {
         let denom = crate::jit::runtime::as_int_or_one(b);
         if denom == 0 {
@@ -503,7 +503,7 @@ fn host_mod(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
         if denom == 0.0 {
             return Ok(value_layout::TAG_NIL as i64);
         }
-        Ok((f64::from_bits(a) % denom).to_bits() as i64)
+        Ok(value_layout::float_bits(f64::from_bits(a) % denom) as i64)
     } else {
         let denom = crate::jit::runtime::as_int_or_one(b);
         if denom == 0 {
@@ -523,8 +523,9 @@ fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
     if value_layout::is_float_raw(a) {
         // Flip the IEEE-754 sign bit (bit 63), NOT `SIGN_BIT` (bit 47, the
         // 48-bit payload sign used for ints) — XORing the mantissa would
-        // corrupt the float.
-        Ok((a ^ 0x8000_0000_0000_0000) as i64)
+        // corrupt the float. Negating the canonical NaN flips it into the
+        // tag range, so canonicalize the result.
+        Ok(value_layout::float_bits(-f64::from_bits(a)) as i64)
     } else {
         // Non-float operand → treat as int via `as_int().unwrap_or(0)`,
         // matching the interpreter (negating a tuple/array yields 0, not a
@@ -538,7 +539,7 @@ fn host_neg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
 fn host_fneg(_caller: Caller<'_, HostState>, a: i64) -> Result<i64, Error> {
     let a = a as u64;
     if value_layout::is_float_raw(a) {
-        Ok((a ^ 0x8000_0000_0000_0000) as i64)
+        Ok(value_layout::float_bits(-f64::from_bits(a)) as i64)
     } else {
         Ok((-0.0f64).to_bits() as i64)
     }
@@ -704,7 +705,7 @@ fn host_pow(_caller: Caller<'_, HostState>, a: i64, b: i64) -> Result<i64, Error
     // Match the interpreter: both floats → powf; else int pow with
     // wrapping_mul (negative exponent → nil).
     if value_layout::is_float_raw(a) && value_layout::is_float_raw(b) {
-        return Ok(f64::from_bits(a).powf(f64::from_bits(b)).to_bits() as i64);
+        return Ok(value_layout::float_bits(f64::from_bits(a).powf(f64::from_bits(b))) as i64);
     }
     let base = crate::jit::runtime::as_int_or_zero(a);
     let exp = crate::jit::runtime::as_int_or_zero(b);

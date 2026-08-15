@@ -71,6 +71,54 @@ pub const TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
 pub const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
 
 // ---------------------------------------------------------------------------
+// Integer range
+// ---------------------------------------------------------------------------
+
+/// Largest integer representable in the 48-bit signed payload (2^47 - 1).
+pub const INT48_MAX: i64 = 0x0000_7FFF_FFFF_FFFF;
+/// Smallest integer representable in the 48-bit signed payload (-2^47).
+pub const INT48_MIN: i64 = -0x0000_8000_0000_0000;
+
+/// True when `n` fits in the 48-bit signed integer payload.
+#[inline]
+pub fn int48_in_range(n: i64) -> bool {
+    (INT48_MIN..=INT48_MAX).contains(&n)
+}
+
+// ---------------------------------------------------------------------------
+// Canonical NaN
+// ---------------------------------------------------------------------------
+
+/// Reserved NaN bit pattern used to store a float NaN without colliding with
+/// any type tag.
+///
+/// Hardware operations that produce NaN (`inf - inf`, `0.0 * inf`, `sqrt(-1)`,
+/// ...) yield the architecture's default quiet NaN `0x7FF8_0000_0000_0000`,
+/// whose upper 16 bits are exactly `TAG_NIL`; other NaN payloads alias
+/// `TAG_BOOL`/`TAG_INT`/`TAG_PTR`/... Storing such a pattern verbatim would
+/// silently reinterpret the float as nil, an integer, or (memory-unsafely) a
+/// heap pointer. Following the LuaJIT approach, every float-producing path
+/// canonicalizes NaN results to this fixed pattern instead.
+///
+/// Layout requirements (verified by tests below):
+/// - upper 16 bits (`0xFFF8`) must not equal any tag's upper 16 bits
+///   (tags occupy `0x7FF6`–`0x7FFE`), and
+/// - the mantissa must be non-zero so the pattern is a genuine NaN.
+pub const CANONICAL_NAN_BITS: u64 = 0xFFF8_0000_0000_0001;
+
+/// Return the raw bits to store for float `f`, canonicalizing any NaN result
+/// to `CANONICAL_NAN_BITS` so it can never alias a type tag.
+#[inline]
+pub fn float_bits(f: f64) -> u64 {
+    let bits = f.to_bits();
+    if is_float_raw(bits) {
+        bits
+    } else {
+        CANONICAL_NAN_BITS
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tag extraction helpers (i64-based — no f64 bit-casting)
 // ---------------------------------------------------------------------------
 
@@ -149,17 +197,23 @@ const EXPONENT_MASK: u64 = 0x7FF0_0000_0000_0000;
 /// infinity has exponent = 0x7FF and zero mantissa.
 const MANTISSA_MASK: u64 = 0x000F_FFFF_FFFF_FFFF;
 
-/// True when `raw` represents a real IEEE-754 float (any bit pattern that is
-/// not a NaN). Infinity is a valid float, so it returns true.
+/// True when `raw` represents a real IEEE-754 float. Infinity is a valid
+/// float, so it returns true. NaN patterns are NOT floats — except the single
+/// reserved `CANONICAL_NAN_BITS` pattern, which `float_bits()` substitutes for
+/// any NaN result so that float NaNs survive in the boxed representation.
 ///
 /// All tagged values (0x7FF6–0x7FFE) occupy the quiet-NaN range, so this
-/// integer bitmask test is equivalent to `!f64::from_bits(raw).is_nan()` but
-/// avoids the FPU domain-crossing penalty of `vmovq` + `ucomisd`.
+/// integer bitmask test is equivalent to `!f64::from_bits(raw).is_nan()` (plus
+/// the canonical-NaN exception) but avoids the FPU domain-crossing penalty of
+/// `vmovq` + `ucomisd`.
 #[inline]
 pub fn is_float_raw(raw: u64) -> bool {
     // NaN: exponent all 1s AND mantissa non-zero.
     // Infinity: exponent all 1s AND mantissa zero → it IS a float.
-    (raw & EXPONENT_MASK) != EXPONENT_MASK || (raw & MANTISSA_MASK) == 0
+    // The canonical NaN pattern is the sole NaN accepted as a float.
+    (raw & EXPONENT_MASK) != EXPONENT_MASK
+        || (raw & MANTISSA_MASK) == 0
+        || raw == CANONICAL_NAN_BITS
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +333,63 @@ mod tests {
         assert!(!is_float_raw(TAG_CLOSURE | 0x10));
         // NaN values (even with upper bits outside the known tag range) are NOT floats.
         assert!(!is_float_raw(0x7FF5_0000_0000_0000)); // NaN, not a tag, still NaN
+        assert!(!is_float_raw(0x7FF8_0000_0000_0000)); // hardware quiet NaN == TAG_NIL
+        assert!(!is_float_raw(0xFFF9_DEAD_BEEF_0000)); // arbitrary negative NaN
+        // The single reserved canonical NaN pattern IS a float.
+        assert!(is_float_raw(CANONICAL_NAN_BITS));
+    }
+
+    #[test]
+    fn test_canonical_nan_is_tag_free() {
+        // The canonical NaN must not alias any tag: its upper 16 bits must be
+        // distinct from every tag's upper 16 bits.
+        let upper = CANONICAL_NAN_BITS >> TAG_SHIFT;
+        for tag in [
+            TAG_NIL,
+            TAG_UNIT,
+            TAG_BOOL,
+            TAG_INT,
+            TAG_PTR,
+            TAG_ACTOR,
+            TAG_STRING,
+            TAG_CLOSURE,
+        ] {
+            assert_ne!(upper, tag >> TAG_SHIFT, "canonical NaN aliases a tag");
+        }
+        // It must be a genuine NaN (exponent all 1s, non-zero mantissa).
+        assert_eq!(CANONICAL_NAN_BITS & EXPONENT_MASK, EXPONENT_MASK);
+        assert_ne!(CANONICAL_NAN_BITS & MANTISSA_MASK, 0);
+        assert!(f64::from_bits(CANONICAL_NAN_BITS).is_nan());
+        // And it must round-trip through as a float.
+        assert!(is_float_raw(CANONICAL_NAN_BITS));
+    }
+
+    #[test]
+    fn test_float_bits_canonicalizes_nan() {
+        // Non-NaN floats pass through unchanged.
+        for f in [0.0f64, -0.0, 1.5, -2.25, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(float_bits(f), f.to_bits());
+        }
+        // Every NaN pattern — including the hardware default quiet NaN whose
+        // upper bits are TAG_NIL — canonicalizes to CANONICAL_NAN_BITS.
+        let hw_nan = f64::INFINITY - f64::INFINITY;
+        assert!(hw_nan.is_nan());
+        assert_eq!(float_bits(hw_nan), CANONICAL_NAN_BITS);
+        assert_eq!(float_bits(0.0 * f64::INFINITY), CANONICAL_NAN_BITS);
+        assert_eq!(float_bits(f64::from_bits(0x7FF8_0000_0000_0000)), CANONICAL_NAN_BITS);
+        assert_eq!(float_bits(f64::from_bits(0x7FFC_0000_0000_0042)), CANONICAL_NAN_BITS);
+    }
+
+    #[test]
+    fn test_int48_range() {
+        assert!(int48_in_range(0));
+        assert!(int48_in_range(INT48_MAX));
+        assert!(int48_in_range(INT48_MIN));
+        assert!(!int48_in_range(INT48_MAX + 1));
+        assert!(!int48_in_range(INT48_MIN - 1));
+        // tag_int/sext48 round-trip at the boundaries.
+        assert_eq!(as_int_raw(tag_int(INT48_MAX)), INT48_MAX);
+        assert_eq!(as_int_raw(tag_int(INT48_MIN)), INT48_MIN);
     }
 
     #[test]
