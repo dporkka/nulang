@@ -8,7 +8,7 @@ then immediately post the author comment below.
 ## Title options
 
 1. **Show HN: Nulang – A typed, durable BEAM for the rest of us (actors, algebraic effects, HM types)**
-2. **Show HN: Nulang – Erlang-style actors with Hindley-Milner types and crash-surviving state**
+2. **Show HN: Nulang – Erlang-style actors with Hindley-Milner types and event-sourced persistence**
 3. **Show HN: Nulang – ML-flavored actor language with Pony-style capabilities and durable, event-sourced actors**
 4. **Show HN: Nulang – Supervision trees and durable actors, with a real type system**
 
@@ -24,8 +24,12 @@ Erlang's supervision trees and message-passing actors, give them a
 Hindley-Milner type system with full inference, add Pony-style reference
 capabilities (`iso`/`trn`/`ref`/`val`/`box`/`tag`) for compile-time data-race
 freedom, and make actors *durable* — persistent actors checkpoint and journal
-their state and come back after a crash with state intact, event-sourced by
-default.
+their state after every behavior, and `entity` declarations are event-sourced
+by default. (Candor up front: journal-based state rebuild is implemented and
+integration-tested at the runtime level, but isn't yet wired to supervised
+restarts — a restarted actor currently starts fresh. That's the top pre-1.0
+milestone; the demo in docs/launch/demo-script.md shows what *does* work
+today, with observed output recorded.)
 
 What's real today: the compiler (Rust; AST → HIR → MIR) targeting a
 register-based bytecode VM with a Cranelift JIT, supervision, links/monitors,
@@ -54,7 +58,8 @@ The BEAM is a 40-year-validated runtime with a dynamic type system and no
 durable actor state. Nulang's deltas: static HM typing with inference (no
 annotations needed), reference capabilities that make data races a compile
 error, algebraic effects so side effects are visible in types, and
-event-sourced durable actors that recover state after a crash. If you're happy
+event-sourced durable actors (journaling works today; automatic state rebuild
+on restart is the top pre-1.0 milestone — see Q7). If you're happy
 on the BEAM, stay — Nulang is for people who want BEAM's model with static
 guarantees, on a small native runtime instead of a VM the size of OTP.
 
@@ -94,14 +99,18 @@ Erlang-style supervision with links and monitors. Pony's actor persistence is
 not a language-level feature.
 
 **7. "Durable actors that survive kill -9 — really?"**
-The persistence machinery is real: a `PersistenceStore` trait with in-memory,
+Not yet, through the CLI — and we're saying so up front. The persistence
+machinery is real and tested: a `PersistenceStore` trait with in-memory,
 JSON-file, and SQLite backends; checkpointing and journaling after each
-behavior step; supervisors rebuild state from the store on restart — all
-tested (`src/runtime/persistence.rs`, integration tests). Caveat: the CLI
-currently wires the in-memory store by default, so cross-*process* recovery
-from a file isn't exposed as a user-facing flag yet. Within-process crash
-recovery (supervisor restart with state intact) works today. We're stating
-this before someone finds it in a demo.
+behavior step; and state-rebuild recovery pinned by an integration test that
+drives `recover_actor` directly (`src/integration_tests/mod.rs`). But two
+wirings are missing: the CLI constructs an in-memory store (no flag for a
+file backend), and a supervised restart currently comes back with fresh
+state — we verified this by running it while preparing the demo
+(`docs/launch/demo-script.md` documents the observed behavior). Wiring
+recovery into supervisor restarts and the CLI is the top pre-1.0 milestone.
+What works today, and what the demo shows: crash containment — a supervised
+actor dies, siblings keep their state, the system stays up.
 
 **8. "Algebraic effects and actors and capabilities and durability — isn't this too much?"**
 Fair. The mitigations: the effect system is how all I/O is expressed (there's

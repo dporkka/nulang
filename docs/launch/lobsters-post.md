@@ -20,8 +20,12 @@ Erlang's actors and supervision, an ML-derived type system (full Hindley-Milner
 inference, row-polymorphic records and variants, effect rows), Pony's
 reference capabilities (`iso/trn/ref/val/box/tag/lineariso`) checked at
 compile time and erased at runtime, and persistent actors whose state is
-checkpointed and journaled so supervision restarts restore state rather than
-reset it. `entity` declarations are event-sourced by default.
+checkpointed and journaled after every behavior. `entity` declarations are
+event-sourced by default. (Caveat up front: journal-based state rebuild is
+implemented and integration-tested at the runtime level, but not yet wired to
+supervised restarts on the CLI path — a restarted actor currently starts
+fresh. Details in docs/launch/demo-script.md, which documents an executed
+crash-containment demo.)
 
 Pipeline: AST → HIR → MIR → register-based bytecode VM, with a Cranelift JIT
 and experimental AOT/WASM backends. The runtime is a multi-threaded

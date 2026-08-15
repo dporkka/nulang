@@ -29,9 +29,12 @@ four lines of PL work that usually live in separate languages:
 The piece I haven't seen combined with the above: **durability as a state
 model**. Persistent actors declare state as `local`, `durable`,
 `event_sourced`, or `crdt`; the runtime checkpoints and journals after each
-behavior, and supervisors rebuild state from the journal on restart.
-`entity` declarations are event-sourced by default with `events`/`apply`/`emit`
-blocks, so the aggregate-root pattern is syntax, not a framework:
+behavior. `entity` declarations are event-sourced by default with
+`events`/`apply`/`emit` blocks, so the aggregate-root pattern is syntax, not
+a framework. (Honest status: state-rebuild recovery is implemented and
+integration-tested at the runtime level but not yet wired to supervised
+restarts on the CLI path — verified by execution; see
+docs/launch/demo-script.md.)
 
 ```nulang
 entity Counter {
