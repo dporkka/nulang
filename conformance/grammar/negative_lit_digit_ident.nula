@@ -1,0 +1,2 @@
+// Negative case: neg_lit_digit_ident — must be rejected by the parser.
+fn f() { let 1abc = 2 }

@@ -1,0 +1,2 @@
+// Negative case: neg_lex_keyword_ident_actor — must be rejected by the parser.
+fn f() { let actor = 1 }
