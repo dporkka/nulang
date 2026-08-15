@@ -1248,8 +1248,8 @@ not landing.
 
 ## Phase 5 — Distributed Systems Excellence (parallel with Phases 1-3)
 
-**Status (2026-08-14 docs-truth sweep): 16 of 18 deliverables implemented;
-D7c and D18 open.**
+**Status (2026-08-15): 17 of 18 deliverables implemented; D18 (observability
+dashboard) landed 2026-08-15, D7c open.**
 
 **Goal.** The distributed actor runtime — not just the single-node
 language — withstands adversarial operational review. A cluster survives a
@@ -1260,9 +1260,9 @@ leak memory forever; an operator can point off-the-shelf tooling at a
 running cluster. This is where Nulang's distributed-actor design either
 becomes provably best-in-class or stays a credible-looking demo.
 
-**Sequencing.** As of the 2026-08-14 docs-truth sweep, Groups A-G are
-implemented (D1-D17 minus the two partials' open halves); remaining:
-D7c (RFC 0014), D18.
+**Sequencing.** As of the 2026-08-15 update, Groups A-G are implemented
+(D1-D17 plus D18, minus the partials' open halves); remaining:
+D7c (RFC 0014).
 
 **Deliverables.**
 
@@ -1487,15 +1487,17 @@ D7c (RFC 0014), D18.
     (`callbacks.rs:438-455` runtime, `vm.rs:664` standalone print form).
     Out of scope, unchanged: `.nula` `metrics.counter`/`trace.span`/
     `config trace` effects remain backlog per the original scope line.
-18. **Visual actor topology dashboard.** Already scoped by
-   `PERFORMANCE_ANALYSIS.md` row 6.4 ("DO as a side project, low-risk,
-   high-fun, great for demos," 3 weeks, no dependencies) — pull it into
-   Phase 5 as the demo-facing consumer of deliverable 17's metrics export.
-   Do not build a bespoke dashboard backend: point an off-the-shelf
-   Grafana at deliverable 17's OTel/Prometheus exporter and ship default
-   panel JSON plus a `docker-compose` demo — this is cheaper and more
-   credible than a custom UI, and was the original row's own "as a side
-   project" framing.
+18. **Visual actor topology dashboard.** ✅ **landed 2026-08-15.**
+   `deploy/observability/` ships the off-the-shelf-Grafana demo the
+   original scope line called for — no bespoke backend:
+   `docker-compose.yml` (Prometheus + Grafana with anonymous admin and
+   provisioning), `prometheus/prometheus.yml` (scrapes the node's
+   `--metrics-port` `/metrics` endpoint via `host.docker.internal`),
+   a provisioned Grafana datasource + dashboard provider, and a
+   default `nulang-runtime.json` dashboard (9 panels covering live
+   actors/DLQ/mailbox gauges and scheduler/GC/resolver counters). All
+   20 dashboard metric names verified to match `metrics.rs`
+   `to_prometheus_text` exactly; JSON + YAML validated.
 
 **Acceptance.**
 

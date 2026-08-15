@@ -67,6 +67,13 @@ two major versions.*
   `init_tracing`; `--metrics-port` Prometheus-format server exports
   `GcStats`/`SchedulerStats`/`ResolverStats`/mailbox depths. Commits
   `5d15857` (2026-08-08), `7592b72` (2026-08-13).
+- **Runtime observability dashboard demo** (Experimental,
+  `deploy/observability/`). Off-the-shelf Grafana pointed at the
+  `--metrics-port` Prometheus exporter — `docker-compose.yml` (Prometheus
+  + Grafana), a scrape config, provisioned datasource + dashboard
+  provider, and a default 9-panel `nulang-runtime.json` dashboard
+  (live-actor/DLQ/mailbox gauges + scheduler/GC/resolver counters). No
+  bespoke backend, per PLAN.md D18 (2026-08-15).
 - **Op-based CRDT replication** (Stable, `src/runtime/crdt_manager.rs`,
   `network.rs`). `Packet::CrdtOp` ships individual `CrdtOp`s alongside
   `CrdtDeltaSync` (lowest-bandwidth sync path); `CrdtManager::apply_op`
