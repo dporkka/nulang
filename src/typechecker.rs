@@ -1198,6 +1198,8 @@ impl TypeChecker {
                 ret_type,
                 error_type,
                 effect,
+                requires,
+                ensures,
                 body,
                 span,
                 ..
@@ -1338,9 +1340,20 @@ impl TypeChecker {
                         }
                     }
                 }
-
-                // Infer body type
                 let (s1, body_ty) = self.infer_expr(&new_ctx, body)?;
+
+                // Contract predicates must be Bool-typed. Postconditions see
+                // `result` bound to the inferred return type.
+                for req in requires {
+                    let (_s, req_ty) = self.infer_expr(&new_ctx, req)?;
+                    let _ = mgu(&req_ty, &Type::bool(), *span)?;
+                }
+                let mut ensures_ctx = new_ctx.clone();
+                ensures_ctx.bind("result".to_string(), body_ty.clone(), Capability::Ref, false);
+                for ens in ensures {
+                    let (_s, ens_ty) = self.infer_expr(&ensures_ctx, ens)?;
+                    let _ = mgu(&ens_ty, &Type::bool(), *span)?;
+                }
 
                 // Unify the preliminary return variable with the inferred body type
                 let s_rec = mgu(&apply_subst(&ret_var, &s1), &body_ty, *span)?;
@@ -1943,6 +1956,18 @@ impl TypeChecker {
             Expr::Defer { expr, .. } => {
                 let _ = self.infer_expr(ctx, expr)?;
                 Ok((vec![], Type::unit()))
+            }
+            // Panic diverges: a fresh type var unifies with any branch type.
+            Expr::Panic(..) => Ok((vec![], Type::Var(TypeVar::fresh()))),
+            Expr::Hide { names, body, .. } => {
+                let mut scoped = ctx.clone();
+                scoped.hide_names(names);
+                self.infer_expr(&scoped, body)
+            }
+            Expr::Seal { names, body, .. } => {
+                let mut scoped = ctx.clone();
+                scoped.seal_except(names);
+                self.infer_expr(&scoped, body)
             }
             Expr::Resume { .. } => Ok((vec![], Type::unit())),
         }
@@ -3187,15 +3212,24 @@ impl TypeChecker {
     fn infer_actor_decl(
         &mut self,
         ctx: &TypeContext,
-        _name: &str,
+        name: &str,
         behaviors: &[Behavior],
         events: &[crate::ast::EventDecl],
         migrations: &[crate::ast::MigrationDecl],
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
+        // The actor's own name must be in scope inside its behaviors so an
+        // actor can `spawn`/`send`/`ask` its own type (recursive actor graphs,
+        // e.g. skynet). A placeholder `Type::Actor` suffices: spawn/send/ask
+        // only require "is an actor", not the concrete state/behavior types.
+        let self_ty = Type::Actor {
+            state: Box::new(Type::Var(TypeVar::fresh())),
+            behavior: Box::new(Type::Var(TypeVar::fresh())),
+        };
         // Check each behavior, with event declarations in scope for emit checking
         for behavior in behaviors {
             let mut behavior_ctx = ctx.clone();
+            behavior_ctx.bind(name.to_string(), self_ty.clone(), Capability::Ref, false);
             let mut param_types = vec![];
             for p in &behavior.params {
                 let pty = match &p.ty {
@@ -4448,6 +4482,8 @@ mod tests {
                 error_type: None,
                 effect: None,
                 cap: None,
+                requires: vec![],
+                ensures: vec![],
                 body: bin(BinOp::Add, var("x"), int_lit(1)),
                 annotations: vec![],
                 public: true,
@@ -4486,6 +4522,8 @@ mod tests {
                         error_type: None,
                         effect: None,
                         cap: None,
+                        requires: vec![],
+                        ensures: vec![],
                         body: int_lit(42),
                         annotations: vec![],
                         public: true,
@@ -4504,6 +4542,8 @@ mod tests {
                     error_type: None,
                     effect: None,
                     cap: None,
+                    requires: vec![],
+                    ensures: vec![],
                     body: Expr::App {
                         func: Box::new(var("bar")),
                         args: vec![],
@@ -4548,6 +4588,8 @@ mod tests {
                         error_type: None,
                         effect: None,
                         cap: None,
+                        requires: vec![],
+                        ensures: vec![],
                         body: int_lit(42),
                         annotations: vec![],
                         public: true,
@@ -4564,6 +4606,8 @@ mod tests {
                         error_type: None,
                         effect: None,
                         cap: None,
+                        requires: vec![],
+                        ensures: vec![],
                         body: Expr::App {
                             func: Box::new(var("bar")),
                             args: vec![],
@@ -4695,6 +4739,8 @@ mod tests {
                 error_type: None,
                 effect: Some(EffectRow::Closed(vec![Effect::IO])),
                 cap: None,
+                requires: vec![],
+                ensures: vec![],
                 body: bin(BinOp::Add, var("x"), int_lit(1)),
                 annotations: vec![],
                 public: true,
@@ -4768,6 +4814,8 @@ mod tests {
                     error_type: None,
                     effect: None,
                     cap: None,
+                    requires: vec![],
+                    ensures: vec![],
                     body: Expr::App {
                         func: Box::new(Expr::Var("sqrt".to_string(), sp())),
                         args: vec![Expr::Literal(Literal::Float(4.0), sp())],
@@ -5072,6 +5120,21 @@ mod tests {
             "alias must constrain to the aliased type, got {:?}",
             bad.ok()
         );
+    }
+
+    #[test]
+    fn test_hide_and_seal_scope_directives() {
+        // `hide` blocks the named identifiers from resolution.
+        let ok = check_src("let secret = 1 in hide secret { 42 }");
+        assert!(ok.is_ok(), "hide must allow a body that avoids the hidden name");
+        let bad = check_src("let secret = 1 in hide secret { secret }");
+        assert!(bad.is_err(), "referencing a hidden name must be an unbound-variable error");
+
+        // `seal except` whitelists the named identifiers, hiding the rest.
+        let ok = check_src("let a = 1 in let b = 2 in seal except a { a }");
+        assert!(ok.is_ok(), "seal except must allow the listed name");
+        let bad = check_src("let a = 1 in let b = 2 in seal except a { b }");
+        assert!(bad.is_err(), "seal except must block non-listed names");
     }
 
     #[test]

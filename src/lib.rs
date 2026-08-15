@@ -52,6 +52,8 @@ pub mod resolver;
 pub mod runtime;
 pub mod stdlib;
 #[cfg(test)]
+pub mod benchmarks;
+#[cfg(test)]
 pub mod stress_tests;
 pub mod tool_schema;
 pub mod type_ir;

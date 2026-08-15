@@ -1043,6 +1043,23 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
             }
             fmt_expr(out, expr, indent, had_unhandled);
         }
+        Expr::Hide { names, body, .. } => {
+            out.push_str("hide ");
+            out.push_str(&names.join(", "));
+            out.push(' ');
+            fmt_expr(out, body, indent, had_unhandled);
+        }
+        Expr::Seal { names, body, .. } => {
+            out.push_str("seal except ");
+            out.push_str(&names.join(", "));
+            out.push(' ');
+            fmt_expr(out, body, indent, had_unhandled);
+        }
+        Expr::Panic(msg, _) => {
+            out.push_str("panic(\"");
+            out.push_str(msg);
+            out.push_str("\")");
+        }
     }
 }
 

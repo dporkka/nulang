@@ -192,6 +192,8 @@ mod tests {
             error_type: None,
             effect: None,
             cap: None,
+            requires: vec![],
+            ensures: vec![],
             body: Expr::Literal(Literal::Int(0), sp()),
             annotations: vec![],
             public: false,

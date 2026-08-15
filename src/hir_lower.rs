@@ -286,6 +286,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             fields,
             public,
             span,
+            ..
         } => hir::Decl::RecordType {
             name: name.clone(),
             type_params: type_params.clone(),
@@ -2065,6 +2066,17 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             let _ = lower_expr(expr, body);
             hir::Operand::Unit
         }
+        Expr::Hide { body: b, .. } | Expr::Seal { body: b, .. } => lower_expr(b, body),
+        Expr::Panic(msg, span) => {
+            let temp = fresh_temp_name();
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: Type::unit(),
+                value: hir::RValue::Panic(msg.clone()),
+                span: *span,
+            });
+            hir::Operand::Var(temp, Type::unit())
+        }
         Expr::TypeAnnotate { expr, .. } => lower_expr(expr, body),
     }
 }
@@ -2551,6 +2563,8 @@ mod tests {
                 error_type: None,
                 effect: None,
                 cap: None,
+                requires: vec![],
+                ensures: vec![],
                 body: Expr::Literal(Literal::Int(42), Span::default()),
                 annotations: vec![],
                 public: true,

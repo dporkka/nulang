@@ -1996,6 +1996,10 @@ impl NulangLanguageServer {
             Expr::Defer { expr, .. } => {
                 Self::extract_expr_types(expr, source, map);
             }
+            Expr::Hide { body, .. } | Expr::Seal { body, .. } => {
+                Self::extract_expr_types(body, source, map);
+            }
+            Expr::Panic(..) => {}
             Expr::Resume { value, .. } => {
                 Self::extract_expr_types(value, source, map);
             }

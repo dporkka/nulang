@@ -922,6 +922,10 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::Load(id));
                 Ok(())
             }
+            hir::RValue::Panic(msg) => {
+                self.b.assign(dst, mir::RValue::Panic(msg.clone()));
+                Ok(())
+            }
             hir::RValue::Literal(lit, _) => {
                 self.b
                     .assign(dst, mir::RValue::Const(literal_to_constant(lit)));
@@ -2549,6 +2553,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | ReceiveCommit
         | Spawn { .. }
         | SelfRef
+        | Panic(_)
         | StateGet { .. } => {}
         mir::RValue::Resume(x) => out.push(*x),
         ReceiveWait { timeout, .. } => out.push(*timeout),
@@ -2657,7 +2662,7 @@ fn walk_hir_operand(op: &hir::Operand, acc: &mut HashSet<String>) {
 fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
     match rv {
         hir::RValue::Use(op) => walk_hir_operand(op, acc),
-        hir::RValue::Literal(_, _) | hir::RValue::SelfRef(_) => {}
+        hir::RValue::Literal(_, _) | hir::RValue::SelfRef(_) | hir::RValue::Panic(_) => {}
         hir::RValue::Block(body) => walk_hir_body(body, acc),
         hir::RValue::Binary(_, l, r, _) => {
             walk_hir_operand(l, acc);

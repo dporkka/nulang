@@ -100,7 +100,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target,
+                &opts.target, &opts.with_capabilities,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -315,6 +315,20 @@ fn main() {
                     i += 1;
                 } else {
                     eprintln!("Error: --ffi-allow requires a library name or path argument");
+                    std::process::exit(1);
+                }
+            }
+            "--with" => {
+                if i + 1 < args.len() {
+                    for cap in args[i + 1].split(',') {
+                        let cap = cap.trim();
+                        if !cap.is_empty() {
+                            opts.with_capabilities.push(cap.to_string());
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --with requires a comma-separated capability list (fs,net,os)");
                     std::process::exit(1);
                 }
             }
@@ -583,7 +597,7 @@ fn main() {
                 lm = cm;
                 eprintln!("\n--- {} ---", p);
                 if let Ok(s) = std::fs::read_to_string(&p) {
-                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None, &opts.target) {
+                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None, &opts.target, &opts.with_capabilities) {
                         print_error(&e, uc);
                     }
                 }
@@ -617,7 +631,7 @@ fn main() {
                         &opts.backend,
                         opts.out_file.as_deref(),
                         opts.metrics_port,
-                        &opts.target,
+                        &opts.target, &opts.with_capabilities,
                     )
                 },
                 n,
@@ -633,7 +647,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target,
+                &opts.target, &opts.with_capabilities,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -648,7 +662,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = check_source(&source, Some(&path), opts.verbose, opts.all_errors) {
+        if let Err(e) = check_source(&source, Some(&path), opts.verbose, opts.all_errors, &opts.with_capabilities) {
             let code = exit_code(&e);
             if opts.all_errors {
                 let all = collect_all_frontend_errors(&source, Some(&path));
@@ -720,7 +734,7 @@ fn main() {
                         backend,
                         out_file,
                         opts.metrics_port,
-                        &opts.target,
+                        &opts.target, &opts.with_capabilities,
                     )
                 },
                 n,
@@ -736,7 +750,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target,
+                &opts.target, &opts.with_capabilities,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -768,7 +782,7 @@ fn main() {
             &opts.backend,
             opts.out_file.as_deref(),
             opts.metrics_port,
-            &opts.target,
+            &opts.target, &opts.with_capabilities,
         ) {
             print_error(&e, use_color);
             std::process::exit(exit_code(&e));
@@ -807,6 +821,9 @@ struct Options {
     metrics_port: Option<u16>,
     ffi_sandbox: bool,
     ffi_allow: Vec<String>,
+    /// Resource-capability grants for `--with=` (fs, net, os). Empty = no
+    /// gate (standalone programs run with full access).
+    with_capabilities: Vec<String>,
     /// Target ISA for AOT compilation: native (default), ptx, riscv64
     target: String,
 }
@@ -834,6 +851,7 @@ impl Default for Options {
             metrics_port: None,
             ffi_sandbox: false,
             ffi_allow: Vec::new(),
+            with_capabilities: Vec::new(),
             target: "native".to_string(),
         }
     }
@@ -1302,6 +1320,7 @@ fn run_frontend(
     source: &str,
     file_path: Option<&str>,
     verbose: bool,
+    with_capabilities: &[String],
 ) -> NuResult<(nulang::ast::AstModule, nulang::typechecker::TypeChecker)> {
     let ps = nulang::prelude_source::PRELUDE_SOURCE;
     let mut pl = Lexer::new(ps);
@@ -1351,6 +1370,7 @@ fn run_frontend(
     // typechecker's flatten_decls).
     let flat_decls = nulang::effect_checker::flatten_decls(&ast.decls);
     let mut effect_checker = EffectChecker::new();
+    effect_checker.set_resource_grants(with_capabilities);
     effect_checker.check_module(&ast.decls)?;
     for msg in &effect_checker.diagnostics {
         eprintln!("{}", msg);
@@ -1433,8 +1453,9 @@ fn run_source(
     out_file: Option<&str>,
     metrics_port: Option<u16>,
     target: &str,
+    with_capabilities: &[String],
 ) -> NuResult<()> {
-    let (ast, type_checker) = run_frontend(source, file_path, verbose)?;
+    let (ast, type_checker) = run_frontend(source, file_path, verbose, with_capabilities)?;
     match backend {
         #[cfg(feature = "wasm-backend")]
         "wasm" => {
@@ -1784,8 +1805,9 @@ fn check_source(
     file_path: Option<&str>,
     verbose: bool,
     _all_errors: bool,
+    with_capabilities: &[String],
 ) -> NuResult<()> {
-    let (_ast, _tc) = run_frontend(source, file_path, verbose)?;
+    let (_ast, _tc) = run_frontend(source, file_path, verbose, with_capabilities)?;
 
     if verbose {
         println!("Effect check passed.");
@@ -1870,7 +1892,7 @@ fn compile_with_new_pipeline(
 /// `--verify` run can confirm the artifact came from this exact source
 /// (supply-chain integrity). Does not execute the module.
 fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
-    let (ast, type_checker) = run_frontend(source, None, false)?;
+    let (ast, type_checker) = run_frontend(source, None, false, &[])?;
     let m = compile_with_new_pipeline(&ast, "main", &type_checker)?;
     let source_hash = blake3::hash(source.as_bytes());
     let bytes =
@@ -2099,7 +2121,7 @@ mod tests {
             }
         "#;
         let (ast, type_checker) =
-            run_frontend(source, None, false).expect("frontend should accept the actor program");
+            run_frontend(source, None, false, &[]).expect("frontend should accept the actor program");
         let module = compile_with_new_pipeline(&ast, "test", &type_checker)
             .expect("actor program should compile");
         let (_value, runtime) = run_with_runtime(module, None).expect("actor program should run");
