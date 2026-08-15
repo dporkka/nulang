@@ -8,9 +8,10 @@ import CopyMarkdown from '../../../components/CopyMarkdown.astro';
 
 <CopyMarkdown />
 
-- **Rust** stable 1.93+ ([rustup](https://rustup.rs))
+- **Rust** 1.95.0 (pinned by `rust-toolchain.toml`; [rustup](https://rustup.rs))
 - **Python 3** development headers (for PyO3 interop)
-- **Linux** or **macOS** (Windows planned)
+- **Linux** or **macOS**. Windows is not supported yet — use
+  [WSL](https://learn.microsoft.com/windows/wsl/) and build inside a Linux environment.
 - A C compiler and linker (GCC/Clang + GNU `bfd` linker on Linux)
 
 ## Building from Source

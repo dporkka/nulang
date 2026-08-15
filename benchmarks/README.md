@@ -36,4 +36,4 @@ reported as skipped, not failed, until enough history accumulates.
 This intentionally does not need a dedicated non-shared runner: the
 noise-adaptive threshold is the fix, not the infrastructure change.
 
-`PERFORMANCE_ANALYSIS.md` should cite numbers from here, not estimates.
+`docs/PERFORMANCE_ANALYSIS.md` should cite numbers from here, not estimates.

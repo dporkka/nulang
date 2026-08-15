@@ -1,19 +1,25 @@
 # Nulang Governance
 
-> This document is the governance constitution for the Nulang programming
-> language. It is itself a Frozen-tier artifact (see `CHANGELOG.md`): the
-> process it defines may evolve only through the RFC mechanism it specifies.
+> This document records the current maintainer policy for the Nulang
+> programming language. The process it defines may evolve through the RFC
+> mechanism it specifies.
 >
 > **Status:** Ratified 2026-07-19 alongside RFC 0001 (Format Stability) and
 > RFC 0002 (Frozen Core). Language version 1.0-frozen.
+>
+> **Pre-1.0 reality check:** Nulang is alpha software without external users
+> yet. The tier guarantees below are the *intent* and the policy the
+> maintainer works to — but until the language has real users, **expect
+> breaking changes before v1.0** and treat any guarantee here as subject to
+> revision.
 
 ## 1. Purpose
 
-Nulang is engineered for a relevance horizon of 200+ years. No implementation,
-author, or dependency lasts that long; the *process* must. This document
-specifies how the language is changed, by whom, and under what stability
-guarantees — so that a program written today continues to run decades from now
-under conforming implementations that did not exist when it was written.
+Nulang is engineered for long-term durability. No implementation, author, or
+dependency lasts forever; the *process* must. This document specifies how the
+language is changed, by whom, and under what stability guarantees — so that a
+program written today continues to run decades from now under conforming
+implementations that did not exist when it was written.
 
 The lessons are drawn from languages that survived (C/ISO, Python/PEP, Rust/RFC,
 Lisp/ANSI) and those that didn't (single-implementation languages that died
