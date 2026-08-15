@@ -1,0 +1,2 @@
+// Negative case: neg_match_arm_no_arrow — must be rejected by the parser.
+fn f() { match 1 { case _ 1 } }

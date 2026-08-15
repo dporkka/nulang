@@ -1,0 +1,2 @@
+// Negative case: neg_perform_missing_dot — must be rejected by the parser.
+fn f() { perform Rand }
