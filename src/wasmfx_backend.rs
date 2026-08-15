@@ -536,7 +536,6 @@ impl WasmFxBackend {
                     body.instruction(&Instruction::I64Const(*offset as i64));
                     body.instruction(&Instruction::I64Add);
                     body.instruction(&Instruction::I32WrapI64);
-                    body.instruction(&Instruction::LocalGet(var.0));
                     body.instruction(&Instruction::I64Load(MemArg {
                         offset: 0,
                         align: 3,
