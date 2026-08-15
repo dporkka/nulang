@@ -6,6 +6,4 @@ target
 .cargo/registry
 **/target
 out.wasm
-test_val
-find_bindgen
 node_modules
