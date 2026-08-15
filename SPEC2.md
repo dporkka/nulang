@@ -2304,6 +2304,15 @@ ignored at runtime so it cannot orphan `state_data` from the replicated
 entry. `read` materializes the value back into `state_data`, so `self.field`
 reads stay consistent. `.nula`-level conformance coverage lives in
 `conformance/behavior/crdt_*.nula`.
+
+**Recovery limitation:** `recover_actor` restores the materialized
+`state_data` value and the `CrdtManager` entries from `crdt_snapshot`, but
+does not rebuild `CrdtManager.field_map` (the `(actor_id, field_name) →
+CrdtId` link is not persisted). On a recovered actor, `self.field` still
+reads the materialized value, but `perform Crdt.*` is a silent nil no-op
+until the field is re-registered. Pinned by
+`test_crdt_field_survives_recovery` (a post-recovery `Crdt.increment`
+leaves `state_data["count"]` unchanged).
 ---
 
 # Chapter 10: Workflows
@@ -2745,7 +2754,9 @@ Mutation flows through `Crdt.*` (which validates each op against the field's
 type and materializes the value back into `self.count`); a raw
 `self.count = expr` assignment on a crdt field is ignored. The prior
 `self.count = self.count + 1` example no longer conforms — that form is
-rejected as an out-of-set mutation.
+rejected as an out-of-set mutation. On a recovered actor, `self.count` still
+reads the materialized value but `perform Crdt.*` is a silent nil no-op
+(`field_map` is not rebuilt on recovery — see §9.10's recovery limitation).
 
 ## 12.6 Fault Tolerance
 

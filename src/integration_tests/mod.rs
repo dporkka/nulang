@@ -2854,12 +2854,13 @@ match { a: 2, b: 9 } with {
         );
     }
 
-    /// `crdt` fields survive crash+recovery: the materialized value (kept in
-    /// `state_data` and snapshotted by `checkpoint_actor`'s Durable|Crdt
-    /// filter) is restored on recovery, while mutation flows through the
-    /// `Crdt.*` effect module (`perform Crdt.increment`) rather than a raw
-    /// `self.field = expr` assignment, which the runtime now rejects for
-    /// CRDT-backed fields.
+    /// `crdt` fields survive crash+recovery as *materialized* `state_data`
+    /// (snapshotted by `checkpoint_actor`'s Durable|Crdt filter). The
+    /// `Crdt.*` effect module is the live-actor mutation path, but
+    /// `recover_actor` does not rebuild `CrdtManager.field_map`, so
+    /// `perform Crdt.*` is a silent nil no-op on a recovered actor — this
+    /// test pins that actual behavior: `state_data["count"]` survives, but a
+    /// post-recovery `inc` does not bump it.
     #[test]
     fn test_crdt_field_survives_recovery() {
         let source = r#"
@@ -2933,6 +2934,23 @@ match { a: 2, b: 9 } with {
                 .and_then(|v| v.as_int()),
             Some(2),
             "crdt field's materialized value survives recovery via the snapshot path"
+        );
+
+        // Pin the recovery gap: `recover_actor` restores the materialized
+        // value and the CrdtManager entries but not `field_map`, so a
+        // post-recovery `Crdt.increment` is a silent no-op (get_field_id
+        // returns None) and `state_data["count"]` stays at 2.
+        rt2.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt2.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "post-recovery Crdt.increment must be a no-op: field_map is not rebuilt"
         );
     }
 

@@ -1447,7 +1447,11 @@ D7c (RFC 0014).
     conformance cases (`conformance/behavior/crdt_gcounter.nula`,
     `crdt_pncounter.nula`, `crdt_gcounter_opset.nula`). The standalone
     runtime now initializes `crdt_manager` eagerly, so `state crdt` fields
-    register and `Crdt.*` works without distribution enabled.
+    register and `Crdt.*` works without distribution enabled. **Known gap
+    (docs-truthed 2026-08-15):** `recover_actor` does not rebuild
+    `CrdtManager.field_map`, so `Crdt.*` is a silent nil no-op on a
+    recovered actor (the materialized `state_data` value survives) — pinned
+    by `test_crdt_field_survives_recovery`.
 13. **Op-based CRDT replication (CmRDT).** ✅ **landed (Phase 3 bullet 6
     satisfied by reference).** `Packet::CrdtOp` (`network.rs:595`),
     `CrdtManager::apply_op` (`crdt_manager.rs:511`).
