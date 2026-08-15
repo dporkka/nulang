@@ -2343,7 +2343,7 @@ impl WasmBackend {
         use crate::bytecode::Constant;
         let bits: i64 = match c {
             Constant::Int(n) => value_layout::tag_int(*n) as i64,
-            Constant::Float(f) => f.to_bits() as i64,
+            Constant::Float(f) => value_layout::float_bits(*f) as i64,
             Constant::Bool(b) => value_layout::tag_bool(*b) as i64,
             Constant::Nil => value_layout::TAG_NIL as i64,
             Constant::Unit => value_layout::TAG_UNIT as i64,
