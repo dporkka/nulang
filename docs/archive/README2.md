@@ -172,7 +172,7 @@ For the full architecture deep-dive, see [ARCHITECTURE.md](https://nulang.dev/do
 | **Language Guide** | [nulang.dev/docs/guide](https://nulang.dev/docs/guide) | Syntax, types, actors, and effects |
 | **Agent Building** | [nulang.dev/docs/agents](https://nulang.dev/docs/agents) | Building AI agents with LLM effects |
 | **API Reference** | [nulang.dev/docs/api](https://nulang.dev/docs/api) | Standard library and runtime API |
-| **Examples** | [github.com/nulang/examples](https://github.com/nulang/examples) | Complete example projects |
+| **Examples** | [github.com/dporkka/examples](https://github.com/dporkka/examples) | Complete example projects |
 | **Contributing** | [CONTRIBUTING.md](./CONTRIBUTING.md) | How to contribute to Nulang |
 | **Architecture** | [ARCHITECTURE.md](https://nulang.dev/docs/architecture) | Runtime and compiler design |
 
