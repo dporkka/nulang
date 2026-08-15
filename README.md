@@ -104,7 +104,7 @@ perform IO.print("Hello, " + name + "!")
 - **LSP server** — `nulang --lsp` with diagnostics, hover, goto-definition, references, rename, completion, inlay hints, formatting, signature help, and semantic tokens.
 - **REPL** — `nulang --repl` with `:help <topic>`, `:type <expr>`, `:load <file>`, tab completion, and automatic multi-line input.
 - **AI runtime** — `agent` declarations, LLM providers (OpenAI, Ollama), episodic/semantic/procedural memory, pipelines, debates, and supervisor teams. Gated behind the `ai-runtime` feature flag. *Experimental.*
-- **Distribution** — location-transparent `send`/`ask` over TCP (NUL0 wire protocol), gossip membership, 8 CRDT types. *Experimental.*
+- **Distribution** — location-transparent `send`/`ask` over TCP (NUL0 wire protocol) and gossip membership. *Experimental.* The 8 CRDT types (`GCounter`, `ORSet`, …) are implemented and tested at the Rust embedder level only — `.nula`-level `state crdt` fields are not yet wired to them and behave as `durable` (see SPEC2 §9.10).
 - **WASM backend** — MIR→WASM compilation via `--backend wasm|wasm-run|wasm-aot`, Wasmtime host runtime with guard pages and SIMD. Gated behind the `wasm-backend` feature flag. *Experimental.*
 - **AOT native backend** — `--backend native` compiles pure-functional programs (no effects, actors, or FFI) to native code via Cranelift; other constructs fail with a specific "not yet supported in the native backend" error naming the construct. Use the default `bytecode` backend for full-language programs. *Experimental.*
 
@@ -156,8 +156,8 @@ Nulang is **alpha software**. The language version is `1.0.0-frozen`
 | Tier | Scope |
 |------|-------|
 | **Frozen** | Never breaks — `.nbc` bytecode format, NUL0 wire protocol, value layout, Nulang Core, and the `IO`/`Spawn`/`Send`/`Receive` built-in effects. |
-| **Stable** | HM type system, effect rows, capability lattice, actor surface, CRDT operations. Breaking changes require an RFC and a deprecation cycle. |
-| **Experimental** | Everything else — feature flags (`wasm-backend`, `python`, `sqlite`, `lsp`, `ai-runtime`) and items marked Experimental in [`CHANGELOG.md`](CHANGELOG.md). |
+| **Stable** | HM type system, effect rows, capability lattice, actor surface. Breaking changes require an RFC and a deprecation cycle. |
+| **Experimental** | Everything else — feature flags (`wasm-backend`, `python`, `sqlite`, `lsp`, `ai-runtime`), distribution (multi-node `send`/`ask`, CRDTs — Rust-level only so far), and items marked Experimental in [`CHANGELOG.md`](CHANGELOG.md). |
 
 1550+ tests pass with `cargo test`. Add `--features wasm-backend` for the
 WASM backend test suite.
