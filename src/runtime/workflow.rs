@@ -74,6 +74,10 @@ pub(crate) fn checkpoint_actor(rt: &mut Runtime, actor_id: u64) {
         waiting_signal: actor.waiting_signal.clone(),
         crdt_snapshot,
     };
+    // RFC 0014 §3: re-spawn-opted actors replicate the snapshot to their
+    // deterministic shadow node before the local save, so the replica is a
+    // byte-identical copy of exactly what the local store will hold.
+    rt.maybe_shadow_replicate(actor_id, &snapshot);
     let _ = rt.persistence.save_snapshot(snapshot);
     if let Some(actor) = rt.actors.get_mut(&actor_id) {
         actor.sequence = seq;

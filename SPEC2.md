@@ -2094,7 +2094,7 @@ let other = spawn Counter {} in
 
 ## 8.8 Supervision
 
-Supervision is provided by the runtime, not by syntax. A spawned actor can be attached to a supervisor with a strategy (`OneForOne`, `OneForAll`, `RestForOne`) and a restart policy (`Permanent`, `Temporary`, `Transient`); when a behavior raises a runtime error the supervisor applies its policy — restarting the actor (with state rebuilt from its persistence store, if any), shutting it down, or escalating. The stress tests exercise these paths under load. Declarative in-language supervision syntax is planned.
+Supervision is provided by the runtime, not by syntax. A spawned actor can be attached to a supervisor with a strategy (`OneForOne`, `OneForAll`, `RestForOne`, `SimpleOneForOne`) and a restart policy (`Permanent`, `Temporary`, `Transient`, `RespawnOnNodeLoss`); when a behavior raises a runtime error the supervisor applies its policy — restarting the actor (with state rebuilt from its persistence store, if any), shutting it down, or escalating. `RespawnOnNodeLoss` (RFC 0014, §12.6) additionally re-spawns a durable child on another node when its home node is confirmed gone. The stress tests exercise these paths under load. Declarative in-language supervision syntax is planned.
 
 ```nulang
 // Supervised actors are spawned and wired through the runtime API;
@@ -2763,19 +2763,24 @@ reads the materialized value but `perform Crdt.*` is a silent nil no-op
 
 ## 12.6 Fault Tolerance
 
-**Implementation status (verified 2026-08-14):** the first bullet is now
-partially real — node failure triggers `handle_node_failed`
-(`distribution.rs`, 2026-08-09): dead-node `RemoteActorCache` invalidation
-and `DOWN`-with-`noconnection` to local watchers (D7 a+b), and actor
-migration is real (`DistributedVmCallbacks::migrate`, `callbacks.rs:1593`,
-AOT path `1950c01`) with `migrated_actors` forwarding for in-flight
-messages. Still absent: automatic re-spawn of durable actors from a
-replica on node loss (designed in RFC 0014, not implemented), and message
-buffering for failed-node actors beyond the forwarding window. Cross-node
-link/monitor supervision is real (RFC 0012).
+**Implementation status (verified 2026-08-15):** node failure triggers
+`handle_node_failed` (`distribution.rs`): dead-node `RemoteActorCache`
+invalidation and `DOWN`-with-`noconnection` to local watchers (D7 a+b).
+Actor migration is real (`DistributedVmCallbacks::migrate`) with
+`migrated_actors` forwarding for in-flight messages. Durable-actor
+re-spawn on node loss (D7c, RFC 0014) is now implemented: a node confirmed
+gone — promoted from `Failed` past `removal_confirmation_timeout` under
+quorum, or immediately on a positive `Packet::NodeGoodbye` — has its
+`RespawnOnNodeLoss`-opted durable actors re-spawned on their deterministic
+shadow node from the last replicated snapshot (new `Packet::ShadowReplicate`
+at `checkpoint_actor`, restored through `receive_migrated_actor`). A
+gossip-replicated durable-actor directory (`DurableDirectoryEntry`,
+highest-epoch-wins) + epoch self-demote on re-join guarantee no two live
+copies. Cross-node link/monitor supervision is real (RFC 0012).
 
 - Actor migration on node failure
-- Message buffering for failed-node actors
+- Durable-actor re-spawn on confirmed node loss (RFC 0014, opt-in per supervision edge)
+- Message buffering for failed-node actors beyond the forwarding window (still absent)
 - CRDT healing on node rejoin (Rust-embedder `CrdtManager` API only — see §12.5's implementation-status note; not yet reachable from `state crdt` fields)
 - Supervision-based recovery (§8.8)
 

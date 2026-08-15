@@ -60,6 +60,10 @@ pub enum RestartPolicy {
     Temporary,
     /// Restart only on abnormal (non-normal) exit.
     Transient,
+    /// Re-spawn the child on another node when its home node is confirmed
+    /// gone (RFC 0014). Implies `Permanent` semantics for the local exit
+    /// protocol, plus shadow replication + directory registration.
+    RespawnOnNodeLoss,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +277,7 @@ impl Supervisor {
             RestartPolicy::Permanent => true,
             RestartPolicy::Temporary => false,
             RestartPolicy::Transient => !matches!(reason, ExitReason::Normal),
+            RestartPolicy::RespawnOnNodeLoss => true,
         };
         if !policy_allows {
             return false;

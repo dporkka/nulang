@@ -2,6 +2,8 @@
 //! remote spawn, and gossip. These free functions orchestrate the distributed
 //! context (transport, cluster, resolver) owned by `Runtime`.
 
+use std::net::SocketAddr;
+
 use crate::runtime::distributed;
 use crate::runtime::Runtime;
 use crate::runtime::GOSSIP_PAYLOAD_MAX_ENTRIES;
@@ -279,6 +281,13 @@ pub(crate) fn process_network(rt: &mut Runtime) {
                 }
                 handle_node_failed(rt, NodeId(node.0));
             }
+            ClusterAction::NodeRemoved { node } => {
+                if let Some(transport) = &mut rt.distributed.transport {
+                    let net_node_id = NodeId(node.0);
+                    transport.disconnect(net_node_id);
+                }
+                handle_node_removed(rt, NodeId(node.0));
+            }
             ClusterAction::NodeLeft { node } => {
                 if let Some(transport) = &mut rt.distributed.transport {
                     let net_node_id = NodeId(node.0);
@@ -290,8 +299,13 @@ pub(crate) fn process_network(rt: &mut Runtime) {
                     (&mut rt.distributed.transport, &rt.distributed.cluster)
                 {
                     let members = cluster.gossip_payload(GOSSIP_PAYLOAD_MAX_ENTRIES);
-                    if !members.is_empty() {
-                        let packet = Packet::Gossip { members };
+                    let directory = if cluster.directory_gossip() {
+                        cluster.directory_payload(GOSSIP_PAYLOAD_MAX_ENTRIES)
+                    } else {
+                        Vec::new()
+                    };
+                    if !members.is_empty() || !directory.is_empty() {
+                        let packet = Packet::Gossip { members, directory };
                         for (to, addr) in targets {
                             transport.send(NodeId(to.0), addr, packet.clone());
                         }
@@ -316,15 +330,24 @@ pub(crate) fn process_network(rt: &mut Runtime) {
             }
             ClusterAction::Down { node } => {
                 // The split-brain resolver decided the local node should
-                // leave the cluster. The cluster's `local_down` flag already
-                // silences tick(); shut the transport down to end all
-                // network participation. Local actors keep running.
+                // leave the cluster. Before sending a positive goodbye
+                // (RFC 0014 §1 path 1) the local opted durable actors are
+                // checkpointed (replicating the final snapshot to their
+                // shadow) and terminated — otherwise the goodbye would
+                // falsely declare them dead while they kept running.
                 warn!(
                     "nulang-net: split-brain resolver downed local node {:?}; \
                      leaving the cluster",
                     node
                 );
+                rt.goodbye_self();
+                let goodbye = build_node_goodbye(rt);
                 if let Some(transport) = &mut rt.distributed.transport {
+                    if let Some((packet, targets)) = goodbye {
+                        for (to, addr) in targets {
+                            transport.send(to, addr, packet.clone());
+                        }
+                    }
                     transport.shutdown();
                 }
             }
@@ -341,11 +364,9 @@ pub(crate) fn process_network(rt: &mut Runtime) {
 ///    failed node (Erlang's `{'DOWN', ..., noconnection}` for node loss),
 ///    and drop the now-dead registry entries.
 ///
-/// Deliberately NOT implemented here: automatic re-spawn of durable actors
-/// on another node. Without an explicit supervisor policy confirming the
-/// old node is actually gone (not merely partitioned), re-spawn risks two
-/// live copies of the same durable-id actor writing to the same store —
-/// the same safety gate Kubernetes StatefulSet pod rescheduling enforces.
+/// Re-spawn of the dead node's durable actors is **not** performed here: it
+/// requires the confirmed-gone gate of [`handle_node_removed`], so a merely
+/// partitioned node is never raced by a re-spawn of its own actors.
 pub(crate) fn handle_node_failed(rt: &mut Runtime, node: NodeId) {
     // (1) Invalidate cached remote actors on the failed node.
     if let Some(resolver) = rt.distributed.resolver.as_mut() {
@@ -367,6 +388,88 @@ pub(crate) fn handle_node_failed(rt: &mut Runtime, node: NodeId) {
             crate::runtime::exit::send_down_message(rt, watcher.actor_id, target.actor_id, &reason);
         }
     }
+}
+
+/// React to a peer node being confirmed gone (RFC 0014 §1): deliver the
+/// `Failed`-path cleanup, then re-spawn that node's re-spawn-opted durable
+/// actors from their shadow replicas — but only on the node that actually
+/// holds the replica (the deterministic shadow), so exactly one survivor
+/// re-spawns each actor and no two live copies can exist.
+pub(crate) fn handle_node_removed(rt: &mut Runtime, node: NodeId) {
+    handle_node_failed(rt, node);
+
+    // Which actors lived on the removed node, and am I their shadow?
+    let local = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+    let entries: Vec<crate::runtime::cluster::DurableDirectoryEntry> = rt
+        .distributed
+        .cluster
+        .as_ref()
+        .map(|c| c.directory_for_node(node))
+        .unwrap_or_default();
+    for entry in entries {
+        let shadow = rt
+            .distributed
+            .cluster
+            .as_ref()
+            .and_then(|c| crate::runtime::shadow_for(c, node, entry.actor_id));
+        if shadow != Some(local) {
+            // Some other survivor holds the replica; it will re-spawn.
+            continue;
+        }
+        if let Some(replica) = rt.shadow_replicas.remove(&entry.actor_id) {
+            let ok = rt.receive_migrated_actor(
+                entry.actor_id,
+                replica.nbc_bytes,
+                replica.snapshot_json,
+            );
+            if ok {
+                // Bump the activation epoch and re-announce so a
+                // resurrected old node self-demotes its stale copy (§5).
+                let new_epoch =
+                    rt.distributed
+                        .cluster
+                        .as_mut()
+                        .map(|c| c.bump_directory_epoch(entry.actor_id, local))
+                        .unwrap_or(entry.epoch.saturating_add(1));
+                rt.respawn_opted.insert(entry.actor_id, new_epoch);
+                // Forward in-flight messages sent to the old location to
+                // the re-spawned actor (same TTL mechanism as migration).
+                rt.migrated_actors
+                    .insert(entry.actor_id, (local, std::time::Instant::now()));
+                tracing::info!(
+                    "nulang-respawn: actor {} re-spawned from shadow (epoch {})",
+                    entry.actor_id,
+                    new_epoch
+                );
+            }
+        }
+    }
+}
+
+/// Build a positive `NodeGoodbye` packet for every healthy peer, carrying
+/// the local node's re-spawn-opted durable actors as `(actor_id, epoch)`
+/// pairs. Returned targets + packet are sent by the caller (which owns the
+/// mutable transport borrow).
+fn build_node_goodbye(rt: &Runtime) -> Option<(Packet, Vec<(NodeId, SocketAddr)>)> {
+    let local = rt.distributed.node_id?;
+    let durable: Vec<(u64, u64)> = rt
+        .respawn_opted
+        .iter()
+        .map(|(&actor_id, &epoch)| (actor_id, epoch))
+        .collect();
+    let cluster = rt.distributed.cluster.as_ref()?;
+    let targets: Vec<(NodeId, SocketAddr)> = cluster
+        .healthy_members()
+        .iter()
+        .map(|info| (info.node_id, info.address))
+        .collect();
+    Some((
+        Packet::NodeGoodbye {
+            node_id: local,
+            durable,
+        },
+        targets,
+    ))
 }
 
 /// Synchronize CRDT state with all healthy cluster members using delta-state

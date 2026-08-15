@@ -26,7 +26,7 @@
 //! table. When merging incoming gossip, the higher incarnation number wins,
 //! ensuring convergence even under partition.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -204,6 +204,10 @@ pub enum ClusterAction {
     NodeJoined { node: NodeId, addr: SocketAddr },
     /// Notify that a node has been declared failed.
     NodeFailed { node: NodeId },
+    /// Notify that a node is confirmed gone (either by a positive
+    /// `NodeGoodbye` or by `removal_confirmation_timeout` elapsing past
+    /// `Failed`), and its durable re-spawn-opted actors may be re-spawned.
+    NodeRemoved { node: NodeId },
     /// Notify that a node has left the cluster.
     NodeLeft { node: NodeId },
     /// Send gossip to a random subset of nodes.
@@ -298,6 +302,18 @@ pub struct ClusterConfig {
     /// How often to probe `Failed` members for liveness (the self-healing
     /// path: a probe that reaches a live node re-promotes it to `Healthy`).
     pub probe_interval: Duration,
+    /// How long a `Failed` node must stay failed before it is promoted to
+    /// "confirmed gone" and its durable actors become re-spawn eligible
+    /// (RFC 0014 §1 path 2). `Duration::ZERO` disables timeout-based
+    /// promotion (only a positive `NodeGoodbye` confirms); `Duration::MAX`
+    /// effectively disables the whole re-spawn surface. Default matches
+    /// [`FAILED_NODE_RETENTION`], the point at which the cluster forgets
+    /// the node anyway.
+    pub removal_confirmation_timeout: Duration,
+    /// Whether the durable-actor location directory is gossip-replicated.
+    /// Turning this off disables re-spawn (survivors cannot learn where a
+    /// dead node's actors lived). Default true.
+    pub directory_gossip: bool,
 }
 
 impl Default for ClusterConfig {
@@ -305,6 +321,8 @@ impl Default for ClusterConfig {
         ClusterConfig {
             split_brain: SplitBrainConfig::Disabled,
             probe_interval: DEFAULT_PROBE_INTERVAL,
+            removal_confirmation_timeout: FAILED_NODE_RETENTION,
+            directory_gossip: true,
         }
     }
 }
@@ -320,9 +338,6 @@ impl ClusterConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// NodeGossip
-// ---------------------------------------------------------------------------
 
 /// A lightweight gossip entry for membership dissemination.
 ///
@@ -339,6 +354,26 @@ pub struct NodeGossip {
     /// Incarnation number for conflict resolution.
     pub incarnation: u64,
 }
+
+// ---------------------------------------------------------------------------
+// DurableDirectoryEntry
+// ---------------------------------------------------------------------------
+
+/// A gossip-replicated entry in the durable-actor location directory
+/// (RFC 0014 §2): where each re-spawn-opted durable actor lives and at what
+/// activation epoch. Highest-epoch-wins merge (mirroring the incarnation
+/// rule in `merge_membership`); the epoch is bumped on every re-spawn so a
+/// resurrected old node can detect it has been replaced (§5 self-demote).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableDirectoryEntry {
+    /// The durable actor's globally-unique id.
+    pub actor_id: u64,
+    /// The node currently hosting the actor.
+    pub node_id: NodeId,
+    /// Activation epoch; higher = newer incarnation.
+    pub epoch: u64,
+}
+
 
 // ---------------------------------------------------------------------------
 // ClusterState
@@ -369,6 +404,22 @@ pub struct ClusterState {
     /// Nodes that have been declared failed (kept for a while to
     /// prevent rejoining with stale state).
     failed_nodes: HashMap<NodeId, Instant>,
+
+    /// Nodes confirmed gone (RFC 0014 §1): promoted from `Failed` past
+    /// `removal_confirmation_timeout`, or on a positive `NodeGoodbye`.
+    /// Their durable re-spawn-opted actors are re-spawn eligible.
+    removed_nodes: HashSet<NodeId>,
+
+    /// Durable-actor location directory (RFC 0014 §2): actor id → entry,
+    /// merged highest-epoch-wins from gossip.
+    directory: HashMap<u64, DurableDirectoryEntry>,
+
+    /// How long a `Failed` node must stay failed before promotion to
+    /// confirmed-gone (zero disables timeout promotion).
+    removal_confirmation_timeout: Duration,
+
+    /// Whether the directory is gossip-replicated.
+    directory_gossip: bool,
 
     /// Heartbeat configuration.
     heartbeat_interval: Duration,
@@ -459,6 +510,10 @@ impl ClusterState {
             clock: None,
             rng: None,
             failed_nodes: HashMap::new(),
+            removed_nodes: HashSet::new(),
+            directory: HashMap::new(),
+            removal_confirmation_timeout: FAILED_NODE_RETENTION,
+            directory_gossip: true,
             on_member_joined: None,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
@@ -684,6 +739,8 @@ impl ClusterState {
             }
         };
         self.probe_interval = config.probe_interval;
+        self.removal_confirmation_timeout = config.removal_confirmation_timeout;
+        self.directory_gossip = config.directory_gossip;
         true
     }
 
@@ -810,12 +867,31 @@ impl ClusterState {
         }
 
         // ------------------------------------------------------------------
-        // 3. Clean up old failed nodes
+        // 3. Promote confirmed-gone Failed nodes to Removed, then clean up.
         // ------------------------------------------------------------------
+        // RFC 0014 §1 path 2: a `Failed` node that never sent a goodbye is
+        // promoted to confirmed-gone after `removal_confirmation_timeout`,
+        // but only while the local node retains quorum (resolver `StayUp`;
+        // with no resolver every node is trivially quorate). A node that was
+        // merely partitioned re-joins via the probe path before this window
+        // elapses and is never promoted.
         let mut to_remove = Vec::new();
+        let mut newly_removed = Vec::new();
         for (node_id, failed_at) in &self.failed_nodes {
-            if now.duration_since(*failed_at) > FAILED_NODE_RETENTION {
+            let elapsed = now.duration_since(*failed_at);
+            if self.removal_confirmation_timeout > Duration::ZERO
+                && elapsed > self.removal_confirmation_timeout
+                && self.retains_quorum(now)
+            {
+                newly_removed.push(*node_id);
+            }
+            if elapsed > FAILED_NODE_RETENTION {
                 to_remove.push(*node_id);
+            }
+        }
+        for node_id in newly_removed {
+            if self.removed_nodes.insert(node_id) {
+                actions.push(ClusterAction::NodeRemoved { node: node_id });
             }
         }
         for node_id in &to_remove {
@@ -836,39 +912,9 @@ impl ClusterState {
             // Already down: no heartbeats, gossip, or probes.
             return actions;
         }
-        // Cold-bootstrap guard: before this node has ever received a
-        // heartbeat from any peer, it is still forming (join handshakes
-        // in flight), not a partition minority. Consulting the resolver
-        // now would down a fresh seed — it sees only itself, below
-        // quorum — and the cluster could never form. Skip the resolver
-        // until the first peer contact.
         if self.has_seen_peer {
             if let Some(resolver) = &self.split_brain {
-                // Passive members' liveness is gossip-derived, and their
-                // table status can be a frozen snapshot of the last gossip
-                // we received. The resolver must not count them as
-                // reachable once that evidence is stale: demote
-                // stale-status passives to Suspicious in the view only
-                // (the table is untouched).
-                let view_members: Vec<NodeInfo> = self
-                    .members
-                    .values()
-                    .map(|info| {
-                        let mut info = info.clone();
-                        if info.node_id != self.local_node
-                            && !self.active_view.contains(&info.node_id)
-                            && now.duration_since(info.last_heartbeat) > self.heartbeat_timeout
-                            && matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
-                        {
-                            info.status = NodeStatus::Suspicious;
-                        }
-                        info
-                    })
-                    .collect();
-                let view = MembershipView {
-                    local: self.local_node,
-                    members: view_members,
-                };
+                let view = self.resolver_view(now);
                 if matches!(resolver.decide(&view), ResolverDecision::DownSelf) {
                     self.local_down = true;
                     actions.push(ClusterAction::Down {
@@ -1222,6 +1268,141 @@ impl ClusterState {
             })
             .collect()
     }
+
+    /// Whether the durable-actor directory is gossip-replicated.
+    pub fn directory_gossip(&self) -> bool {
+        self.directory_gossip
+    }
+
+
+    /// The durable-actor location directory (RFC 0014 §2), as a copy of the
+    /// gossip-replicated entries. A `max_entries` cap bounds the payload.
+    pub fn directory_payload(&self, max_entries: usize) -> Vec<DurableDirectoryEntry> {
+        self.directory.values().copied().take(max_entries).collect()
+    }
+
+    /// Merge directory entries into the local directory, highest-epoch-wins
+    /// per actor id (mirroring the incarnation rule in `merge_membership`).
+    /// Returns true when any entry changed.
+    pub fn merge_directory(&mut self, entries: Vec<DurableDirectoryEntry>) -> bool {
+        let mut changed = false;
+        for entry in entries {
+            match self.directory.get(&entry.actor_id) {
+                Some(existing) if existing.epoch > entry.epoch => {}
+                Some(existing) if existing.epoch == entry.epoch => {
+                    // Equal epoch: keep the existing location (the first
+                    // claim at that epoch wins — deterministic convergence).
+                }
+                _ => {
+                    self.directory.insert(entry.actor_id, entry);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Announce (or update) a directory entry for an actor this node hosts.
+    /// The caller owns epoch management; a higher epoch replaces the entry.
+    pub fn announce_directory(&mut self, entry: DurableDirectoryEntry) {
+        match self.directory.get(&entry.actor_id) {
+            Some(existing) if existing.epoch >= entry.epoch => {}
+            _ => {
+                self.directory.insert(entry.actor_id, entry);
+            }
+        }
+    }
+
+    /// The directory entry for an actor, if any.
+    pub fn directory_entry(&self, actor_id: u64) -> Option<DurableDirectoryEntry> {
+        self.directory.get(&actor_id).copied()
+    }
+
+
+    /// All directory entries whose home node is `node` (the re-spawn set on
+    /// that node's confirmed removal).
+    pub fn directory_for_node(&self, node: NodeId) -> Vec<DurableDirectoryEntry> {
+        self.directory
+            .values()
+            .filter(|e| e.node_id == node)
+            .copied()
+            .collect()
+    }
+
+    /// The current directory epoch for an actor, if any.
+    pub fn directory_epoch(&self, actor_id: u64) -> Option<u64> {
+        self.directory.get(&actor_id).map(|e| e.epoch)
+    }
+
+    /// Bump the directory epoch for an actor re-spawned onto `node`,
+    /// returning the new epoch. A missing entry is announced at epoch 2
+    /// (the first re-spawn past the original epoch-1 activation).
+    pub fn bump_directory_epoch(&mut self, actor_id: u64, node: NodeId) -> u64 {
+        let next = self
+            .directory
+            .get(&actor_id)
+            .map(|e| e.epoch.saturating_add(1))
+            .unwrap_or(2);
+        self.directory.insert(
+            actor_id,
+            DurableDirectoryEntry {
+                actor_id,
+                node_id: node,
+                epoch: next,
+            },
+        );
+        next
+    }
+
+    /// Mark a node confirmed gone (RFC 0014 §1 path 1, a positive
+    /// `NodeGoodbye`). Returns true when the node was not already removed.
+    pub fn mark_removed(&mut self, node: NodeId) -> bool {
+        self.removed_nodes.insert(node)
+    }
+
+    /// Whether `node` has been confirmed gone.
+    pub fn is_removed(&self, node: NodeId) -> bool {
+        self.removed_nodes.contains(&node)
+    }
+
+    /// True when the local node retains quorum and may therefore promote a
+    /// `Failed` node to confirmed-gone. With no resolver installed every
+    /// node is trivially quorate; with a resolver, `StayUp` is required.
+    fn retains_quorum(&self, now: Instant) -> bool {
+        match &self.split_brain {
+            None => true,
+            Some(resolver) => matches!(
+                resolver.decide(&self.resolver_view(now)),
+                ResolverDecision::StayUp
+            ),
+        }
+    }
+
+    /// Build the immutable membership view handed to the split-brain
+    /// resolver, demoting stale-status passive members to `Suspicious` so
+    /// gossip-frozen liveness evidence never inflates the reachable count.
+    fn resolver_view(&self, now: Instant) -> MembershipView {
+        let view_members: Vec<NodeInfo> = self
+            .members
+            .values()
+            .map(|info| {
+                let mut info = info.clone();
+                if info.node_id != self.local_node
+                    && !self.active_view.contains(&info.node_id)
+                    && now.duration_since(info.last_heartbeat) > self.heartbeat_timeout
+                    && matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
+                {
+                    info.status = NodeStatus::Suspicious;
+                }
+                info
+            })
+            .collect();
+        MembershipView {
+            local: self.local_node,
+            members: view_members,
+        }
+    }
+
 
     // ------------------------------------------------------------------
     // Internal helpers
@@ -1912,6 +2093,7 @@ mod tests {
         assert!(cs.apply_config(&ClusterConfig {
             split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
             probe_interval: Duration::from_secs(5),
+            ..Default::default()
         }));
 
         // Both peers stop heartbeating: age their timestamps past the full
@@ -1945,10 +2127,7 @@ mod tests {
         let c = NodeId::new(&addr(9002));
         cs.handle_heartbeat(b, addr(9001));
         cs.handle_heartbeat(c, addr(9002));
-        cs.apply_config(&ClusterConfig {
-            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
-            probe_interval: Duration::from_secs(5),
-        });
+        cs.apply_config(&ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 }, probe_interval: Duration::from_secs(5), ..Default::default() });
         let stale = Instant::now()
             - DEFAULT_HEARTBEAT_TIMEOUT
             - DEFAULT_SUSPICION_DURATION
@@ -1977,10 +2156,7 @@ mod tests {
         let b_addr = addr(9001);
         let b_id = NodeId::new(&b_addr);
         cs_a.handle_heartbeat(b_id, b_addr);
-        cs_a.apply_config(&ClusterConfig {
-            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
-            probe_interval: Duration::from_secs(5),
-        });
+        cs_a.apply_config(&ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 }, probe_interval: Duration::from_secs(5), ..Default::default() });
         assert!(!cs_a
             .tick()
             .iter()
@@ -1989,10 +2165,7 @@ mod tests {
         // B's view: A is unreachable; B sees only itself.
         let mut cs_b = ClusterState::new(b_id, b_addr);
         cs_b.handle_heartbeat(a_id, a_addr);
-        cs_b.apply_config(&ClusterConfig {
-            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
-            probe_interval: Duration::from_secs(5),
-        });
+        cs_b.apply_config(&ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 }, probe_interval: Duration::from_secs(5), ..Default::default() });
         let stale = Instant::now()
             - DEFAULT_HEARTBEAT_TIMEOUT
             - DEFAULT_SUSPICION_DURATION
@@ -2017,10 +2190,7 @@ mod tests {
             - DEFAULT_HEARTBEAT_TIMEOUT
             - DEFAULT_SUSPICION_DURATION
             - Duration::from_secs(1);
-        let config = ClusterConfig {
-            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 5 },
-            probe_interval: Duration::from_secs(5),
-        };
+        let config = ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 5 }, probe_interval: Duration::from_secs(5), ..Default::default() };
 
         // Majority side: peers 9001, 9002 healthy; 9003, 9004 failed.
         let mut cs = ClusterState::new(local, a);
@@ -2064,10 +2234,7 @@ mod tests {
         let mut cs = ClusterState::new(local, a);
         let b = NodeId::new(&addr(9001));
         cs.handle_heartbeat(b, addr(9001));
-        cs.apply_config(&ClusterConfig {
-            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
-            probe_interval: Duration::from_secs(5),
-        });
+        cs.apply_config(&ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 }, probe_interval: Duration::from_secs(5), ..Default::default() });
         let stale = Instant::now()
             - DEFAULT_HEARTBEAT_TIMEOUT
             - DEFAULT_SUSPICION_DURATION
@@ -2085,10 +2252,7 @@ mod tests {
         let mut cs = ClusterState::new(local, a);
         let b = NodeId::new(&addr(9001));
         cs.handle_heartbeat(b, addr(9001));
-        cs.apply_config(&ClusterConfig {
-            split_brain: SplitBrainConfig::Disabled,
-            probe_interval: Duration::from_secs(5),
-        });
+        cs.apply_config(&ClusterConfig { split_brain: SplitBrainConfig::Disabled, probe_interval: Duration::from_secs(5), ..Default::default() });
         let stale = Instant::now()
             - DEFAULT_HEARTBEAT_TIMEOUT
             - DEFAULT_SUSPICION_DURATION
@@ -2143,6 +2307,7 @@ mod tests {
         assert!(!cs.apply_config(&ClusterConfig {
             split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 0 },
             probe_interval: Duration::from_secs(5),
+            ..Default::default()
         }));
         // The invalid config leaves the previous (disabled) state in place.
         assert!(cs.split_brain.is_none());
@@ -2396,5 +2561,112 @@ mod tests {
         cs.handle_heartbeat(seed, seed_addr);
         assert_eq!(cs.get_node(seed).unwrap().status, NodeStatus::Healthy);
         assert!(cs.active_view().contains(&seed));
+    }
+
+    // -- D7c: durable-actor directory (RFC 0014 §2) -----------------------
+
+    #[test]
+    fn test_directory_merge_highest_epoch_wins() {
+        let mut cs = ClusterState::new(NodeId::new(&addr(9000)), addr(9000));
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let e1 = DurableDirectoryEntry { actor_id: 10, node_id: a, epoch: 1 };
+        let e2 = DurableDirectoryEntry { actor_id: 10, node_id: b, epoch: 2 };
+        let stale = DurableDirectoryEntry { actor_id: 10, node_id: a, epoch: 1 };
+
+        assert!(cs.merge_directory(vec![e1]));
+        assert!(cs.merge_directory(vec![e2]), "higher epoch must win");
+        assert_eq!(cs.directory_epoch(10), Some(2));
+        assert!(!cs.merge_directory(vec![stale]), "stale epoch is a no-op");
+        assert_eq!(cs.directory_epoch(10), Some(2));
+
+        let relocated = cs.directory_for_node(b);
+        assert_eq!(relocated.len(), 1);
+        assert_eq!(relocated[0].actor_id, 10);
+        assert!(cs.directory_for_node(a).is_empty());
+    }
+
+    #[test]
+    fn test_bump_directory_epoch_and_mark_removed() {
+        let mut cs = ClusterState::new(NodeId::new(&addr(9000)), addr(9000));
+        let n = NodeId(1);
+        // A missing entry re-spawns at epoch 2 (past the original epoch-1
+        // activation), then increments.
+        assert_eq!(cs.bump_directory_epoch(10, n), 2);
+        assert_eq!(cs.bump_directory_epoch(10, n), 3);
+
+        assert!(cs.mark_removed(n));
+        assert!(!cs.mark_removed(n), "second mark is a no-op");
+        assert!(cs.is_removed(n));
+        assert!(!cs.is_removed(NodeId(999)));
+    }
+
+    // -- D7c: confirmed-gone promotion (RFC 0014 §1 path 2) ----------------
+
+    #[test]
+    fn test_failed_node_promoted_to_removed_after_timeout() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        cs.handle_heartbeat(b, addr(9001));
+
+        // Drive b to Failed.
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        cs.tick();
+        assert_eq!(cs.get_node(b).unwrap().status, NodeStatus::Failed);
+
+        // Inside the confirmation window: no promotion.
+        cs.removal_confirmation_timeout = Duration::from_secs(60);
+        let actions = cs.tick();
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, ClusterAction::NodeRemoved { .. })));
+
+        // Past the window: promoted exactly once.
+        cs.removal_confirmation_timeout = Duration::from_secs(1);
+        if let Some(at) = cs.failed_nodes.get_mut(&b) {
+            *at = Instant::now() - Duration::from_secs(2);
+        }
+        let actions = cs.tick();
+        assert!(actions.iter().any(
+            |a| matches!(a, ClusterAction::NodeRemoved { node } if *node == b)
+        ));
+        assert!(cs.is_removed(b));
+        // A second tick does not re-emit the action.
+        let actions = cs.tick();
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, ClusterAction::NodeRemoved { .. })));
+    }
+
+    #[test]
+    fn test_removal_timeout_zero_disables_timeout_promotion() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        cs.handle_heartbeat(b, addr(9001));
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        cs.tick();
+        assert_eq!(cs.get_node(b).unwrap().status, NodeStatus::Failed);
+
+        cs.removal_confirmation_timeout = Duration::ZERO;
+        if let Some(at) = cs.failed_nodes.get_mut(&b) {
+            *at = Instant::now() - Duration::from_secs(3600);
+        }
+        let actions = cs.tick();
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, ClusterAction::NodeRemoved { .. })));
+        assert!(!cs.is_removed(b));
     }
 }

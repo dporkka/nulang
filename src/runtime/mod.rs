@@ -257,6 +257,15 @@ pub struct Runtime {
     /// garbage-collected after `MIGRATED_ACTOR_TTL` seconds.
     pub migrated_actors: HashMap<u64, (NodeId, Instant)>,
 
+    /// Durable actors opted into `RespawnOnNodeLoss` (RFC 0014): actor id →
+    /// current activation epoch. Enables shadow replication at checkpoint
+    /// time and directory announcement.
+    pub(crate) respawn_opted: HashMap<u64, u64>,
+    /// Shadow replicas this node holds (RFC 0014 §3): actor id → replica,
+    /// received via `Packet::ShadowReplicate` from the actor's home node.
+    /// Consumed by the re-spawn driver when the home node is confirmed gone.
+    pub(crate) shadow_replicas: HashMap<u64, ShadowReplica>,
+
     // CRDT manager (v0.6)
     pub crdt_manager: Option<CrdtManager>,
 
@@ -488,6 +497,8 @@ impl Runtime {
             remote_links: supervision::RemoteLinkRegistry::new(),
             remote_monitors: supervision::RemoteMonitorRegistry::new(),
             migrated_actors: HashMap::new(),
+            respawn_opted: HashMap::new(),
+            shadow_replicas: HashMap::new(),
             // Standalone runtimes use node id 0; `enable_distribution` swaps
             // this for a real node-id manager. Initialized eagerly so
             // `state crdt` fields register and `Crdt.*` ops work without
@@ -4698,8 +4709,9 @@ impl Runtime {
                 let id = self.create_supervisor(&name, strategy);
                 Some(Value::int(id as i64))
             }
-            // Policy: 0=permanent, 1=temporary, 2=transient; any other
-            // value is a nil no-op.
+            // Policy: 0=permanent, 1=temporary, 2=transient,
+            // 3=respawn_on_node_loss (RFC 0014); any other value is a nil
+            // no-op.
             Some("supervise_child") => {
                 let sup = regs.get(0)?.as_int()? as u64;
                 let child = regs.get(1)?.as_actor_id()?;
@@ -4707,6 +4719,7 @@ impl Runtime {
                     0 => RestartPolicy::Permanent,
                     1 => RestartPolicy::Temporary,
                     2 => RestartPolicy::Transient,
+                    3 => RestartPolicy::RespawnOnNodeLoss,
                     _ => return Some(Value::nil()),
                 };
                 if self.supervisors.contains_key(&sup) {
@@ -4908,6 +4921,27 @@ impl Runtime {
         let spec = ChildSpec { restart, ..spec };
         if let Some(child) = self.actors.get_mut(&child_id) {
             child.parent = Some(supervisor_id);
+        }
+        // RFC 0014 §4: `RespawnOnNodeLoss` opts the child into shadow
+        // replication + the durable-actor directory (epoch starts at 1).
+        // Only durable (`persistent`) actors are opt-able: a non-durable
+        // actor has no snapshot to re-spawn from.
+        if spec.restart_policy == RestartPolicy::RespawnOnNodeLoss
+            && self
+                .actors
+                .get(&child_id)
+                .map(|a| a.persistent)
+                .unwrap_or(false)
+        {
+            self.respawn_opted.entry(child_id).or_insert(1);
+            if let Some(cluster) = self.distributed.cluster.as_mut() {
+                let node = self.distributed.node_id.unwrap_or(NodeId::LOCAL);
+                cluster.announce_directory(DurableDirectoryEntry {
+                    actor_id: child_id,
+                    node_id: node,
+                    epoch: 1,
+                });
+            }
         }
         if let Some(supervisor) = self.supervisors.get_mut(&supervisor_id) {
             supervisor.add_child(spec, child_id);
@@ -5193,6 +5227,187 @@ impl Runtime {
                 now.duration_since(*migrated_at) < MIGRATED_ACTOR_TTL
             });
     }
+
+    /// Store a shadow replica received over the wire (RFC 0014 §3). The
+    /// replica is kept, not instantiated; the re-spawn driver consumes it
+    /// when the actor's home node is confirmed removed. A same-epoch replica
+    /// (a later checkpoint within one activation) MUST replace the earlier
+    /// one, or the shadow would hold the *first* checkpoint and re-spawn
+    /// silently lose every later durable write.
+    pub(crate) fn store_shadow_replica(
+        &mut self,
+        actor_id: u64,
+        nbc_bytes: Vec<u8>,
+        snapshot_json: Vec<u8>,
+        epoch: u64,
+    ) {
+        let replace = match self.shadow_replicas.get(&actor_id) {
+            Some(existing) => epoch >= existing.epoch,
+            None => true,
+        };
+        if replace {
+            self.shadow_replicas.insert(
+                actor_id,
+                ShadowReplica {
+                    nbc_bytes,
+                    snapshot_json,
+                    epoch,
+                },
+            );
+        }
+    }
+
+    /// Replicate an actor's durable snapshot to its deterministic shadow
+    /// (RFC 0014 §3). Called from `checkpoint_actor` after the local
+    /// snapshot is saved; only re-spawn-opted actors replicate. The
+    /// directory entry is re-announced on success so its presence implies
+    /// an acknowledged replica.
+    pub(crate) fn maybe_shadow_replicate(
+        &mut self,
+        actor_id: u64,
+        snapshot: &crate::runtime::persistence::ActorSnapshot,
+    ) {
+        let Some(&epoch) = self.respawn_opted.get(&actor_id) else {
+            return;
+        };
+        let Some(cluster) = self.distributed.cluster.as_ref() else {
+            return;
+        };
+        let home = self.distributed.node_id.unwrap_or(NodeId::LOCAL);
+        let Some(shadow) = shadow_for(cluster, home, actor_id) else {
+            return;
+        };
+        if shadow == home {
+            return;
+        }
+        let Ok(snapshot_json) = serde_json::to_vec(snapshot) else {
+            return;
+        };
+        let module = match self
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.bytecode_module.clone())
+            .or_else(|| self.recovery_modules.get(&actor_id).map(|(m, _, _)| m.clone()))
+        {
+            Some(m) => m,
+            None => return,
+        };
+        let Ok(nbc_bytes) = module.to_nbc(None) else {
+            return;
+        };
+        let packet = Packet::ShadowReplicate {
+            actor_id,
+            nbc_bytes,
+            snapshot_json,
+            epoch,
+        };
+        let Some(addr) = cluster.get_node(shadow).map(|info| info.address) else {
+            return;
+        };
+        if let Some(transport) = &mut self.distributed.transport {
+            transport.send(shadow, addr, packet);
+            if let Some(cluster) = self.distributed.cluster.as_mut() {
+                cluster.announce_directory(DurableDirectoryEntry {
+                    actor_id,
+                    node_id: home,
+                    epoch,
+                });
+            }
+        }
+    }
+
+    /// Terminate any local actor whose activation epoch has been superseded
+    /// by a newer directory entry (RFC 0014 §5 self-demote): a node that was
+    /// confirmed gone and re-joins later must not resume writing durable
+    /// state for an actor a survivor already re-spawned.
+    pub(crate) fn self_demote_superseded(&mut self) {
+        let superseded: Vec<(u64, NodeId)> = self
+            .distributed
+            .cluster
+            .as_ref()
+            .map(|c| {
+                self.respawn_opted
+                    .iter()
+                    .filter_map(|(actor_id, epoch)| {
+                        c.directory_entry(*actor_id)
+                            .filter(|entry| entry.epoch > *epoch)
+                            .map(|entry| (*actor_id, entry.node_id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (actor_id, replacement_node) in superseded {
+            // Reap the stale local copy; the directory entry (and the
+            // survivor's replica) is authoritative for the newer epoch.
+            crate::runtime::exit::reap_living_actor(
+                self,
+                actor_id,
+                crate::types::ExitReason::NoConnection,
+            );
+            self.respawn_opted.remove(&actor_id);
+            // The replaced actor lives on the directory entry's node now:
+            // forward sends there (NOT self — that would loop).
+            self.migrated_actors
+                .insert(actor_id, (replacement_node, std::time::Instant::now()));
+            tracing::warn!(
+                "nulang-respawn: self-demoted stale actor {} (directory epoch newer)",
+                actor_id
+            );
+        }
+    }
+
+    /// Make the local node's `NodeGoodbye` declaration true (RFC 0014 §1
+    /// path 1): checkpoint every re-spawn-opted durable actor (which also
+    /// replicates the final snapshot to its shadow) and then terminate the
+    /// local copy. A goodbye that merely lists the manifest without
+    /// terminating would leave two live copies once the shadow re-spawns.
+    pub(crate) fn goodbye_self(&mut self) {
+        let opted: Vec<u64> = self.respawn_opted.keys().copied().collect();
+        for actor_id in opted {
+            // Skip non-durable entries (they cannot be checkpointed and are
+            // not in the directory's re-spawn set anyway).
+            if !self
+                .actors
+                .get(&actor_id)
+                .map(|a| a.persistent)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            self.checkpoint_actor(actor_id);
+            crate::runtime::exit::reap_living_actor(
+                self,
+                actor_id,
+                crate::types::ExitReason::Normal,
+            );
+        }
+    }
+}
+
+/// Deterministic shadow for a durable actor (RFC 0014 §3): the healthy
+/// member with the smallest node id excluding the actor's home node. Called
+/// identically at checkpoint time (home computes its own shadow) and at
+/// re-spawn time (each survivor computes whether it is the shadow), so the
+/// node that holds the replica is the node that re-spawns — no leader
+/// election, exactly one re-spawn per actor.
+pub(crate) fn shadow_for(
+    cluster: &ClusterState,
+    home: NodeId,
+    _actor_id: u64,
+) -> Option<NodeId> {
+    cluster
+        .all_members()
+        .iter()
+        .filter(|info| info.status == NodeStatus::Healthy && info.node_id != home)
+        .map(|info| info.node_id)
+        .min()
+}
+
+/// A shadow replica of a durable actor's snapshot (RFC 0014 §3).
+pub(crate) struct ShadowReplica {
+    pub nbc_bytes: Vec<u8>,
+    pub snapshot_json: Vec<u8>,
+    pub epoch: u64,
 }
 
 /// Interval (in `sync_crdts` rounds) between full-state repair syncs.
