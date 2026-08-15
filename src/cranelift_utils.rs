@@ -4,7 +4,7 @@
 //! between `src/jit/typed_compiler.rs` and `src/aot/codegen.rs`.
 
 use crate::types::Capability;
-use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
+use crate::value_layout::{CANONICAL_NAN_BITS, PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
 
@@ -18,6 +18,7 @@ pub const TAG_NIL_I64: i64 = TAG_NIL as i64;
 pub const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
 pub const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
 pub const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000u64 as i64;
+pub const CANONICAL_NAN_I64: i64 = CANONICAL_NAN_BITS as i64;
 
 // ---------------------------------------------------------------------------
 // Payload extraction
@@ -85,6 +86,26 @@ pub fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
     let true_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1);
     let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 0);
     builder.ins().select(cond, true_val, false_val)
+}
+
+/// Bitcast an f64 result to i64, canonicalizing NaN to the reserved
+/// `CANONICAL_NAN_BITS` pattern.
+///
+/// Raw float ops (`fadd`/`fsub`/`fmul`) can produce the hardware quiet NaN
+/// (`0x7FF8...`), whose upper 16 bits alias `TAG_NIL` (and other NaN payloads
+/// alias the remaining tags). Storing that bit pattern in a boxed register
+/// would silently reinterpret the float as nil/int/pointer. Emits:
+/// ```clif
+/// is_nan = fcmp uno val, val
+/// bits   = bitcast.i64 val
+/// out    = select is_nan, CANONICAL_NAN, bits
+/// ```
+#[inline]
+pub fn emit_bitcast_f64_to_i64_canonicalized(builder: &mut FunctionBuilder, val: Value) -> Value {
+    let is_nan = builder.ins().fcmp(FloatCC::Unordered, val, val);
+    let bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+    let canonical = builder.ins().iconst(types::I64, CANONICAL_NAN_I64);
+    builder.ins().select(is_nan, canonical, bits)
 }
 
 /// Build MemFlags for a heap operation given the source register's capability.
