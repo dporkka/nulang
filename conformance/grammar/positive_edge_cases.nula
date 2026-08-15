@@ -1,0 +1,57 @@
+// Positive cases: control flow and structural edge cases.
+
+// case 01: if without else
+fn x_if_no_else() { if true then { 1 } }
+// case 02: if-else
+fn x_if_else() { if true then { 1 } else { 2 } }
+// case 03: else-if chain
+fn x_else_if() { if true then { 1 } else if false then { 2 } else { 3 } }
+// case 04: if as an expression value
+fn x_if_value() { let x = if 1 < 2 then { "y" } else { "n" }; x }
+// case 05: empty block as function body
+fn x_empty_block() {}
+// case 06: block containing only statements, no trailing expr
+fn x_block_stmts_only() { let a = 1; let b = 2 }
+// case 07: deeply nested if-else
+fn x_deep_if() {
+    if true then { if true then { if true then { if true then { if true then { 5 } else { 0 } } else { 0 } } else { 0 } } else { 0 } } else { 0 }
+}
+// case 08: deeply nested arithmetic
+fn x_deep_arith() {
+    1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + (10 + (11 + (12 + (13 + (14 + 15)))))))))))))
+}
+// case 09: deeply nested calls
+fn x_deep_calls() { f(f(f(f(f(f(f(f(f(f(1)))))))))) }
+// case 10: loop expression
+fn x_loop() { loop { return } }
+// case 11: while loop (parser surface)
+fn x_while() { while false { 1 } }
+// case 12: for loop over a range
+fn x_for_range() { for i in 1..10 { i } }
+// case 13: empty program is not tested here (file must have decls) — minimal decl
+fn x_minimal() { 0 }
+// case 14: trailing semicolon after final expression
+fn x_trailing_semi() { 1; }
+// case 15: multiple trailing separators
+fn x_multi_semis() { 1;; }
+// case 16: wide expression with many operands
+fn x_wide_expr() { 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 }
+// case 17: nested match inside if inside block
+fn x_nested_control() {
+    if true then {
+        match 1 {
+            case 1 => 1
+            case _ => 0
+        }
+    } else {
+        0
+    }
+}
+// case 18: block with only a comment
+fn x_comment_only_block() {
+    // nothing else
+}
+// case 19: lambda immediately invoked
+fn x_lambda_iife() { fn() { 1 }() }
+// case 20: let binding a block expression
+fn x_let_block() { let v = { let t = 3; t * 2 }; v }

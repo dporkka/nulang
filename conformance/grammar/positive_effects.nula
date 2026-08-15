@@ -1,0 +1,53 @@
+// Positive cases: effects — declarations, perform, handle (grammar.ebnf §3).
+
+// case 01: effect declaration with a no-arg op
+effect Rand { int: -> Int }
+// case 02: effect op with a single argument type
+effect Log { write: String -> Unit }
+// case 03: effect op with multiple argument types
+effect Kv { put: (String, Int) -> Unit }
+// case 04: effect with multiple operations
+effect Multi {
+    read: -> Int
+    write: Int -> Unit
+}
+// case 05: perform a no-arg effect op
+fn e_perform0() { perform Rand.int() }
+// case 06: perform an effect op with arguments
+fn e_perform_args() { perform Kv.put("k", 1) }
+// case 07: handle with a single resumable arm
+fn e_handle_resume() { handle { perform Rand.int() } { | Rand.int() resume => 42 } }
+// case 08: handle with a non-resuming arm
+fn e_handle_noresume() { handle { perform Rand.int() } { | Rand.int() => 0 } }
+// case 09: handle arm with parameters
+fn e_handle_params() { handle { perform Kv.put("k", 1) } { | Kv.put(k, v) resume => v } }
+// case 10: handle with multiple arms
+fn e_handle_multi() {
+    handle { perform Rand.int() } {
+        | Rand.int() resume => 42
+        | Kv.put(k, v) resume => v
+    }
+}
+// case 11: handle without leading pipe on first arm
+fn e_handle_nopipe() { handle { perform Rand.int() } { Rand.int() resume => 42 } }
+// case 12: handle without `with` keyword (grammar.ebnf §3: `with` optional)
+fn e_handle_bare() { handle perform Rand.int() { | Rand.int() resume => 1 } }
+// case 13: `with` inline handler block
+fn e_handle_with_inline() { handle { perform Rand.int() } with { | Rand.int() resume => 42 } }
+// case 14: named handler declaration and `with name` reference
+handler rand_handler = { | Rand.int() resume => 42 }
+fn e_handle_with_named() { handle { perform Rand.int() } with rand_handler }
+// case 15: resume expression form
+fn e_resume_expr() { handle { perform Rand.int() } { | Rand.int() resume => resume(42) } }
+// case 16: perform as subexpression
+fn e_perform_subexpr() { let r = perform Rand.int(); r }
+// case 17: perform IO.print (Core-tier effect)
+fn e_perform_io() { perform IO.print("hi") }
+// case 18: nested handle expressions
+fn e_handle_nested() {
+    handle { handle { perform Rand.int() } { | Rand.int() resume => 1 } } { | Rand.int() resume => 2 }
+}
+// case 19: effect op with arrow return type
+effect Fns { apply: Int -> Int }
+// case 20: handle body is a plain expression (not a block)
+fn e_handle_expr_body() { handle perform Rand.int() { | Rand.int() resume => 7 } }

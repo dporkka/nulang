@@ -1,6 +1,6 @@
 fn main() {
     let x = 6 * 7;
-    if x > 40 {
+    if x > 40 then {
         return x;
     } else {
         match x {
