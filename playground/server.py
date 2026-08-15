@@ -18,7 +18,6 @@ Usage:
 import http.server
 import json
 import os
-import re
 import resource
 import shutil
 import subprocess
@@ -51,13 +50,6 @@ ADDRESS_SPACE_BYTES = 1 << 30   # RLIMIT_AS: 1 GiB virtual memory cap
 FILE_SIZE_BYTES = 16 << 20      # RLIMIT_FSIZE: 16 MiB max file writes
 MAX_CODE_BYTES = 256 * 1024     # reject request bodies with more code than this
 MAX_OUTPUT_CHARS = 100_000      # cap stdout/stderr returned to the client
-
-# Reject any filename containing path components (path-traversal guard for
-# uploaded filenames). The playground API currently never accepts a filename
-# from the client — the source file path is always server-generated — but
-# keep this guard for any client-supplied name.
-def _is_safe_filename(name):
-    return bool(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name))
 
 # Whitelist of compile targets accepted by /compile (matches --target in main.rs).
 _ALLOWED_COMPILE_TARGETS = {"native", "riscv64", "ptx"}
@@ -113,7 +105,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _read_json_body(self):
         """Parse the JSON request body with a size cap. Returns None on error."""
-        content_length = int(self.headers.get('Content-Length', 0))
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+        except (ValueError, TypeError):
+            self.send_error_response({'ok': False, 'stderr': 'Invalid Content-Length header'})
+            return None
+
         if content_length > MAX_CODE_BYTES + 4096:
             self.send_error_response({'ok': False, 'stderr': 'Request body too large'})
             return None
@@ -123,6 +120,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             self.send_error_response({'ok': False, 'stderr': 'Invalid JSON'})
             return None
+
+        if not isinstance(data, dict):
+            self.send_error_response({'ok': False, 'stderr': 'Request body must be a JSON object'})
+            return None
+
         code = data.get('code', '')
         if len(code.encode('utf-8', errors='replace')) > MAX_CODE_BYTES:
             self.send_error_response({'ok': False, 'stderr': 'Source code too large'})
