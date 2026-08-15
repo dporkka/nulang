@@ -132,7 +132,7 @@ fn render_single(err: &NuError, use_color: bool) -> Option<String> {
     let range = start..end;
 
     let msg = err.to_string_message();
-    let mut builder = Report::build(ReportKind::Error, (file.as_str(), range.clone()))
+    let mut builder = Report::build(ReportKind::Error, file.as_str(), start)
         .with_config(Config::default().with_color(use_color))
         .with_message(&msg)
         .with_label(
@@ -143,8 +143,9 @@ fn render_single(err: &NuError, use_color: bool) -> Option<String> {
     if let Some(code) = err.stable_code() {
         builder = builder.with_code(code);
     }
-    for note in diagnostic_notes(err) {
-        builder = builder.with_note(note);
+    let notes = diagnostic_notes(err);
+    if !notes.is_empty() {
+        builder = builder.with_note(notes.join("; "));
     }
     if let Some(help) = err.suggestion() {
         builder = builder.with_help(help);
@@ -328,7 +329,7 @@ mod tests {
             let rendered = render(&err, false).expect("should render with source");
             assert_eq!(
                 rendered,
-                "[E0102] Error: Expected ']'\n   ╭─[ test.nula:2:18 ]\n   │\n 2 │     let x = [1, 2;\n   │                  ┬  \n   │                  ╰── Expected ']'\n   │ \n   │ Help: unclosed bracket — add a `]` to close the list or array type\n   │ \n   │ Note 1: expected: ']'\n   │ \n   │ Note 2: found: ';'\n───╯\n"
+                "[E0102] Error: Expected ']'\n   ╭─[test.nula:2:18]\n   │\n 2 │     let x = [1, 2;\n   │                  ┬  \n   │                  ╰── Expected ']'\n   │ \n   │ Help: unclosed bracket — add a `]` to close the list or array type\n   │ \n   │ Note: expected: ']'; found: ';'\n───╯\n"
             );
             // Plain Display output is unchanged (no code, plain prefix).
             assert!(format!("{err}").starts_with("Parse error at 2:18:"));
@@ -350,7 +351,7 @@ mod tests {
             let rendered = render(&err, false).expect("should render with source");
             assert_eq!(
                 rendered,
-                "[E0201] Error: Cannot unify Int with String\n   ╭─[ test.nula:2:20 ]\n   │\n 2 │ fn main() = add(1, \"two\")\n   │                    ──┬──  \n   │                      ╰──── Cannot unify Int with String\n   │ \n   │ Help: the expression produces the wrong type — consider adding a type annotation or conversion\n   │ \n   │ Note 1: expected type: Int\n   │ \n   │ Note 2: found type: String\n───╯\n"
+                "[E0201] Error: Cannot unify Int with String\n   ╭─[test.nula:2:20]\n   │\n 2 │ fn main() = add(1, \"two\")\n   │                    ──┬──  \n   │                      ╰──── Cannot unify Int with String\n   │ \n   │ Help: the expression produces the wrong type — consider adding a type annotation or conversion\n   │ \n   │ Note: expected type: Int; found type: String\n───╯\n"
             );
         });
     }
