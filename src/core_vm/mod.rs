@@ -83,6 +83,10 @@ pub struct CoreVM {
     pub strings: Vec<String>,
     pub halted: bool,
     pub exit_code: i64,
+    /// Optional capture sink for `IO.print` output. When set (e.g. by the
+    /// browser playground), printed lines are appended to the buffer
+    /// *instead of* going to process stdout.
+    pub output_sink: Option<std::rc::Rc<std::cell::RefCell<String>>>,
 }
 
 impl CoreVM {
@@ -95,6 +99,19 @@ impl CoreVM {
             strings: Vec::new(),
             halted: false,
             exit_code: 0,
+            output_sink: None,
+        }
+    }
+
+    /// Emit one line of `IO.print` output: to the capture sink when one is
+    /// installed (browser playground), otherwise to process stdout.
+    fn emit_print(&self, line: &str) {
+        if let Some(sink) = &self.output_sink {
+            let mut buf = sink.borrow_mut();
+            buf.push_str(line);
+            buf.push('\n');
+        } else {
+            println!("{line}");
         }
     }
 
@@ -574,15 +591,15 @@ impl CoreVM {
                 BuiltinEffect::IOPrint => {
                     let val = self.frames[frame_idx].regs[0];
                     if value_layout::is_int_raw(val) {
-                        println!("{}", value_layout::as_int_raw(val));
+                        self.emit_print(&value_layout::as_int_raw(val).to_string());
                     } else if val == value_layout::TAG_NIL {
-                        println!("nil");
+                        self.emit_print("nil");
                     } else if (val & value_layout::TAG_MASK) == value_layout::TAG_BOOL {
-                        println!("{}", (val & 1) != 0);
+                        self.emit_print(if (val & 1) != 0 { "true" } else { "false" });
                     } else if let Some(s) = self.resolve_string(val) {
-                        println!("{s}");
+                        self.emit_print(s);
                     } else {
-                        println!("<value:{val:#x}>");
+                        self.emit_print(&format!("<value:{val:#x}>"));
                     }
                     self.frames[frame_idx].regs[instr.op3 as usize] = value_layout::TAG_UNIT;
                 }

@@ -1,0 +1,2 @@
+# Build artifact produced by build.sh (never commit the binary).
+nulang_playground.wasm

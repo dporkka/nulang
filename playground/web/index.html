@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nulang Playground</title>
+<meta name="description" content="Run Nulang in your browser — the compiler and CoreVM run locally as WebAssembly. No server, no install.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Nulang Playground</h1>
+  <p class="tagline">Compiles &amp; runs <em>in your browser</em> via WebAssembly — nothing leaves your machine.</p>
+</header>
+
+<main>
+  <div class="toolbar">
+    <label for="examples">Example:</label>
+    <select id="examples"></select>
+    <button id="run" disabled>Run ▶</button>
+    <span id="status">loading compiler…</span>
+  </div>
+
+  <div class="panes">
+    <div class="pane">
+      <h2>Source</h2>
+      <textarea id="editor" spellcheck="false"></textarea>
+    </div>
+    <div class="pane">
+      <h2>Output</h2>
+      <pre id="output"></pre>
+    </div>
+  </div>
+
+  <details class="about">
+    <summary>About this playground</summary>
+    <p>
+      This page loads <code>nulang_playground.wasm</code>, a WebAssembly build of the
+      real Nulang compiler front-end (lexer → parser → typechecker → MIR → bytecode)
+      plus the <strong>CoreVM</strong> interpreter — the same source files the native
+      <code>nulang run --backend core-vm</code> path uses. Feature support matches the
+      CoreVM: pure functional code, effects like <code>IO.print</code>, and the frozen
+      Core subset. Actors, networking, FFI, and the JIT are native-only.
+    </p>
+    <p>
+      Source &amp; build instructions:
+      <a href="https://github.com/dporkka/nulang/tree/main/playground">github.com/dporkka/nulang/playground</a>
+    </p>
+  </details>
+</main>
+
+<script src="playground.js"></script>
+</body>
+</html>
