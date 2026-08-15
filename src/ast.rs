@@ -310,6 +310,22 @@ pub enum Expr {
         error_only: bool,
         span: Span,
     },
+    /// Scope directive `hide a, b { body }`: the named identifiers from the
+    /// enclosing scope are invisible inside `body` (compile-time only).
+    Hide {
+        names: Vec<String>,
+        body: Box<Expr>,
+        span: Span,
+    },
+    /// Scope directive `seal except a, b { body }`: every enclosing-scope name
+    /// except the listed ones is invisible inside `body` (compile-time only).
+    Seal {
+        names: Vec<String>,
+        body: Box<Expr>,
+        span: Span,
+    },
+    /// Runtime panic with a message (contract violations, explicit panic).
+    Panic(String, Span),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,6 +535,8 @@ pub enum FunctionAnnotation {
     Tool { description: String },
     /// `@backend(native | wasm)` selects the actor execution backend.
     Backend { kind: ActorBackendKind },
+    /// `@derive(eq, ...)` requests synthesized trait helpers on a record type.
+    Derive(Vec<String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +638,11 @@ pub enum Decl {
         error_type: Option<Type>,
         effect: Option<EffectRow>,
         cap: Option<Capability>,
+        /// Preconditions (`requires <expr>`): checked at function entry.
+        requires: Vec<Expr>,
+        /// Postconditions (`ensures <expr>`): checked before returning; the
+        /// return value is bound to `result` inside these predicates.
+        ensures: Vec<Expr>,
         body: Expr,
         annotations: Vec<FunctionAnnotation>,
         public: bool,
@@ -682,6 +705,9 @@ pub enum Decl {
         name: String,
         type_params: Vec<String>,
         fields: Vec<(String, Type)>,
+        /// Derives requested via `@derive(...)`: e.g. `eq`. The parser
+        /// desugars each supported derive into a synthetic function.
+        derives: Vec<String>,
         public: bool,
         span: Span,
     },

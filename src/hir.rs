@@ -242,6 +242,8 @@ pub enum Place {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RValue {
     Use(Operand),
+    /// Runtime panic with a message (contract violations).
+    Panic(String),
     Literal(Literal, Type),
     Binary(BinOp, Operand, Operand, Type),
     Unary(UnOp, Operand, Type),
@@ -484,6 +486,7 @@ impl RValue {
     pub fn ty(&self) -> Type {
         match self {
             RValue::Use(op) => op.ty(),
+            RValue::Panic(_) => Type::unit(),
             RValue::Literal(_, ty) => ty.clone(),
             RValue::Binary(_, _, _, ty) => ty.clone(),
             RValue::Unary(_, _, ty) => ty.clone(),

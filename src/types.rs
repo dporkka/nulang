@@ -8,6 +8,8 @@ use std::time::Duration;
 // Fast hashing for compiler-internal maps (keys are not attacker-controlled).
 type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+type FxHashSet<T> =
+    std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 // ---------------------------------------------------------------------------
 // Type Variables & Regions
@@ -748,10 +750,14 @@ impl Type {
 /// Typing context: maps variable names to their (type, capability) bindings.
 ///
 /// Linear (`LinearIso`) consumption is tracked separately by the capability
-/// analyzer (`CapabilityAnalyzer` in `src/effect_checker.rs`), not here.
+/// analyzer.
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
     bindings: HashMap<String, (Type, Capability, bool)>,
+    /// Names hidden by an enclosing `hide` / `seal except` directive. A hidden
+    /// name resolves as unbound. Local bindings created inside the directive's
+    /// body are NOT hidden — the set is snapshotted at directive entry.
+    hidden: FxHashSet<String>,
     /// Event declarations from the enclosing entity (if any). Used by the
     /// typechecker to validate `emit EventName(args)` calls. Stored as
     /// `(event_name, [(param_name, param_type)])`.
@@ -776,7 +782,28 @@ impl TypeContext {
 
     /// Look up a variable's type, capability, and mutability.
     pub fn lookup(&self, name: &str) -> Option<&(Type, Capability, bool)> {
+        if self.hidden.contains(name) {
+            return None;
+        }
         self.bindings.get(name)
+    }
+
+    /// Hide the given names from resolution (`hide a, b { body }`).
+    pub fn hide_names(&mut self, names: &[String]) {
+        self.hidden.extend(names.iter().cloned());
+    }
+
+    /// Hide every currently-bound name except the allowlist
+    /// (`seal except a, b { body }`).
+    pub fn seal_except(&mut self, names: &[String]) {
+        let allow: FxHashSet<String> = names.iter().cloned().collect();
+        let to_hide: Vec<String> = self
+            .bindings
+            .keys()
+            .filter(|k| !allow.contains(*k))
+            .cloned()
+            .collect();
+        self.hidden.extend(to_hide);
     }
 
     /// Create an extended context with an additional binding.

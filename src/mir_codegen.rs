@@ -735,6 +735,11 @@ impl MirCodegen {
             mir::RValue::Const(c) => {
                 self.load_constant(dst, c);
             }
+            mir::RValue::Panic(msg) => {
+                // The Panic opcode reads register 0 for the message.
+                self.load_constant(0, &Constant::String(msg.clone()));
+                self.emit(Instruction::new0(OpCode::Panic));
+            }
             mir::RValue::Load(id) => {
                 let src = self.local_reg(*id);
                 if src != dst {
@@ -1949,6 +1954,7 @@ fn rvalue_reads(rv: &mir::RValue, out: &mut HashSet<mir::LocalId>) {
         | RValue::ReceiveMatch { .. }
         | RValue::ReceiveCommit
         | RValue::SelfRef
+        | RValue::Panic(_)
         | RValue::StateGet { .. } => {}
         RValue::Load(x)
         | RValue::ArrayLen(x)
@@ -2150,6 +2156,7 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | ReceiveCommit
         | Spawn { .. }
         | SelfRef
+        | Panic(_)
         | StateGet { .. }
         | mir::RValue::Resume(..) => {}
         // The timeout value is staged into r0 with a plain Move — an

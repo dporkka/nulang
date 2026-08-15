@@ -181,6 +181,8 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RValue {
     Const(Constant),
+    /// Runtime panic with a message (contract violations). Diverges.
+    Panic(String),
     Load(LocalId),
     /// Read a named record field (module-wide field id resolved by codegen).
     LoadFieldNamed {

@@ -97,6 +97,23 @@ pub fn parse_effect_name(name: &str) -> Effect {
     }
 }
 
+/// Map an effect to its resource-capability category, or `None` for core
+/// language effects that are never gated by `--with=`. The three coarse
+/// categories mirror Aether's `fs` / `net` / `os` grants.
+pub fn effect_resource_category(eff: &Effect) -> Option<&'static str> {
+    match eff {
+        Effect::FS => Some("fs"),
+        Effect::Net => Some("net"),
+        Effect::Env
+        | Effect::Process
+        | Effect::System
+        | Effect::FFI
+        | Effect::DB
+        | Effect::Python => Some("os"),
+        _ => None,
+    }
+}
+
 /// Flatten nested `module {}` blocks into a single declaration list.
 ///
 /// Mirrors `typechecker::flatten_decls`: modules are purely a namespacing
@@ -360,6 +377,10 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
         Expr::Defer { expr, .. } => {
             free_vars(expr, bound, acc);
         }
+        Expr::Hide { body, .. } | Expr::Seal { body, .. } => {
+            free_vars(body, bound, acc);
+        }
+        Expr::Panic(..) => {}
         Expr::Resume { value, .. } => {
             free_vars(value, bound, acc);
         }
@@ -456,6 +477,12 @@ pub struct EffectChecker {
     /// same-named module function, so calls through it are not charged the
     /// module function's effect row.
     shadowed: Vec<String>,
+    /// Granted resource-capability categories (`fs`, `net`, `os`). `None`
+    /// means no gate is active (standalone programs run with full access).
+    /// `Some(grants)` means a resource effect is only legal when its category
+    /// is granted; core language effects (IO, Spawn, Send, ...) are never
+    /// gated. Populated from the `--with=` CLI flag.
+    resource_grants: Option<FxHashSet<String>>,
 }
 
 impl EffectChecker {
@@ -464,13 +491,19 @@ impl EffectChecker {
         self.fn_rows.get(name)
     }
 
-    /// Create a new effect checker.
     pub fn new() -> Self {
         EffectChecker {
             diagnostics: Vec::new(),
             fn_rows: FxHashMap::default(),
             shadowed: Vec::new(),
+            resource_grants: None,
         }
+    }
+
+    /// Enable the resource-capability gate with the given granted categories
+    /// (`fs`, `net`, `os`). Called by the CLI when `--with=` is supplied.
+    pub fn set_resource_grants(&mut self, grants: &[String]) {
+        self.resource_grants = Some(grants.iter().cloned().collect());
     }
 
     /// Infer `expr` while treating `names` as locally bound, so direct calls
@@ -905,6 +938,8 @@ impl EffectChecker {
             Expr::Recover { body: b, .. } => self.infer_effects(ctx, b),
             // Defer: effects of the deferred expression.
             Expr::Defer { expr: e, .. } => self.infer_effects(ctx, e),
+            Expr::Hide { body, .. } | Expr::Seal { body, .. } => self.infer_effects(ctx, body),
+            Expr::Panic(..) => Ok(EffectRow::empty()),
             Expr::Resume { .. } => Ok(EffectRow::empty()),
         }
     }
@@ -1100,6 +1135,34 @@ impl EffectChecker {
         self.register_function_rows(&flat)?;
         for decl in &flat {
             self.check_decl(decl)?;
+        }
+        self.check_resource_grants()?;
+        Ok(())
+    }
+
+    /// Enforce the resource-capability gate (active only when
+    /// `set_resource_grants` was called): every resource effect performed by a
+    /// module function must belong to a granted category. Core language
+    /// effects (IO, Spawn, Send, ...) are never gated.
+    fn check_resource_grants(&self) -> NuResult<()> {
+        let Some(grants) = &self.resource_grants else {
+            return Ok(());
+        };
+        for (name, row) in &self.fn_rows {
+            for eff in row.effects() {
+                if let Some(category) = effect_resource_category(eff) {
+                    if !grants.contains(category) {
+                        return Err(NuError::EffectError {
+                            msg: format!(
+                                "function '{name}' performs effect '{eff}' which requires resource capability '{category}' (not granted; grant it with --with={category})"
+                            ),
+                            span: Span::default(),
+                            missing_effects: None,
+                            allowed_effects: None,
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2034,6 +2097,10 @@ impl CapabilityAnalyzer {
             }
             // Defer: capability of the deferred expression.
             Expr::Defer { expr, .. } => self.infer_cap_tracked(ctx, expr, consumed),
+            Expr::Hide { body, .. } | Expr::Seal { body, .. } => {
+                self.infer_cap_tracked(ctx, body, consumed)
+            }
+            Expr::Panic(..) => Ok(Capability::Val),
             Expr::Resume { value, .. } => {
                 let _ = self.infer_cap_tracked(ctx, value, consumed)?;
                 Ok(Capability::Val)
@@ -2149,6 +2216,8 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::Consume { span, .. } => *span,
         Expr::Recover { span, .. } => *span,
         Expr::Defer { span, .. } => *span,
+        Expr::Hide { span, .. } | Expr::Seal { span, .. } => *span,
+        Expr::Panic(_, span) => *span,
         Expr::Resume { span, .. } => *span,
     }
 }
@@ -2267,6 +2336,7 @@ fn rvalue_is_single_shot(rv: &crate::hir::RValue) -> bool {
         | crate::hir::RValue::FieldAccess { .. }
         | crate::hir::RValue::Index { .. }
         | crate::hir::RValue::SelfRef(_)
+        | crate::hir::RValue::Panic(_)
         | crate::hir::RValue::CapCheck { .. } => true,
 
         // Function calls — conservative: a callee might perform an effect
@@ -3914,6 +3984,50 @@ mod tests {
             result.is_ok(),
             "functions staying within declared rows must pass: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_resource_gate_blocks_ungranted_categories() {
+        let ast = parse_module(
+            "fn read_cfg() -> Unit ! {FS} { unit }\n\
+             fn fetch_url() -> Unit ! {Net} { unit }\n\
+             fn spawn_proc() -> Unit ! {System, Process} { unit }",
+        );
+
+        // No gate: standalone programs run with full access.
+        let mut open = EffectChecker::new();
+        assert!(
+            open.check_module(&ast.decls).is_ok(),
+            "ungated module must pass"
+        );
+
+        // Empty grant list: every resource category is denied.
+        let mut denied = EffectChecker::new();
+        denied.set_resource_grants(&[]);
+        assert!(
+            denied.check_module(&ast.decls).is_err(),
+            "FS/Net/System must be denied without grants"
+        );
+
+        // Grant fs only: Net and System/Process remain denied.
+        let mut fs_only = EffectChecker::new();
+        fs_only.set_resource_grants(&["fs".to_string()]);
+        assert!(
+            fs_only.check_module(&ast.decls).is_err(),
+            "Net/System must still be denied when only fs is granted"
+        );
+
+        // Grant everything: passes.
+        let mut full = EffectChecker::new();
+        full.set_resource_grants(&[
+            "fs".to_string(),
+            "net".to_string(),
+            "os".to_string(),
+        ]);
+        assert!(
+            full.check_module(&ast.decls).is_ok(),
+            "all resource categories granted must pass"
         );
     }
 

@@ -45,6 +45,34 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-15
+
+- **Aether borrow-semantics features (P0–P5).** Six borrows from the
+  Aether→Nulang comparison, landed together:
+  - **Savina-style benchmark harness** (`src/benchmarks.rs`): counting,
+    ping-pong, thread-ring, fork-join, and skynet patterns run on the real
+    bytecode VM + actor `Runtime`, asserting correctness while reporting
+    throughput and per-message latency.
+  - **Resource-capability gate** (`--with=fs,net,os`, `src/effect_checker.rs`,
+    `src/main.rs`): grants resource categories checked against the inferred
+    effect row (`FS`→fs, `Net`→net, `Env`/`Process`/`System`/`FFI`/`DB`/
+    `Python`→os); ungranted resource effects are rejected at compile time.
+  - **`hide` / `seal except` scope directives** (`src/lexer.rs`,
+    `src/parser.rs`, `src/types.rs`): `hide a, b { body }` and
+    `seal except a, b { body }` deny name resolution inside `body`.
+  - **`requires` / `ensures` contracts** (`src/parser.rs`,
+    `src/typechecker.rs`, `hir`/`mir`): pre/postconditions desugar to a
+    runtime `OpCode::Panic` on violation (new `Expr::Panic` /
+    `hir::RValue::Panic` / `mir::RValue::Panic`), with `result` bound to the
+    return value in `ensures`.
+  - **`@derive(eq)` structural equality** (`src/parser.rs`): desugars to a
+    `name_eq(a, b) -> Bool` field-comparison function (bare `==` on records
+    remains pointer equality).
+  - **spawn-near co-location** (`src/runtime/mod.rs`, `src/runtime/spawn.rs`):
+    `Runtime::spawn_actor_near(near_id, init)` places a child on the same
+    shard as `near_id`, preserving the `actor_id % shard_count` invariant.
+
+
 ### Added since 1.0.0-frozen — 2026-08-14 (docs-truth sweep)
 
 - **RFC 0011 — split-brain resolver (`static-quorum`)** (Experimental,

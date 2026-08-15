@@ -254,6 +254,8 @@ impl Parser {
                                         error_type,
                                         effect,
                                         cap,
+                                        requires: vec![],
+                                        ensures: vec![],
                                         body: wrapped_body,
                                         annotations,
                                         public,
@@ -405,6 +407,8 @@ impl Parser {
                         error_type: None,
                         effect: None,
                         cap: None,
+                        requires: vec![],
+                        ensures: vec![],
                         body,
                         annotations: vec![],
                         public: false,
@@ -448,6 +452,8 @@ impl Parser {
                 error_type: None,
                 effect: None,
                 cap: None,
+                requires: vec![],
+                ensures: vec![],
                 body,
                 annotations: vec![],
                 public: false,
@@ -457,11 +463,224 @@ impl Parser {
         if !self.diagnostics.is_empty() {
             return Err(NuError::Multiple(std::mem::take(&mut self.diagnostics)));
         }
+        let decls = Self::expand_contracts(Self::expand_derives(decls));
         Ok(AstModule {
             name: "main".to_string(),
             decls,
         })
     }
+
+/// Desugar `@derive(eq)` on record types into a synthetic structural-equality
+/// function `{name}_eq(a, b) -> Bool`. Walks top-level and nested-module decls
+/// so a derive inside a `module { }` block is expanded too.
+fn expand_derives(decls: Vec<Decl>) -> Vec<Decl> {
+    let mut out = Vec::with_capacity(decls.len());
+    for decl in decls {
+        match decl {
+            Decl::RecordType {
+                name,
+                type_params,
+                fields,
+                derives,
+                public,
+                span,
+            } => {
+                let wants_eq = derives.iter().any(|d| d == "eq");
+                out.push(Decl::RecordType {
+                    name: name.clone(),
+                    type_params: type_params.clone(),
+                    fields: fields.clone(),
+                    derives,
+                    public,
+                    span,
+                });
+                if wants_eq {
+                    out.push(Self::derive_eq_function(&name, &fields, span));
+                }
+            }
+            Decl::Module {
+                name,
+                exports,
+                decls: inner,
+                span,
+            } => {
+                out.push(Decl::Module {
+                    name,
+                    exports,
+                    decls: Self::expand_derives(inner),
+                    span,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Synthesize `fn {record_name}_eq(a, b) -> Bool` comparing every field with
+/// `==`, `&&`-chained. The zero-field case is trivially `true`.
+fn derive_eq_function(record_name: &str, fields: &[(String, Type)], span: Span) -> Decl {
+    let rec_ty = Type::Record(fields.to_vec());
+    let mut body: Option<Expr> = None;
+    for (field, _) in fields {
+        let cmp = Expr::Binary {
+            op: BinOp::Eq,
+            left: Box::new(Expr::FieldAccess {
+                expr: Box::new(Expr::Var("a".to_string(), span)),
+                field: field.clone(),
+                span,
+            }),
+            right: Box::new(Expr::FieldAccess {
+                expr: Box::new(Expr::Var("b".to_string(), span)),
+                field: field.clone(),
+                span,
+            }),
+            span,
+        };
+        body = Some(match body {
+            None => cmp,
+            Some(acc) => Expr::Binary {
+                op: BinOp::And,
+                left: Box::new(acc),
+                right: Box::new(cmp),
+                span,
+            },
+        });
+    }
+    let body = body.unwrap_or_else(|| Expr::Literal(Literal::Bool(true), span));
+    Decl::Function {
+        name: format!("{}_eq", record_name.to_lowercase()),
+        type_params: vec![],
+        type_param_constraints: vec![],
+        params: vec![
+            Param::new("a", Some(rec_ty.clone())),
+            Param::new("b", Some(rec_ty)),
+        ],
+        default_values: vec![None, None],
+        using_params: vec![],
+        ret_type: Some(Type::bool()),
+        error_type: None,
+        effect: None,
+        cap: None,
+        requires: vec![],
+        ensures: vec![],
+        body,
+        annotations: vec![],
+        public: false,
+        span,
+    }
+}
+
+/// Desugar `requires` / `ensures` contract clauses into runtime checks:
+/// `requires` become entry guards, `ensures` become a `let result = <body>`
+/// wrapper that checks each postcondition against `result`. Violations raise a
+/// runtime panic (`OpCode::Panic`) with a stable category message.
+fn expand_contracts(decls: Vec<Decl>) -> Vec<Decl> {
+    decls
+        .into_iter()
+        .map(|decl| match decl {
+            Decl::Function {
+                name,
+                type_params,
+                type_param_constraints,
+                params,
+                default_values,
+                using_params,
+                ret_type,
+                error_type,
+                effect,
+                cap,
+                requires,
+                ensures,
+                body,
+                annotations,
+                public,
+                span,
+            } => Decl::Function {
+                name,
+                type_params,
+                type_param_constraints,
+                params,
+                default_values,
+                using_params,
+                ret_type,
+                error_type,
+                effect,
+                cap,
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: Self::wrap_contracts(body, &requires, &ensures, span),
+                annotations,
+                public,
+                span,
+            },
+            Decl::Module {
+                name,
+                exports,
+                decls: inner,
+                span,
+            } => Decl::Module {
+                name,
+                exports,
+                decls: Self::expand_contracts(inner),
+                span,
+            },
+            other => other,
+        })
+        .collect()
+}
+
+/// Wrap a function body with its contract checks.
+fn wrap_contracts(body: Expr, requires: &[Expr], ensures: &[Expr], span: Span) -> Expr {
+    // Postconditions: `let result = body in if (e1 && e2) then result else panic`.
+    let mut checked = body;
+    if !ensures.is_empty() {
+        let cond = Self::and_chain(ensures, span);
+        checked = Expr::Let {
+            name: "result".to_string(),
+            ty: None,
+            value: Box::new(checked),
+            body: Box::new(Expr::If {
+                cond: Box::new(cond),
+                then_branch: Box::new(Expr::Var("result".to_string(), span)),
+                else_branch: Some(Box::new(Expr::Panic(
+                    "postcondition_violation".to_string(),
+                    span,
+                ))),
+                span,
+            }),
+            mutable: false,
+            let_in: false,
+            span,
+        };
+    }
+    // Preconditions: `if (r1 && r2) then checked else panic`.
+    if !requires.is_empty() {
+        let cond = Self::and_chain(requires, span);
+        checked = Expr::If {
+            cond: Box::new(cond),
+            then_branch: Box::new(checked),
+            else_branch: Some(Box::new(Expr::Panic(
+                "precondition_violation".to_string(),
+                span,
+            ))),
+            span,
+        };
+    }
+    checked
+}
+
+/// `&&`-chain a non-empty slice of boolean predicates.
+fn and_chain(exprs: &[Expr], span: Span) -> Expr {
+    let mut it = exprs.iter().cloned();
+    let first = it.next().expect("and_chain requires a non-empty slice");
+    it.fold(first, |acc, e| Expr::Binary {
+        op: BinOp::And,
+        left: Box::new(acc),
+        right: Box::new(e),
+        span,
+    })
+}
 
     /// Consume and return all diagnostics accumulated during error-recovery
     /// parsing. After this call, the diagnostics buffer is empty.
@@ -504,14 +723,17 @@ impl Parser {
             TokenKind::Type => {
                 self.advance(); // consume 'type'
                 self.skip_newlines();
+                let derives: Vec<String> = annotations
+                    .iter()
+                    .filter_map(|a| match a {
+                        crate::ast::FunctionAnnotation::Derive(names) => Some(names.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
                 match self.peek_kind() {
                     TokenKind::Alias => self.parse_type_alias(public, false),
-                    _ => {
-                        // Peek ahead: if we see a '{' it's a record, if '|' or variant-like it's variant
-                        // Actually: type Name = ... determines it
-                        // We already consumed 'type', so look at what follows the name
-                        self.parse_type_decl_variant_or_record(public)
-                    }
+                    _ => self.parse_type_decl_variant_or_record(public, derives),
                 }
             }
             TokenKind::Handler => self.parse_named_handler(),
@@ -615,6 +837,15 @@ impl Parser {
                     };
                     annotations.push(FunctionAnnotation::Backend { kind });
                 }
+                "derive" => {
+                    // `@derive(eq)` — nameless fields are stored under the
+                    // empty key (no `:`), named ones under their field name.
+                    let names: Vec<String> = fields
+                        .into_iter()
+                        .map(|(k, v)| if k.is_empty() { v } else { k })
+                        .collect();
+                    annotations.push(FunctionAnnotation::Derive(names));
+                }
                 _ => {
                     return Err(NuError::parse_error(
                         format!("Unknown function annotation: @{}", name),
@@ -696,9 +927,24 @@ impl Parser {
             None
         };
 
+        // Optional `requires` / `ensures` contract clauses before the body.
+        let mut requires = Vec::new();
+        let mut ensures = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek_kind() == &TokenKind::Requires {
+                self.advance();
+                requires.push(self.parse_expr()?);
+            } else if self.peek_kind() == &TokenKind::Ensures {
+                self.advance();
+                ensures.push(self.parse_expr()?);
+            } else {
+                break;
+            }
+        }
+
         // Optional `=` for single-expression shorthand: `fn f() -> T = expr`
         let _ = self.consume_if(&TokenKind::Assign);
-
         let body = self.parse_expr()?;
         Ok(Decl::Function {
             name,
@@ -711,6 +957,8 @@ impl Parser {
             error_type,
             effect,
             cap,
+            requires,
+            ensures,
             body,
             annotations,
             public,
@@ -1927,13 +2175,17 @@ impl Parser {
         })
     }
 
-    fn parse_type_decl_variant_or_record(&mut self, public: bool) -> NuResult<Decl> {
+    fn parse_type_decl_variant_or_record(
+        &mut self,
+        public: bool,
+        derives: Vec<String>,
+    ) -> NuResult<Decl> {
         let span = self.current_span();
         let name = self.expect_ident("type name")?;
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Assign)?;
 
-        // Look ahead to determine if it's a record, variant, or alias body
+        // Look ahead to determine if it's a record, variant, or alias body.
         self.skip_newlines();
         match self.peek_kind().clone() {
             TokenKind::LBrace => {
@@ -1944,25 +2196,18 @@ impl Parser {
                     name,
                     type_params,
                     fields,
+                    derives,
                     public,
                     span,
                 })
             }
             // Variants start with a variant name (UpperIdent) or an optional
             // leading pipe. Any other shape is an alias body (`type Buffer =
-            // [Int]`, `type T = Int`, `type F = (Int) -> Int`): parse the
-            // full type exactly like `type alias`/`opaque type` do. The
-            // typechecker already handles `Decl::TypeAlias` with arbitrary
-            // bodies. Primitive type names (`Int`, `String`, ...) lex as
-            // UpperIdent, so they are excluded from the variant path — a
-            // variant named after a primitive is degenerate, and resolving
-            // them as types is what the typechecker does everywhere else.
-            // `Nil` is the one exception: it is the canonical empty variant
-            // of a sum type (`type Stream[T] = Nil | Cons(...)`), so it
-            // stays on the variant path.
+            // [Int]`): parse the full type like `type alias`. Primitive type
+            // names (`Int`, `String`, ...) lex as UpperIdent, so they are
+            // excluded from the variant path. `Nil` is the one exception: the
+            // canonical empty variant of a sum type.
             TokenKind::UpperIdent(first) if type_decl_body_is_alias(&first) => {
-                // `first` is the body's first token (a primitive name);
-                // `name` (outer binding) is the alias name.
                 let body = self.parse_type()?;
                 Ok(Decl::TypeAlias {
                     name,
@@ -3035,6 +3280,8 @@ impl Parser {
                     TokenKind::Recover => self.parse_recover_expr(),
                     TokenKind::Defer => self.parse_defer_expr(false),
                     TokenKind::Errdefer => self.parse_defer_expr(true),
+                    TokenKind::Hide => self.parse_hide_expr(false),
+                    TokenKind::Seal => self.parse_hide_expr(true),
                     TokenKind::Return => {
                         self.advance();
                         if self.is_expr_start() {
@@ -4643,6 +4890,42 @@ impl Parser {
             span,
         })
     }
+
+    /// Parse `hide a, b { body }` or `seal except a, b { body }`.
+    fn parse_hide_expr(&mut self, is_seal: bool) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance(); // consume 'hide' | 'seal'
+        if is_seal {
+            if !self.match_token(&TokenKind::Except) {
+                return Err(NuError::parse_error(
+                    "expected 'except' after 'seal'".to_string(),
+                    self.current_span(),
+                ));
+            }
+            self.advance(); // consume 'except'
+        }
+        let mut names = Vec::new();
+        loop {
+            names.push(self.expect_ident("identifier in hide/seal directive")?);
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+        }
+        let body = self.parse_block()?;
+        if is_seal {
+            Ok(Expr::Seal {
+                names,
+                body: Box::new(body),
+                span,
+            })
+        } else {
+            Ok(Expr::Hide {
+                names,
+                body: Box::new(body),
+                span,
+            })
+        }
+    }
     fn parse_type(&mut self) -> NuResult<Type> {
         self.parse_type_arrow()
     }
@@ -4922,7 +5205,7 @@ impl Parser {
         let decl_result = if self.peek_kind() == &TokenKind::Alias {
             self.parse_type_alias(false, is_opaque)
         } else {
-            self.parse_type_decl_variant_or_record(false)
+            self.parse_type_decl_variant_or_record(false, vec![])
         };
         let result = decl_result.and_then(|decl| {
             let (type_params, body) = match decl {

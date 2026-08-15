@@ -1266,6 +1266,65 @@ describe
     }
 
     #[test]
+    fn test_derive_eq_generates_structural_equality() {
+        // `@derive(eq)` synthesizes `point_eq(a, b)` comparing fields with
+        // structural `==` (the VM's bare `==` on records is pointer equality,
+        // so this is a real behavioral difference).
+        let eq_source = r#"
+@derive(eq)
+type Point = { x: Int, y: Int }
+point_eq({ x: 1, y: 2 }, { x: 1, y: 2 })
+"#;
+        let eq_value = run_source_new(eq_source).unwrap();
+        assert_eq!(
+            eq_value.as_bool(),
+            Some(true),
+            "identical records must compare structurally equal"
+        );
+
+        let ne_source = r#"
+@derive(eq)
+type Point = { x: Int, y: Int }
+point_eq({ x: 1, y: 2 }, { x: 1, y: 3 })
+"#;
+        let ne_value = run_source_new(ne_source).unwrap();
+        assert_eq!(
+            ne_value.as_bool(),
+            Some(false),
+            "differing records must compare unequal"
+        );
+    }
+
+    #[test]
+    fn test_contracts_requires_ensures() {
+        // Satisfied pre/postconditions: the call succeeds.
+        let ok_source = r#"
+fn add(a: Int, b: Int) -> Int
+    requires a >= 0
+    ensures result >= a
+{
+    a + b
+}
+add(1, 2)
+"#;
+        let v = run_source_new(ok_source).unwrap();
+        assert_eq!(v.as_int(), Some(3), "valid contract call must succeed");
+
+        // Precondition violation: `add(-1, 2)` must fail at runtime.
+        let bad_source = r#"
+fn add(a: Int, b: Int) -> Int
+    requires a >= 0
+{
+    a + b
+}
+add(-1, 2)
+"#;
+        assert!(
+            run_source_new(bad_source).is_err(),
+            "precondition violation must fail at runtime"
+        );
+    }
+    #[test]
     fn test_nil_annotation_end_to_end() {
         assert!(
             check_source("fn f(x: Nil) x\nf(nil)").is_ok(),

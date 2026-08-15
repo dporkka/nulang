@@ -448,6 +448,7 @@ fn stmt_rvalue_uses(op: &mir::RValue) -> Vec<mir::LocalId> {
     let mut out = Vec::new();
     match op {
         mir::RValue::Load(l) => out.push(*l),
+        mir::RValue::Panic(_) => {}
         mir::RValue::LoadFieldNamed { obj, .. } => out.push(*obj),
         mir::RValue::LoadFieldPos { obj, .. } => out.push(*obj),
         mir::RValue::ArrayLoad { arr, idx } => {
@@ -2299,6 +2300,9 @@ fn compile_rvalue(
 ) -> AotResult<Value> {
     match rv {
         mir::RValue::Const(c) => compile_const(builder, c, mode, constants),
+        mir::RValue::Panic(_) => Err(AotCompileError::Unsupported(
+            "Panic: contract violations require the bytecode backend (unavailable with --backend native)".into(),
+        )),
 
         mir::RValue::Load(id) => {
             let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;

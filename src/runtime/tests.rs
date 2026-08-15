@@ -1513,6 +1513,29 @@ fn test_fresh_actor_id_increments() {
     assert_eq!(id2, id1 + 1);
 }
 
+#[test]
+fn test_spawn_actor_near_colocates_on_shard() {
+    // Single-shard: co-location is trivially satisfied (one shard).
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor_near(a, Box::new(|| vec![]));
+    assert!(rt.actors.contains_key(&b), "near-spawned actor exists");
+
+    // Sharded: the child's id maps to the reference actor's shard, so
+    // `actor_id % shard_count` ownership is preserved exactly.
+    let shards = Runtime::new_sharded(4);
+    let shard_count = shards.len() as u64;
+    for mut shard in shards {
+        let a = shard.spawn_actor(Box::new(|| vec![]));
+        let b = shard.spawn_actor_near(a, Box::new(|| vec![]));
+        assert_eq!(
+            b % shard_count,
+            a % shard_count,
+            "spawn_actor_near must co-locate on the reference actor's shard"
+        );
+    }
+}
+
 // ========================================================================
 // v0.7 Persistence Tests
 // ========================================================================

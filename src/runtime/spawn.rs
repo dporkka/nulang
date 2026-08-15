@@ -19,7 +19,20 @@ pub(crate) fn spawn_actor_with_models(
     persistent: bool,
     workflow: Option<&str>,
 ) -> u64 {
-    let id = fresh_actor_id();
+    spawn_actor_with_id(rt, fresh_actor_id(), init, state_models, persistent, workflow)
+}
+
+/// Spawn an actor with a pre-assigned id. `Runtime::spawn_actor_near` uses
+/// this to co-locate a new actor on the shard of a reference actor by drawing
+/// an id that maps to that shard.
+pub(crate) fn spawn_actor_with_id(
+    rt: &mut Runtime,
+    id: u64,
+    init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
+    state_models: HashMap<String, StateModel>,
+    persistent: bool,
+    workflow: Option<&str>,
+) -> u64 {
     let mut actor = Actor::new(id, format!("actor_{}", id), 0);
     let state_fields = init();
     for (name, value) in state_fields {

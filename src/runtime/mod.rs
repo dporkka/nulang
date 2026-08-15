@@ -662,6 +662,37 @@ impl Runtime {
         spawn::spawn_actor_with_models(self, init, HashMap::new(), false, None)
     }
 
+    /// Spawn an actor co-located on the same shard as `near_actor_id`.
+    ///
+    /// Runtime primitive for locality-aware placement (borrow P5): a child
+    /// that communicates heavily with `near_actor_id` is placed on that
+    /// actor's shard, turning cross-shard traffic into same-shard
+    /// (thread-confined) mailbox traffic. In a single-shard runtime this is
+    /// exactly [`Runtime::spawn_actor`].
+    ///
+    /// Ids are drawn from the global counter until one maps to the target
+    /// shard, so the `actor_id % shard_count` ownership invariant is
+    /// preserved; skipped ids are never assigned. Co-location is a *hint*:
+    /// it changes placement, not correctness.
+    pub fn spawn_actor_near(
+        &mut self,
+        near_actor_id: u64,
+        init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
+    ) -> u64 {
+        let id = if self.shard_count > 1 {
+            let target_shard = (near_actor_id % self.shard_count as u64) as u16;
+            loop {
+                let candidate = fresh_actor_id();
+                if (candidate % self.shard_count as u64) as u16 == target_shard {
+                    break candidate;
+                }
+            }
+        } else {
+            fresh_actor_id()
+        };
+        spawn::spawn_actor_with_id(self, id, init, HashMap::new(), false, None)
+    }
+
     pub fn spawn_persistent_actor(
         &mut self,
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
