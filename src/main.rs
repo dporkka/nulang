@@ -451,7 +451,7 @@ fn main() {
                     .filter(|k| levenshtein_distance(arg, k) <= 3);
                 eprint!("Error: Unknown option: {}", arg);
                 if let Some(sug) = suggestion {
-                    eprint!(". Did you mean '{}'?", sug);
+                    eprint!(". Did you mean '{}'?), sug);
                 }
                 eprintln!();
                 eprintln!("Run with --help for usage information.");
@@ -1102,6 +1102,7 @@ fn run_node_cmd(args: &[String]) -> NuResult<()> {
         runtime.cluster_config = nulang::runtime::ClusterConfig {
             split_brain: nulang::runtime::SplitBrainConfig::StaticQuorum { expected_nodes: n },
             probe_interval: std::time::Duration::from_secs(5),
+            ..Default::default()
         };
     }
 
