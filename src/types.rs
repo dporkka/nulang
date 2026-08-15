@@ -923,6 +923,12 @@ impl SourceMap {
     pub fn file_path(&self) -> Option<&str> {
         self.file_path.as_deref()
     }
+
+    /// Return the full source text retained by this map. Used by the rich
+    /// diagnostic renderer (`crate::diagnostic`) to build source snippets.
+    pub fn source_text(&self) -> &str {
+        &self.source
+    }
 }
 /// Install a SourceMap for the current thread, consuming the source string
 /// to build line-start offsets.  Call before any Span display.
@@ -935,6 +941,16 @@ pub fn source_map_file() -> Option<String> {
         slot.borrow()
             .as_ref()
             .and_then(|sm| sm.file_path().map(|s| s.to_string()))
+    })
+}
+
+/// Return the full source text from the thread-local SourceMap, if one is
+/// installed. Used by the rich diagnostic renderer to build source snippets.
+pub fn current_source_text() -> Option<String> {
+    SOURCE_MAP.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|sm| sm.source_text().to_string())
     })
 }
 
@@ -1442,7 +1458,7 @@ impl NuError {
             kind: &str,
             msg: &str,
             span: &Span,
-            code: Option<ErrorCode>,
+            code: Option<&str>,
             suggestion: Option<&str>,
             extra_lines: &[String],
         ) {
@@ -1508,13 +1524,11 @@ impl NuError {
             line: usize,
             col: usize,
             file: &str,
-            code: Option<ErrorCode>,
+            code: Option<&str>,
         ) {
-            let code_str = code
-                .map(|c| format!("[{}] ", c.code_str()))
-                .unwrap_or_default();
+            let code_str = code.map(|c| format!("[{c}]")).unwrap_or_default();
             out.push_str(&format!(
-                "{RED}error{RESET}{BOLD}: {code_str}{kind}{RESET}\n"
+                "{RED}error{code_str}{RESET}{BOLD}: {kind}{RESET}\n"
             ));
             if file.is_empty() {
                 out.push_str(&format!("  {BLUE}--> {RESET}{line}:{col}\n"));
@@ -1524,7 +1538,7 @@ impl NuError {
             out.push_str(&format!(" {DIM}{line:>4} {CYAN}|{RESET}\n"));
         }
 
-        let code = self.error_code();
+        let code = self.stable_code();
 
         match self {
             NuError::LexError { msg, span } => {
