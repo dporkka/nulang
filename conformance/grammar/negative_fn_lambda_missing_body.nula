@@ -1,0 +1,2 @@
+// Negative case: neg_fn_lambda_missing_body — must be rejected by the parser.
+fn f() { let g = fn() }

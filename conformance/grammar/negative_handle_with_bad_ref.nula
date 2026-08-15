@@ -1,0 +1,2 @@
+// Negative case: neg_handle_with_bad_ref — must be rejected by the parser.
+fn f() { handle 1 with 123 }

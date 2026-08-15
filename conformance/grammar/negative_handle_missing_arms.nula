@@ -1,0 +1,2 @@
+// Negative case: neg_handle_missing_arms — must be rejected by the parser.
+fn f() { handle { 1 } }

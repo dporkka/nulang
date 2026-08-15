@@ -1,0 +1,2 @@
+// Negative case: neg_fn_param_missing_type — must be rejected by the parser.
+fn f(x: ) {}
