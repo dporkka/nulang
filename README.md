@@ -7,6 +7,7 @@
 </p>
 <p align="center">
   <a href="https://nulang.org">Website</a> •
+  <a href="playground/">Playground</a> •
   <a href="https://nulang.cloud">Nulang Cloud</a> •
   <a href="https://github.com/dporkka/nulang">GitHub</a>
 </p>
@@ -36,7 +37,8 @@ location-transparent distribution, and durable persistence.
 ## Installation
 
 ### Pre-built binaries
-Download the latest release from [GitHub Releases](https://github.com/dporkka/nulang/releases).
+Download the latest release from [GitHub Releases](https://github.com/dporkka/nulang/releases)
+*(prebuilt binaries coming with the first tagged release — for now build from source below)*.
 - **Linux (x86_64)**: `nulang-linux-x86_64.tar.gz`
 - **Linux (aarch64)**: `nulang-linux-aarch64.tar.gz`
 - **macOS (x86_64)**: `nulang-macos-x86_64.tar.gz`
@@ -54,12 +56,12 @@ git clone https://github.com/dporkka/nulang.git
 cd nulang
 cargo build --release
 ```
-Requires Rust 1.93+, Linux or macOS.
+Requires Rust 1.95.0 (pinned by `rust-toolchain.toml`), Linux or macOS. Windows is not supported yet — use [WSL](https://learn.microsoft.com/windows/wsl/) and build inside a Linux environment.
 
 
 ## Quick Start
 
-**Prerequisites:** Rust 1.93+, Linux or macOS (Windows planned).
+**Prerequisites:** Rust 1.95.0, Linux or macOS. Windows is unsupported for now — Windows users should build under WSL.
 
 ```bash
 git clone https://github.com/dporkka/nulang.git
@@ -86,6 +88,10 @@ perform IO.print("Hello, " + name + "!")
 > Run `nulang examples/01_hello.nula`. See [`examples/`](examples/) for
 > 17 verified programs covering actors, effects, pattern matching, records,
 > loops, arrays, HTTP, JSON, and more.
+>
+> No install? Try the [`playground/`](playground/) — run it locally with
+> `python3 playground/server.py` (a hosted version at nulang.org/playground
+> is coming soon).
 
 ---
 
@@ -122,6 +128,7 @@ perform IO.print("Hello, " + name + "!")
 | [`CHANGELOG.md`](CHANGELOG.md) | Changelog organized by stability tier (Frozen / Stable / Experimental) |
 | [`GOVERNANCE.md`](GOVERNANCE.md) | Stability tiers, RFC process, and language versioning |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Implementation architecture and module map |
+| [`editors/vscode/`](editors/vscode/) | VS Code extension (syntax highlighting + LSP) — build a `.vsix` or install manually |
 | [`RFC/`](RFC/) | RFC proposals (format stability, frozen core, deprecation cycles, roadmap) |
 
 ---
@@ -159,6 +166,11 @@ Nulang is **alpha software**. The language version is `1.0.0-frozen`
 | **Stable** | HM type system, effect rows, capability lattice, actor surface. Breaking changes require an RFC and a deprecation cycle. |
 | **Experimental** | Everything else — feature flags (`wasm-backend`, `python`, `sqlite`, `lsp`, `ai-runtime`), distribution (multi-node `send`/`ask`, CRDTs — Rust-level only so far), and items marked Experimental in [`CHANGELOG.md`](CHANGELOG.md). |
 
+> **Pre-1.0 disclaimer:** Nulang does not have external users yet. The tier
+> guarantees above are the maintainer's stated policy and intent, but **expect
+> breaking changes before v1.0** — any guarantee may be revised until the
+> language sees real-world use.
+
 1550+ tests pass with `cargo test`. Add `--features wasm-backend` for the
 WASM backend test suite.
 
@@ -186,6 +198,14 @@ docker run --rm nulang --eval 'perform IO.print("Hello from Docker!")'
 
 The image is ~50 MB and contains only the `nulang` binary and its runtime
 dependencies.
+
+## Community
+
+- **Questions & discussion:** [GitHub Discussions](https://github.com/dporkka/nulang/discussions)
+- **Bugs & feature requests:** [Issue tracker](https://github.com/dporkka/nulang/issues/new/choose)
+- **Contributing:** see [CONTRIBUTING.md](CONTRIBUTING.md) and our [Code of Conduct](CODE_OF_CONDUCT.md)
+
+---
 
 ## License
 

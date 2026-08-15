@@ -1,0 +1,45 @@
+---
+title: Editor Setup
+description: VS Code extension and language server setup for Nulang.
+---
+
+## VS Code
+
+Nulang ships a VS Code extension with syntax highlighting, diagnostics,
+hover, go-to-definition, completion, rename, and formatting — powered by the
+built-in language server (`nulang --lsp`).
+
+### Marketplace
+
+Search for **"Nulang"** in the Extensions view *(coming soon — pending
+marketplace publication)*.
+
+### From source (.vsix)
+
+The extension lives in the repo at `editors/vscode/`:
+
+```bash
+git clone https://github.com/dporkka/nulang.git
+cd nulang/editors/vscode
+npm install
+npx @vscode/vsce package
+code --install-extension nulang-0.1.0.vsix
+```
+
+### Manual install
+
+```bash
+cp -r editors/vscode ~/.vscode/extensions/nulang/
+```
+
+### Requirements
+
+The `nulang` binary must be on your `PATH`, or point `NULANG_PATH` at it.
+Useful commands (Command Palette → "Nulang: ..."): Compile, Run, Type Check,
+and Restart Language Server.
+
+## Other editors
+
+Any editor with LSP client support can talk to `nulang --lsp` over stdio
+(Neovim `nvim-lspconfig`, Emacs `lsp-mode`/`eglot`, Helix, Zed). Point your
+LSP client at `nulang --lsp` for `.nula` files.

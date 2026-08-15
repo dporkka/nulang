@@ -51,3 +51,7 @@ src/jit/mir_compiler.rs
 
 # Session-local build cache (CARGO_TARGET_DIR override when /tmp is tight)
 /.build-target/
+
+# Agent tooling state
+.agents/
+.devin/

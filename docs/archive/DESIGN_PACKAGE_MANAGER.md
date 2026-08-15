@@ -67,7 +67,7 @@ edition = "2024"
 authors = ["Alice <alice@example.com>", "Bob <bob@example.com>"]
 license = "Apache-2.0"
 description = "A high-performance HTTP client for Nulang"
-repository = "https://github.com/nulang/http-client"
+repository = "https://github.com/dporkka/http-client"
 documentation = "https://docs.nulang.org/http-client"
 readme = "README.md"
 keywords = ["http", "client", "networking"]
@@ -258,15 +258,15 @@ The **Registry** is the central package index at `registry.nulang.org`. It store
 |  +------------------+  +------------------+  +-------------------------+  |
 |  |   Registry       |  |   Workspace      |  |   Quality Assurance     |  |
 |  |   Client         |  |   Manager        |  |                         |  |
-|  |                  |  |                  |  |  - Test runner           |  |
-|  |  - HTTP client   |  |  - Member        |  |  - Benchmark runner      |  |
-|  |  - Authentication|  |    discovery     |  |  - Linter                |  |
-|  |  - Package       |  |  - Inter-package |  |  - Formatter             |  |
-|  |    download      |  |    dependency    |  |  - Documentation         |  |
-|  |  - Package       |  |    resolution    |  |    generator             |  |
-|  |    upload        |  |  - Shared lock   |  |  - Type checker          |  |
-|  |  - Search API    |  |    file          |  |  - Security audit        |  |
-|  +------------------+  +------------------+  +-------------------------+  |
+|  |                  |  |                  |  |                         |  |
+|  |  - HTTP client   |  |  - Member        |  |  - Test runner           |  |
+|  |  - Authentication|  |    discovery     |  |  - Benchmark runner      |  |
+|  |  - Package       |  |  - Inter-package |  |  - Linter                |  |
+|  |    download      |  |    dependency    |  |  - Formatter             |  |
+|  |  - Package       |  |    resolution    |  |  - Documentation         |  |
+|  |    upload        |  |  - Shared lock   |  |    generator             |  |
+|  |  - Search API    |  |    file          |  |  - Type checker          |  |
+|  +------------------+  +------------------+  |  - Security audit        |  |
 |                                                                            |
 +============================================================================+
 ```
@@ -491,10 +491,10 @@ $ nula add test-framework --dev
 $ nula add protoc --build
 
 # Add from git repository
-$ nula add ai-sdk --git https://github.com/nulang/ai-sdk
-$ nula add ai-sdk --git https://github.com/nulang/ai-sdk --branch main
-$ nula add ai-sdk --git https://github.com/nulang/ai-sdk --tag v1.0.0
-$ nula add ai-sdk --git https://github.com/nulang/ai-sdk --rev abc1234
+$ nula add ai-sdk --git https://github.com/dporkka/ai-sdk
+$ nula add ai-sdk --git https://github.com/dporkka/ai-sdk --branch main
+$ nula add ai-sdk --git https://github.com/dporkka/ai-sdk --tag v1.0.0
+$ nula add ai-sdk --git https://github.com/dporkka/ai-sdk --rev abc1234
 
 # Add from local path
 $ nula add database --path ../database
@@ -796,7 +796,7 @@ async-runtime = {
 
 # Git dependency
 database = { 
-  git = "https://github.com/nulang/database",
+  git = "https://github.com/dporkka/database",
   branch = "main",
   # or: tag = "v1.0.0"
   # or: rev = "abc1234"

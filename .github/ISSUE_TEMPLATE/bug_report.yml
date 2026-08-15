@@ -1,0 +1,45 @@
+name: Bug Report
+description: Report a bug in the Nulang compiler, runtime, or tooling
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a bug!
+  - type: input
+    id: version
+    attributes:
+      label: Nulang version
+      description: Output of `nulang --version`, or the commit you built from.
+      placeholder: e.g. 1.0.0-frozen (built from source @ abc1234)
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Windows is currently unsupported — please reproduce under WSL.
+      placeholder: e.g. Ubuntu 24.04, macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest `.nula` program or command that triggers the bug.
+      render: nulang
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: Compiler errors, stack traces, or runtime output.
+      render: text
