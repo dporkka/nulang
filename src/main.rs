@@ -546,19 +546,21 @@ fn main() {
     }
     if let Some(c) = &opts.explain {
         use nulang::types::ErrorCode;
+        // Accept both the legacy flat codes (E001..E012) and the stable
+        // category-scoped codes (E01xx..E05xx; see docs/ERROR_CODES.md).
         let e = match c.to_uppercase().as_str() {
-            "E001" => ErrorCode::E001UnclosedDelimiter,
-            "E002" => ErrorCode::E002UnboundVariable,
-            "E003" => ErrorCode::E003TypeMismatch,
-            "E004" => ErrorCode::E004MissingEffect,
-            "E005" => ErrorCode::E005SendabilityViolation,
-            "E006" => ErrorCode::E006LinearUseAfterConsume,
-            "E007" => ErrorCode::E007InfiniteType,
-            "E008" => ErrorCode::E008FieldNotFound,
-            "E009" => ErrorCode::E009WrongArity,
-            "E010" => ErrorCode::E010MatchNoArms,
-            "E011" => ErrorCode::E011StepLimitExceeded,
-            "E012" => ErrorCode::E012UnhandledEffect,
+            "E001" | "E0103" => ErrorCode::E001UnclosedDelimiter,
+            "E002" | "E0202" => ErrorCode::E002UnboundVariable,
+            "E003" | "E0201" => ErrorCode::E003TypeMismatch,
+            "E004" | "E0301" => ErrorCode::E004MissingEffect,
+            "E005" | "E0401" => ErrorCode::E005SendabilityViolation,
+            "E006" | "E0402" => ErrorCode::E006LinearUseAfterConsume,
+            "E007" | "E0203" => ErrorCode::E007InfiniteType,
+            "E008" | "E0204" => ErrorCode::E008FieldNotFound,
+            "E009" | "E0205" => ErrorCode::E009WrongArity,
+            "E010" | "E0206" => ErrorCode::E010MatchNoArms,
+            "E011" | "E0503" => ErrorCode::E011StepLimitExceeded,
+            "E012" | "E0302" => ErrorCode::E012UnhandledEffect,
             _ => {
                 eprintln!("Unknown: {}", c);
                 std::process::exit(1);
@@ -1128,8 +1130,18 @@ fn run_node_cmd(args: &[String]) -> NuResult<()> {
 }
 
 fn print_error(err: &NuError, use_color: bool) {
+    // Prefer the ariadne-based renderer (source snippet with carets/labels,
+    // notes, and a stable `Error[Exxxx]` code). It returns `None` when no
+    // thread-local SourceMap is installed (e.g. errors raised before lexing
+    // or in synthetic contexts) — fall back to the hand-rolled rich format.
+    // Non-tty/CI output stays plain `Display` so tooling (and the
+    // conformance suite) can match on stable `Error: ...` prefixes.
     if use_color {
-        eprint!("{}", err.format_rich());
+        if let Some(rendered) = nulang::diagnostic::render(err, true) {
+            eprint!("{rendered}");
+        } else {
+            eprint!("{}", err.format_rich());
+        }
     } else {
         eprintln!("Error: {}", err);
     }
