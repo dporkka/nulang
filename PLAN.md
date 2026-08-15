@@ -1435,15 +1435,19 @@ D7c (RFC 0014).
     ✅ **landed 2026-08-08 (`492cd72`, causal-stability watermark).**
     `gc_stable_tombstones` (`crdt_manager.rs:789`); Group-C dependency
     satisfied by D6's membership bookkeeping.
-12. **Wire `state crdt` into real `.nula`-level syntax.** ⚠️ **partially
-    landed 2026-08-04 (`0ab2c42`).** Landed: concrete-CRDT-type selector in
-    `state crdt` declarations (`parser.rs:1752-1809`, `CrdtType::from_keyword`:
-    gcounter/pncounter/gset/orset/aworset/lwwregister/mvregister/rga),
-    `CrdtManager::register_actor_field` + merge-on-sync on sync rounds.
-    **Still open**: a `Crdt.*` effect module (no `Crdt.` hits in
-    `src/stdlib.rs`), enforced per-type operation sets (`set_state_field`
-    accepts arbitrary assignment to a crdt field), and `.nula`-level
-    conformance cases (zero `crdt_*` cases in `conformance/behavior/`).
+12. **Wire `state crdt` into real `.nula`-level syntax.** ✅ **landed
+    2026-08-04 (selector) + 2026-08-15 (effect module, enforcement,
+    conformance).** The concrete-CRDT-type selector
+    (`parser.rs:1752-1809`, `CrdtType::from_keyword`), the `Crdt.*` effect
+    module (`perform Crdt.increment/decrement/add/remove/set/read`, stdlib
+    registry + `perform_crdt_builtin` in `runtime/mod.rs`), per-type
+    operation-set enforcement (`CrdtManager::apply_field_op` rejects
+    out-of-set ops; raw `self.field = expr` assignment to a crdt field is
+    ignored in both callback `set_state_field` impls), and `.nula`-level
+    conformance cases (`conformance/behavior/crdt_gcounter.nula`,
+    `crdt_pncounter.nula`, `crdt_gcounter_opset.nula`). The standalone
+    runtime now initializes `crdt_manager` eagerly, so `state crdt` fields
+    register and `Crdt.*` works without distribution enabled.
 13. **Op-based CRDT replication (CmRDT).** ✅ **landed (Phase 3 bullet 6
     satisfied by reference).** `Packet::CrdtOp` (`network.rs:595`),
     `CrdtManager::apply_op` (`crdt_manager.rs:511`).

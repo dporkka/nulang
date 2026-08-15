@@ -382,6 +382,15 @@ pub fn merge_payload(entry: &mut CrdtEntry, payload: &[u8]) -> bool {
     }
 }
 
+/// Materialized value of a CRDT field after a [`CrdtManager::apply_field_op`],
+/// before it is interned into an actor heap as a `Value`. `Str` results
+/// (register reads/writes) are interned by the caller into the actor's heap;
+/// everything else is a plain tagged `Int`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CrdtValue {
+    Int(i64),
+    Str(String),
+}
 impl CrdtManager {
     pub fn new(node_id: u64) -> Self {
         CrdtManager {
@@ -769,6 +778,111 @@ impl CrdtManager {
         self.get_field_id(actor_id, field_name)
             .and_then(|id| self.entries.get_mut(&id))
             .and_then(|e| T::try_from_entry(e))
+    }
+
+    /// Apply a `Crdt.*` effect operation to a registered actor field.
+    ///
+    /// Returns `Some(value)` carrying the field's materialized value after a
+    /// mutation (or its current value for `read`), and `None` when the field
+    /// is unknown, the op is not recognized, or the op is not in the field's
+    /// CRDT type's operation set (e.g. `decrement` on a `gcounter`). The
+    /// per-type operation sets are:
+    ///
+    /// | CrdtType       | operations                                   |
+    /// |----------------|----------------------------------------------|
+    /// | `gcounter`     | `increment`, `read`                          |
+    /// | `pncounter`    | `increment`, `decrement`, `read`             |
+    /// | `gset`         | `add`, `read`                                |
+    /// | `orset`        | `add`, `remove`, `read`                      |
+    /// | `aworset`      | `add`, `remove`, `read`                      |
+    /// | `lwwregister`  | `set`, `read`                                |
+    /// | `mvregister`   | `set`, `read`                                |
+    /// | `rga`          | `read` (insert/delete not yet surfaced)      |
+    pub fn apply_field_op(
+        &mut self,
+        actor_id: u64,
+        field_name: &str,
+        op: &str,
+        arg: Option<&str>,
+    ) -> Option<CrdtValue> {
+        let id = self.get_field_id(actor_id, field_name)?;
+        match op {
+            "increment" => match self.entries.get_mut(&id)? {
+                CrdtEntry::GCounter(c) => {
+                    c.increment();
+                    Some(CrdtValue::Int(c.value() as i64))
+                }
+                CrdtEntry::PNCounter(c) => {
+                    c.increment();
+                    Some(CrdtValue::Int(c.value() as i64))
+                }
+                _ => None,
+            },
+            "decrement" => match self.entries.get_mut(&id)? {
+                CrdtEntry::PNCounter(c) => {
+                    c.decrement();
+                    Some(CrdtValue::Int(c.value() as i64))
+                }
+                _ => None,
+            },
+            "add" => {
+                let item = arg?.to_string();
+                match self.entries.get_mut(&id)? {
+                    CrdtEntry::GSet(s) => {
+                        s.insert(item);
+                        Some(CrdtValue::Int(s.len() as i64))
+                    }
+                    CrdtEntry::ORSet(s) => {
+                        s.add(item);
+                        Some(CrdtValue::Int(s.len() as i64))
+                    }
+                    CrdtEntry::AWORSet(s) => {
+                        s.add(item);
+                        Some(CrdtValue::Int(s.len() as i64))
+                    }
+                    _ => None,
+                }
+            }
+            "remove" => {
+                let item = arg?.to_string();
+                match self.entries.get_mut(&id)? {
+                    CrdtEntry::ORSet(s) => {
+                        s.remove(&item);
+                        Some(CrdtValue::Int(s.len() as i64))
+                    }
+                    CrdtEntry::AWORSet(s) => {
+                        s.remove(&item);
+                        Some(CrdtValue::Int(s.len() as i64))
+                    }
+                    _ => None,
+                }
+            }
+            "set" => {
+                let value = arg?.to_string();
+                match self.entries.get_mut(&id)? {
+                    CrdtEntry::LWWRegister(r) => {
+                        r.write(value.clone());
+                        Some(CrdtValue::Str(value))
+                    }
+                    CrdtEntry::MVRegister(r) => {
+                        r.write(value);
+                        Some(CrdtValue::Int(r.read().len() as i64))
+                    }
+                    _ => None,
+                }
+            }
+            "read" => match self.entries.get(&id)? {
+                CrdtEntry::GCounter(c) => Some(CrdtValue::Int(c.value() as i64)),
+                CrdtEntry::PNCounter(c) => Some(CrdtValue::Int(c.value() as i64)),
+                CrdtEntry::GSet(s) => Some(CrdtValue::Int(s.len() as i64)),
+                CrdtEntry::ORSet(s) => Some(CrdtValue::Int(s.len() as i64)),
+                CrdtEntry::AWORSet(s) => Some(CrdtValue::Int(s.len() as i64)),
+                CrdtEntry::LWWRegister(r) => Some(CrdtValue::Str(r.read().clone())),
+                CrdtEntry::MVRegister(r) => Some(CrdtValue::Int(r.read().len() as i64)),
+                CrdtEntry::RGA(r) => Some(CrdtValue::Int(r.len() as i64)),
+            },
+            _ => None,
+        }
     }
 
     /// Garbage-collect tombstones that are causally stable.
@@ -1508,5 +1622,77 @@ mod tests {
             ids_b.iter().all(|id| id.0 >> 32 == 2),
             "node 2 ids must carry node id in the high bits"
         );
+    }
+
+    #[test]
+    fn test_apply_field_op_counter_operation_sets() {
+        let mut mgr = CrdtManager::new(1);
+        mgr.register_actor_field(10, "count", CrdtType::GCounter, crate::vm::Value::int(0));
+
+        assert_eq!(
+            mgr.apply_field_op(10, "count", "increment", None),
+            Some(CrdtValue::Int(1))
+        );
+        assert_eq!(
+            mgr.apply_field_op(10, "count", "increment", None),
+            Some(CrdtValue::Int(2))
+        );
+        assert_eq!(
+            mgr.apply_field_op(10, "count", "read", None),
+            Some(CrdtValue::Int(2))
+        );
+        // decrement/add/remove/set are outside the gcounter operation set.
+        assert_eq!(mgr.apply_field_op(10, "count", "decrement", None), None);
+        assert_eq!(mgr.apply_field_op(10, "count", "add", Some("x")), None);
+        assert_eq!(mgr.apply_field_op(10, "count", "set", Some("x")), None);
+        // Unknown field and unknown op.
+        assert_eq!(mgr.apply_field_op(10, "missing", "read", None), None);
+        assert_eq!(mgr.apply_field_op(10, "count", "bogus", None), None);
+    }
+
+    #[test]
+    fn test_apply_field_op_pncounter_and_sets() {
+        let mut mgr = CrdtManager::new(1);
+        mgr.register_actor_field(1, "pn", CrdtType::PNCounter, crate::vm::Value::int(0));
+        mgr.register_actor_field(2, "gs", CrdtType::GSet, crate::vm::Value::nil());
+        mgr.register_actor_field(3, "ors", CrdtType::ORSet, crate::vm::Value::nil());
+
+        assert_eq!(mgr.apply_field_op(1, "pn", "increment", None), Some(CrdtValue::Int(1)));
+        assert_eq!(mgr.apply_field_op(1, "pn", "decrement", None), Some(CrdtValue::Int(0)));
+        assert_eq!(mgr.apply_field_op(1, "pn", "decrement", None), Some(CrdtValue::Int(-1)));
+
+        assert_eq!(mgr.apply_field_op(2, "gs", "add", Some("a")), Some(CrdtValue::Int(1)));
+        assert_eq!(mgr.apply_field_op(2, "gs", "add", Some("b")), Some(CrdtValue::Int(2)));
+        // remove is outside the gset operation set.
+        assert_eq!(mgr.apply_field_op(2, "gs", "remove", Some("a")), None);
+
+        assert_eq!(mgr.apply_field_op(3, "ors", "add", Some("a")), Some(CrdtValue::Int(1)));
+        assert_eq!(mgr.apply_field_op(3, "ors", "add", Some("b")), Some(CrdtValue::Int(2)));
+        assert_eq!(mgr.apply_field_op(3, "ors", "remove", Some("a")), Some(CrdtValue::Int(1)));
+        // add without an item argument is rejected.
+        assert_eq!(mgr.apply_field_op(3, "ors", "add", None), None);
+    }
+
+    #[test]
+    fn test_apply_field_op_registers() {
+        let mut mgr = CrdtManager::new(1);
+        mgr.register_actor_field(1, "lww", CrdtType::LWWRegister, crate::vm::Value::nil());
+        mgr.register_actor_field(2, "mv", CrdtType::MVRegister, crate::vm::Value::nil());
+
+        assert_eq!(
+            mgr.apply_field_op(1, "lww", "set", Some("hello")),
+            Some(CrdtValue::Str("hello".to_string()))
+        );
+        assert_eq!(
+            mgr.apply_field_op(1, "lww", "read", None),
+            Some(CrdtValue::Str("hello".to_string()))
+        );
+        // increment is outside the lwwregister operation set.
+        assert_eq!(mgr.apply_field_op(1, "lww", "increment", None), None);
+
+        assert_eq!(mgr.apply_field_op(2, "mv", "set", Some("v")), Some(CrdtValue::Int(1)));
+        assert_eq!(mgr.apply_field_op(2, "mv", "read", None), Some(CrdtValue::Int(1)));
+        // decrement is outside the mvregister operation set.
+        assert_eq!(mgr.apply_field_op(2, "mv", "decrement", None), None);
     }
 }

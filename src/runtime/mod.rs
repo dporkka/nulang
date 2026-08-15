@@ -488,7 +488,11 @@ impl Runtime {
             remote_links: supervision::RemoteLinkRegistry::new(),
             remote_monitors: supervision::RemoteMonitorRegistry::new(),
             migrated_actors: HashMap::new(),
-            crdt_manager: None,
+            // Standalone runtimes use node id 0; `enable_distribution` swaps
+            // this for a real node-id manager. Initialized eagerly so
+            // `state crdt` fields register and `Crdt.*` ops work without
+            // distribution enabled.
+            crdt_manager: Some(CrdtManager::new(0)),
             virtual_clock: None,
             metrics: None,
             #[cfg(feature = "python")]
@@ -4743,11 +4747,22 @@ impl Runtime {
 
     /// Resolve an actor type by name to the `(module, behavior_idx)` pair
 
-    /// Dispatch a built-in `CRDT.*` effect performed from bytecode.
-    /// Returns `None` for unknown op names so the caller can fall through
-    /// to other built-in handlers.
+    /// Dispatch a built-in `Crdt.*` effect performed from bytecode.
+    ///
+    /// Each op targets a CRDT-backed field on the *current* actor and is
+    /// validated against that field's per-type operation set by
+    /// [`CrdtManager::apply_field_op`] — an op outside the set (e.g.
+    /// `decrement` on a `gcounter`) returns `nil` and mutates nothing.
+    /// Successful mutations materialize the field's new value back into
+    /// `state_data` so `self.field` reads stay consistent with the
+    /// replicated CRDT entry.
+    ///
+    /// Returns `None` only for an unrecognized op name, so the caller can
+    /// fall through to other built-in handlers; every recognized op returns
+    /// `Some(...)` (`nil` encodes a per-type rejection or missing field).
     fn perform_crdt_builtin(
         &mut self,
+        actor_id: Option<u64>,
         op_name: Option<&str>,
         constants: &[crate::bytecode::Constant],
         regs: &[Value],
@@ -4759,68 +4774,39 @@ impl Runtime {
                 _ => None,
             }
         };
-        let int_arg = |idx: usize| -> Option<i64> { regs.get(idx)?.as_int() };
-        let actor_id = self.current_actor?;
-        let _actor = self.actors.get_mut(&actor_id)?;
-        let Some(manager) = &mut self.crdt_manager else {
-            return Some(Value::nil());
+        let actor_id = actor_id?;
+        let op = op_name?;
+        let field = string_arg(0)?;
+        let arg = string_arg(1);
+
+        // Apply the op against the CrdtManager entry; the borrow is scoped
+        // so the actor can be mutated afterwards.
+        let outcome = {
+            let Some(manager) = self.crdt_manager.as_mut() else {
+                return Some(Value::nil());
+            };
+            manager.apply_field_op(actor_id, &field, op, arg.as_deref())?
         };
-        match op_name {
-            Some("merge") => {
-                let target_actor = int_arg(0)? as u64;
-                let field_name = string_arg(1)?;
-                let other_crdt_id = int_arg(2)? as u64;
-                let source_id = manager.get_field_id(target_actor, &field_name)?;
-                let other_id = CrdtId(other_crdt_id);
-                let other_payload = manager
-                    .entries
-                    .get(&other_id)
-                    .map(|e| e.payload_bytes().to_vec());
-                if let Some(other_payload) = other_payload {
-                    if let Some(entry) = manager.entries.get_mut(&source_id) {
-                        if merge_payload(entry, &other_payload) {
-                            Some(Value::unit())
-                        } else {
-                            Some(Value::nil())
-                        }
-                    } else {
-                        Some(Value::nil())
-                    }
-                } else {
-                    Some(Value::nil())
-                }
+
+        // Materialize the value: intern register strings into the actor heap.
+        let value = match outcome {
+            crate::runtime::crdt_manager::CrdtValue::Int(i) => Value::int(i),
+            crate::runtime::crdt_manager::CrdtValue::Str(s) => {
+                self.actors.get_mut(&actor_id)?.allocate_string(&s)
             }
-            Some("read") => {
-                // CRDT.read(actor_id, field_name)
-                let target_actor = int_arg(0)? as u64;
-                let field_name = string_arg(0)?;
-                if let Some(id) = manager.get_field_id(target_actor, &field_name) {
-                    if let Some(entry) = manager.entries.get(&id) {
-                        Some(Value::int(entry.payload_bytes().len() as i64)) // placeholder
-                    } else {
-                        Some(Value::nil())
-                    }
-                } else {
-                    Some(Value::nil())
-                }
-            }
-            Some("write") => {
-                // CRDT.write(actor_id, field_name, value)
-                let target_actor = int_arg(0)? as u64;
-                let field_name = string_arg(0)?;
-                let _value = regs.get(2)?;
-                if let Some(id) = manager.get_field_id(target_actor, &field_name) {
-                    if let Some(_entry) = manager.entries.get_mut(&id) {
-                        Some(Value::unit())
-                    } else {
-                        Some(Value::nil())
-                    }
-                } else {
-                    Some(Value::nil())
-                }
-            }
-            _ => None,
+        };
+
+        // Push the materialized value back so `self.field` reads are
+        // consistent with the replicated entry.
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.set_state_field(field, value);
         }
+
+        Some(if op == "read" {
+            value
+        } else {
+            Value::unit()
+        })
     }
 
     /// Resolve an actor type by name to the `(module, behavior_idx)` pair

@@ -2275,14 +2275,35 @@ in the same place `bytecode_module`/`bytecode_offsets` are restored.
 
 ## 9.10 CRDT State
 
-**Implementation status (verified 2026-08-14):** the concrete-type selector
-landed — `state crdt <name>: <Type> = expr` accepts
-`gcounter | pncounter | gset | orset | aworset | lwwregister | mvregister
-| rga` (`CrdtType::from_keyword`, `src/parser.rs:1752-1809`) and crdt
-fields are registered with `CrdtManager::register_actor_field` with
-merge-on-sync on replication rounds. **Not yet implemented:** a `Crdt.*`
-effect module, enforced per-type operation sets (a `gcounter` field still
-accepts arbitrary assignment), and `.nula`-level conformance coverage.
+**Implementation status (verified 2026-08-15):** the concrete-type selector
+and the `Crdt.*` effect module are both landed. `state crdt <name>: <Type>
+= expr` accepts `gcounter | pncounter | gset | orset | aworset |
+lwwregister | mvregister | rga` (`CrdtType::from_keyword`,
+`src/parser.rs:1752-1809`); crdt fields register with
+`CrdtManager::register_actor_field` (eagerly — the standalone runtime
+initializes `crdt_manager`, so `state crdt` works without distribution) and
+merge through `CrdtManager` on replication rounds. The `Crdt.*` effect
+module (`perform Crdt.<op>("field", …)`) is the only mutation path, with
+per-type operation sets enforced by
+`CrdtManager::apply_field_op` (`src/runtime/crdt_manager.rs`):
+
+| `crdt` type    | operations                            |
+|----------------|---------------------------------------|
+| `gcounter`     | `increment`, `read`                   |
+| `pncounter`    | `increment`, `decrement`, `read`      |
+| `gset`         | `add`, `read`                         |
+| `orset`        | `add`, `remove`, `read`               |
+| `aworset`      | `add`, `remove`, `read`               |
+| `lwwregister`  | `set`, `read`                         |
+| `mvregister`   | `set`, `read`                         |
+| `rga`          | `read` (insert/delete not surfaced)   |
+
+An op outside a field's set (e.g. `decrement` on a `gcounter`) returns nil
+and mutates nothing; a raw `self.field = expr` assignment to a crdt field is
+ignored at runtime so it cannot orphan `state_data` from the replicated
+entry. `read` materializes the value back into `state_data`, so `self.field`
+reads stay consistent. `.nula`-level conformance coverage lives in
+`conformance/behavior/crdt_*.nula`.
 ---
 
 # Chapter 10: Workflows
@@ -2700,30 +2721,31 @@ mean "planned."
 
 ## 12.5 CRDT Replication
 
-**Implementation status (verified 2026-08-14):** the delta-sync protocol is
-real (as before) and `.nula`-level `state crdt` fields now carry a
-concrete-type selector and merge through `CrdtManager` on sync (see
-§9.10). Still missing: a `Crdt.*` effect module, per-type operation-set
-enforcement, and `.nula` conformance cases. The example below is now
-conforming for the selector + merge halves:
+**Implementation status (verified 2026-08-15):** the delta-sync protocol is
+real (as before), `.nula`-level `state crdt` fields carry a concrete-type
+selector and merge through `CrdtManager` on sync, and the `Crdt.*` effect
+module + per-type operation-set enforcement + `.nula` conformance cases are
+now landed (see §9.10). The example below is conforming:
 
 ```nulang
 persistent actor GlobalCounter {
-  state crdt count: Int = 0
+  state crdt gcounter count: Int = 0
 
   behavior increment() {
-    self.count = self.count + 1
+    perform Crdt.increment("count")
   }
 
   behavior get() {
-    self.count
+    perform Crdt.read("count")
   }
 }
 ```
 
-The selector + merge halves are now conforming; the remaining gaps are the
-`Crdt.*` effect module, per-type operation-set enforcement, and `.nula`
-conformance coverage.
+Mutation flows through `Crdt.*` (which validates each op against the field's
+type and materializes the value back into `self.count`); a raw
+`self.count = expr` assignment on a crdt field is ignored. The prior
+`self.count = self.count + 1` example no longer conforms — that form is
+rejected as an out-of-set mutation.
 
 ## 12.6 Fault Tolerance
 

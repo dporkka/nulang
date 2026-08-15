@@ -1,0 +1,14 @@
+actor Counter {
+    state crdt gcounter count = 0
+    behavior inc() { perform Crdt.increment("count") }
+    behavior dec() { perform Crdt.decrement("count") }
+    behavior get() { perform IO.print(perform Crdt.read("count")) }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        send c inc()
+        send c dec()
+        send c get()
+        unit
+    }
+}

@@ -78,6 +78,16 @@ two major versions.*
   `network.rs`). `Packet::CrdtOp` ships individual `CrdtOp`s alongside
   `CrdtDeltaSync` (lowest-bandwidth sync path); `CrdtManager::apply_op`
   merges inbound ops. Commit `f97b28d` (2026-08-04).
+- **`Crdt.*` effect module + per-type operation-set enforcement** (Stable,
+  `src/runtime/crdt_manager.rs`, `src/runtime/mod.rs`, `src/stdlib.rs`).
+  `perform Crdt.increment/decrement/add/remove/set/read` is the `.nula`-level
+  mutation path for `state crdt` fields, validated per type by
+  `CrdtManager::apply_field_op` (e.g. `decrement` on a `gcounter` is a
+  nil no-op); a raw `self.field = expr` assignment to a crdt field is
+  ignored so it cannot orphan `state_data` from the replicated entry.
+  The standalone runtime initializes `crdt_manager` eagerly, so `state
+  crdt` fields register without distribution. Conformance cases in
+  `conformance/behavior/crdt_*.nula` (2026-08-15).
 - **Durable-store hardening** (Stable, `src/runtime/persistence.rs`).
   `LibsqlStore` applies `PRAGMA journal_mode=WAL` + operator-configurable
   `PRAGMA synchronous`; `crdt_snapshot` column round-trips save/load;
