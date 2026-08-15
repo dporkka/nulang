@@ -20,7 +20,7 @@ The specification is organized into five conceptual layers:
 
 3. **The Durable Execution Layer** (Chapter 9) extends the actor runtime with persistence. Persistent actors survive process restarts through automatic checkpointing, event journaling, deterministic replay, and snapshotting.
 
-4. **The Distributed Platform Layer** (Chapter 12) extends the durable actor runtime across machine boundaries. Virtual actors are transparently activated on any cluster node. Messages are routed across the network. CRDT state converges automatically. Faults are contained and recovered.
+4. **The Distributed Platform Layer** (Chapter 12) extends the durable actor runtime across machine boundaries. Virtual actors are transparently activated on any cluster node (**Planned**). Messages are routed across the network. CRDT state converges automatically (**Planned** — the CRDT replication machinery is implemented and tested at the Rust level, but `state crdt` fields are not yet wired to it and behave as `durable`; see §9.10 and §12.5). Faults are contained and recovered.
 
 5. **The AI Runtime Layer** (Chapter 11) provides language-integrated access to large language models, tool use, memory systems, and planning. AI capabilities are expressed through the same algebraic effect system used for IO and network effects, and are gated by the same capability-based security model.
 
@@ -48,7 +48,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Persistence for `persistent actor`s: durable snapshot/journal recovery and event-sourced replay, backed by in-memory, JSON-file, and SQLite stores.
 - Workflows: `workflow Name { step name { body } compensate { expr } ... }` with `parallel { ... }` step groups, saga compensation in reverse order, `perform Signal.wait("name")`, and `perform Timer.sleep("name", ms)`, all durable across restarts.
 - The AI runtime: `agent` declarations with model, system prompt, tools, episodic/semantic/procedural memory, and pricing; the generic `PerformAsync` opcode dispatches LLM, Pipeline, Supervisor, and Debate effects via `effect_op` strings (e.g. `"Inference.ask"`, `"Pipeline.run"`); agent behaviors (`ask`, `usage`, `store_fact`, `recall`); tool schemas generated from `@tool` functions; and the `Pipeline`, `Supervisor`, and `Debate` orchestration builtins. The pure AI types live in the `nulang-ai` workspace crate (`crates/nulang-ai/`); the core crate re-exports them behind the `ai-runtime` feature flag.
-- A register-based bytecode VM with a Cranelift JIT tiering path; an OTP-style supervision runtime (restart strategies and policies, links, monitors, exit signals); a distributed runtime (TCP wire protocol, gossip membership, location-transparent addressing, eight CRDT types); a REPL; and an LSP server.
+- A register-based bytecode VM with a Cranelift JIT tiering path; an OTP-style supervision runtime (restart strategies and policies, links, monitors, exit signals); a distributed runtime (TCP wire protocol, gossip membership, location-transparent addressing — Experimental; the eight CRDT types exist and are tested only at the Rust embedder level, with no `.nula`-level surface — see §9.10); a REPL; and an LSP server.
 - Typeclass declarations: `class`/`impl` with dictionary-passing transform for method calls on concrete types (Phase 4, Experimental). See `CHANGELOG.md`. **Verified 2026-08-02, constrained-generic crash fixed 2026-08-13:** literal-receiver dispatch works end-to-end (minimal declarations, two-concrete-type dispatch, missing-impl rejection, superclass syntax all confirmed against the real binary). The canonical constrained-generic case — a typeclass bound on a type-variable receiver (`fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }`) — used to type-check and then **crash at runtime** ("Not a function: nil"): the dictionary transform only resolved literal receivers, not type-variable ones. Fixed at the HIR level (`DictKind::Param`); the call site now passes the concrete dictionary argument (`infer_type_arg` → `_impl_Eq_Int`). Pinned by `conformance/behavior/typeclass_06_constrained_generic_runtime_crash.nula` (now passes, exit 0).
 - Generics (`fn f[T](...)`, `type T[A] = ...`, §7.8): basic generics — one or more independent type parameters, per-callsite type inference, return-only type parameters — work end-to-end. **Verified 2026-08-02, both gaps fixed 2026-08-13:** (1) recursive generic ADTs can now be constructed — §7.8's `type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))` type-checks its own constructor call, pinned for two independent recursive shapes (`generics_03` accept, `generics_07` accept); (2) declared type parameters are now skolemized inside the function body — a generic function that pins its type parameter to a concrete type via an internal literal (`fn fresh[T]() -> T { 0 - 1 }`) is rejected AT THE DEFINITION (rigid placeholder cannot unify with `Int`), not at a later mismatched call site (`generics_08` expects the type error, exit 4). See `conformance/behavior/generics_03/07/08_*.nula`.
 - Standard-library modules: `stdlib::core`, `stdlib::list`, `stdlib::string`, `stdlib::set`, `stdlib::map`, `stdlib::http` — resolved via `NULANG_STDLIB` or `src/stdlib/` (Experimental). See `CHANGELOG.md`.
@@ -65,7 +65,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Self-hosting bootstrap compiler: Stage 10 — end-to-end hex → .nbc pipeline (`bootstrap/compiler_core.nula`, `compile_hex.nula`) supporting lexing, Pratt parsing, evaluation, arithmetic, let bindings, closures, `if`/`else`, comparisons, and booleans in Nulang Core. Remaining: HM type inference, MIR lowering, self-compilation.
 - Backend trait boundary (RFC 0003 Item 6): `JitBackend`, `WasmBackend`, `CryptoProvider`, `ForeignInterop`, `HttpProvider` traits in `src/backends/mod.rs` (Stable).
 - Structured error messages: `NuError` enum with error codes (`ErrorCode`), `expected`/`found` fields per variant, automatic fix suggestions via `error_code()` and `suggestion()`, and `format_rich()` for colorized multi-line diagnostics with source excerpts and carets — `src/types.rs`. (Stable)
-- `**` exponentiation operator: tokenized as `Star2`, right-associative, precedence above `*` (Pratt `PREC_EXP` level 13), wired through parser, typechecker, HIR lowering, and bytecode — `src/lexer.rs`, `src/parser.rs`. (Stable)
+- `**` exponentiation operator: tokenized as `Star2`, right-associative, precedence above `*` (Pratt `PREC_EXP` level 14, `src/parser.rs:45`), wired through parser, typechecker, HIR lowering, and bytecode — `src/lexer.rs`, `src/parser.rs`. (Stable)
 - `catch` prefix syntax: `catch expr fallback` in addition to postfix `expr catch fallback` — `src/parser.rs`. (Stable)
 - Spawn field-initializer overrides: `spawn A { f = v }` now correctly overrides the actor's declared default for field `f`; overrides are encoded in bytecode and applied at VM spawn time — `src/vm.rs`, `src/mir_codegen.rs`, `src/bytecode.rs`. (Stable)
 - Clearer "cannot assign to immutable binding" diagnostic: the type error for reassigning a `let` binding now explains that mutable locals are not yet supported and suggests shadowing — `src/typechecker.rs`. (Stable)
@@ -92,7 +92,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - LSP code lenses, document links, enriched hover: `textDocument/codeLens` shows reference counts; `textDocument/documentLink` creates clickable import links; `textDocument/hover` includes doc comments, effects, and type signatures — `src/lsp/mod.rs`. (Experimental)
 - LSP completion documentation: keyword and built-in effect completion items carry markdown documentation strings — `src/lsp/mod.rs`. (Experimental)
 - 15 verified example programs under `examples/` with `examples/README.md` — from basic IO to JSON, HTTP, Option/Result, and ranges. (Experimental)
-- `consume` / `recover` expressions: `consume x` marks a linear (`lineariso`) variable as consumed (reusing the existing at-most-once tracker); `recover { body }` wraps a fallible body in `Ok`/`Error`, checking the result is sendable — `src/parser.rs`, `src/typechecker.rs`, `src/effect_checker.rs`. Commit `e0cf432`. (Experimental)
+- `consume` / `recover` expressions: `consume x` marks a linear (`lineariso`) variable as consumed (reusing the existing at-most-once tracker); `recover { body }` is an isolated scope whose result must be sendable (checked in `src/effect_checker.rs`; the typechecker infers the body's type unchanged and lowering is transparent — it does **not** wrap the result in `Ok`/`Error`). See §3.9.2. Commit `e0cf432`. (Experimental)
 
 **Planned (described in this specification, not implemented):**
 
@@ -553,7 +553,7 @@ Notes on the inventory:
 - The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag`, `lineariso`, `linear` are keywords usable anywhere a capability is parsed.
 - `organization` is a reserved keyword accepted by the grammar; it desugars to `entity` with the same durable-first defaults (RFC 0009).
 - `cap` (in the `expr :cap iso` annotation) and `to` (in `migrate a to node`) are contextual identifiers, not keywords.
-- There is no `capability`, `enum`, `event`, `from`, or `config` keyword. Constructs earlier drafts associated with those words are either expressed differently (Chapters 5 and 7) or **Planned**.
+- `var` (mutable binding), `consume`, `recover`, and `as` are keywords in the current lexer (`src/lexer.rs`). There is no `capability`, `enum`, `event`, `from`, or `config` keyword. Constructs earlier drafts associated with those words are either expressed differently (Chapters 5 and 7) or **Planned**.
 
 ## 2.4 Identifiers
 
@@ -566,7 +566,7 @@ Nulang uses the following naming conventions. They are conventions only — no s
 - **Types, variants, actors, and modules**: PascalCase (`String`, `Option`, `BankAccount`)
 - **Functions and variables**: snake_case (`map`, `get_balance`, `process_request`)
 - **Type variables in generics**: PascalCase, typically a single letter (`T`, `U`, `Elem`, `Key`)
-- **Effect names**: PascalCase, short for the built-ins (`IO`, `Net`, `FS`, `Rand`, `Time`, `Inference`)
+- **Effect names**: PascalCase, short for the built-ins (`IO`, `Http`, `FS`, `Random`, `Time`, `Inference`; `Net` and `Rand` exist as compile-time aliases, §4.6/Appendix C)
 - **Constants**: UPPER_SNAKE_CASE (`MAX_RETRIES`, `PI`)
 
 Examples of valid identifiers:
@@ -602,7 +602,7 @@ Floating-point literals consist of an integer part, a decimal point, a fractiona
 1.0e-9          // Small numbers
 ```
 
-A floating-point literal has type `Float` (IEEE 754 double precision). There are no `f32`/`f64` suffixes. A bare `1.` is not a float literal: a `.` is only consumed as a decimal point when followed by a digit, so `1..10` lexes as `1`, `..`, `10` (the range operator is **Planned**).
+A floating-point literal has type `Float` (IEEE 754 double precision). There are no `f32`/`f64` suffixes. A bare `1.` is not a float literal: a `.` is only consumed as a decimal point when followed by a digit, so `1..10` lexes as `1`, `..`, `10` (the range operator, §2.7).
 
 ### 2.5.3 String Literals
 
@@ -661,7 +661,7 @@ Two quirks of the current grammar are worth noting:
 - **Bitwise operators bind tighter than arithmetic.** `1 + 2 & 3` parses as `1 + (2 & 3)`. Use parentheses when mixing arithmetic and bitwise operators. (This ordering is inherited from the precedence table and may be revised before 2.0.)
 - **Single `|` is not an infix operator.** It is reserved as the match-arm and variant separator, so bitwise OR is written `|||` (or the keyword `or` for booleans).
 
-There is no `**` exponentiation operator and no `~` bitwise-not operator.
+There is a `**` exponentiation operator (right-associative, binds tighter than `*`; `src/lexer.rs` `Star2`, `src/parser.rs` `PREC_EXP`). There is no `~` bitwise-not operator — the `~` token is lexed (`src/lexer.rs:1127`) but not accepted by the parser.
 
 ### 2.6.1 Arithmetic Operators
 
@@ -672,6 +672,7 @@ There is no `**` exponentiation operator and no `~` bitwise-not operator.
 | `*` | Multiplication | `a * b` |
 | `/` | Division | `a / b` |
 | `%` | Remainder | `a % b` |
+| `**` | Exponentiation (right-associative, binds tighter than `*`) | `a ** b` |
 | `-` | Unary negation | `-x` |
 
 Arithmetic operators are type-polymorphic through inference: both operands and the result share one type variable, so `+` works on `Int` or `Float` but the two operands must have the same type. Mixed-type arithmetic requires explicit conversion (conversion functions are **Planned** with the standard library). Division by zero evaluates to `nil`.
@@ -705,8 +706,8 @@ The `&&` and `||` operators use short-circuit evaluation: the right operand is o
 |----------|-------------|--------|
 | `&` | Create a reference (`&x`, capability `ref`) | Implemented |
 | `*` | Dereference a reference (`*r`) | Implemented |
-| `consume` | Consume a reference, producing an `iso` | **Planned** |
-| `recover` | Recover a reference to `iso` or `val` | **Planned** |
+| `consume` | Consume a linear (`lineariso`) variable, marking it consumed in the at-most-once tracker | Implemented (Experimental) |
+| `recover` | `recover { body }` — isolated scope whose result must be sendable (see §3.9.2) | Implemented (Experimental) |
 
 Reference types and capabilities are discussed in detail in Chapter 5.
 
@@ -742,7 +743,7 @@ Nulang uses the following delimiters:
 | `\|` | Vertical bar introducing match arms, handler clauses, and variant constructors |
 | `@` | At sign for annotations (`@tool(...)`) and pattern aliases (`n @ Some(x)`) |
 
-The lexer also recognizes `..`, `::`, `<-`, and `?`, but the parser does not yet accept them anywhere; programs using them fail with a parse error. Their uses (ranges/record update, module paths, message send, error propagation) are **Planned**.
+The lexer also recognizes `..`, `::`, `<-`, and `?`, and the parser accepts all four today: `..` is the inclusive-exclusive range operator (`a..b`, Pratt `PREC_RANGE`, `src/parser.rs:83`) and the record-update separator (`{ base .. field = value }`, `src/parser.rs` `Expr::RecordUpdate`); `::` is the module-path separator in `import` declarations (`src/parser.rs` `parse_import`); `<-` is async tell, equivalent to `!` (`actor <- behavior(args)`, `src/parser.rs:2483`); and `?` is error propagation / try (`expr?` desugars to a `match` on `Ok`/`Error` with early `return`, `src/parser.rs:2603`) plus nil-safe optional chaining (`expr?.field`, `src/parser.rs:2567`).
 
 ## 2.8 Newlines, Semicolons, and Blocks
 
@@ -891,7 +892,7 @@ greet(person)
 
 Record fields are accessed using dot notation: `person.name`, `person.age`. Record patterns destructure records with the same colon syntax: `{ name: n, age: a }`.
 
-Structural update (`{ person .. age = 31 }`) and range expressions are **Planned**; the `..` token is lexed but not yet accepted by the grammar. Records are immutable values; to "update" one today, construct a new record.
+Structural update is implemented: `{ person .. age = 31 }` evaluates `person`, then produces a new record with the listed fields overridden (overrides use `=`; multiple overrides are comma-separated). Range expressions (`a..b`) are likewise implemented (`src/parser.rs` `Expr::RecordUpdate`, `BinOp::Range`). Records remain immutable values — an "update" expression constructs a new record; it does not mutate the base.
 
 Record types can be named with a record type declaration or abbreviated with a type alias (Section 7.3):
 
@@ -1186,12 +1187,14 @@ Reference capabilities form a subtyping lattice, checked by the compiler's `is_s
 
 These relationships enable safe capability transitions. For example, a function that accepts a `box` parameter can be called with either a `ref` or a `val` argument.
 
-### 3.9.2 Recovering Capabilities — Planned
+### 3.9.2 Recover Expressions
 
-`recover` is not a keyword in the current implementation. The `recover` expression, which creates an `iso` or `val` reference from an expression that only uses `iso`, `trn`, `val`, or `tag` references internally, is planned for a future version:
+`recover` is a keyword in the current implementation (`src/lexer.rs`), and the `recover { body }` expression is implemented (Experimental). Its current meaning is narrower than Pony's: it is an **isolated scope with a sendability check** — the body is evaluated normally, and the capability checker requires the body's result to be sendable (`iso`, `val`, or `tag`; `src/effect_checker.rs` reports "recover body must evaluate to a sendable value" otherwise). The typechecker infers the body's type unchanged (`src/typechecker.rs`), and lowering is transparent (`src/hir_lower.rs`): `recover` does not wrap the result in `Ok`/`Error` and does not itself change any capability.
+
+The Pony-style capability *upgrade* — constructing an `iso` or `val` reference from an expression that internally uses only `iso`, `trn`, `val`, or `tag` references, so the result's capability is stronger than its free variables would normally permit — is **reserved as future surface**. That semantics requires tracking the capabilities of all captured free variables, which the current implementation does not do. The planned form:
 
 ```nulang
-// Planned — not yet implemented
+// Planned — capability-upgrade semantics not yet implemented
 let immutable_tree: &val Tree[Int] = recover {
   Tree.Node { left: Tree.Leaf, value: 42, right: Tree.Leaf }
 }
@@ -1259,13 +1262,13 @@ Three operations are backed directly by the runtime when no source handler inter
 
 ## 4.4 Effect Handlers
 
-The `handle` expression installs an effect handler around a body expression. Note the syntax: the body follows `handle` directly, and the handler clauses are listed between braces — there is no `with` keyword:
+The `handle` expression installs an effect handler around a body expression. The body follows `handle` directly, and the handler clauses are listed between braces. The keyword `with` between the body and the handler block is **optional** — `handle body { ... }` and `handle body with { ... }` are both accepted (the parser consumes an optional `with`, `src/parser.rs` `parse_handle`). `with` also allows naming a previously declared `handler` (`handle body with my_handler`), which installs the named handler's clauses:
 
 ```nulang
 let result = handle {
   perform Console.print("Hello from handled code!")
   42
-} {
+} with {
   | Console.print(msg) => 42
 }
 ```
@@ -1757,9 +1760,9 @@ let result = handle {
 }
 ```
 
-## 6.13 Recover Expressions — Planned
+## 6.13 Recover Expressions
 
-The `recover` expression, which creates an `iso` or `val` reference from an expression using only sendable capabilities internally, is planned (`recover` is not currently a keyword). See §3.9.2.
+`recover { body }` is implemented (Experimental) as an isolated scope whose result must be sendable; it performs no capability upgrade and no `Ok`/`Error` wrapping today. The Pony-style capability-recovery semantics are reserved for a future version. See §3.9.2.
 
 ## 6.14 Actor Operations
 
@@ -3804,7 +3807,12 @@ operation-set enforcement are not yet implemented. See §9.10 and §12.5.
 
 # Appendix C: Effect Reference
 
-The compiler recognizes the built-in effect names `IO`, `Net`, `FS`, `Rand`, `Time`, `Spawn`, `Send`, `Receive`, `Migrate`, `STM`, `Async`, `Inference`, `LLM` (deprecated alias for `Inference`), `Cost`, `Event`, and `FFI` (§4.6). These names do not come with pre-declared operation sets — programs declare the operations they use with `effect` declarations, and only `Inference.ask` / `LLM.ask`, `Signal.wait`, and `Timer.sleep` are backed by the runtime directly.
+The effect checker recognizes the built-in effect names `IO`, `Net` (alias of `Http`), `Http`, `FS`, `Array`, `String`, `Test`, `Rand` (alias of `Random`), `Random`, `Time`, `Spawn`, `Send`, `Receive`, `Migrate`, `STM`, `Async`, `Inference`, `Cost`, `Event`, `FFI`, `DB`, `Python`, `Process`, and `System` (`parse_effect_name`, `src/effect_checker.rs`; §4.6). `LLM` is accepted as a deprecated alias for `Inference` (`src/cir_lower.rs`). Two caveats:
+
+- **Recognition is not dispatch.** A recognized name participates in effect-row checking, but runtime backing exists only for the operations listed in §4.6 (`IO.*`, `FS.*`, `Http.*`, `Random.int`, `Time.now`, `Inference.ask`/`LLM.ask`, and context-limited `Timer.sleep`/`Signal.wait`). The aliases are compile-time only: `Net` and `Rand` type-check but have **no runtime dispatch** — the VM dispatches on the literal names `Http` and `Random` (`src/vm.rs`), so `perform Net.get(...)` / `perform Rand.int(...)` fail with "Unhandled effect". Use `Http` / `Random` in performed code.
+- `Spawn`, `Send`, `Receive`, and `Migrate` are language syntax (keywords / a bytecode op), not `perform`-dispatchable effects (§4.6).
+
+These names do not come with pre-declared operation sets — programs declare the operations they use with `effect` declarations.
 
 The declarations below are **illustrative** — they show the planned standard-library effect surface written in current syntax. They are not shipped with the implementation.
 
@@ -4073,6 +4081,19 @@ The migration tool handles the common cases. Complex migrations may require manu
 ---
 
 This specification is a living document. As Nulang evolves, new features, refinements, and clarifications will be added. Feedback from implementers and users is essential to ensuring that Nulang 2.0 realizes its design goals.
+
+---
+
+# Appendix E: Known Design Tensions Under Review for v2
+
+The following are **documented, intentional behaviors of the current implementation** — not bugs, and not changed by this specification. They are recorded here because each is a coherence hazard that should be resolved before the next frozen-tier bump (per `GOVERNANCE.md`, frozen-tier surface cannot change afterward). No language behavior is altered by this list.
+
+1. **`!` has four meanings.** Logical not (prefix `!x`, `src/parser.rs` `prefix_precedence`), message send (`a ! b(args)`, Pratt postfix, `src/parser.rs:2466`), effect-row annotation (`fn f() ! {IO}`, `src/parser.rs:663`), and error-type annotation (`fn f() -> T ! E`, same site). All four are Stable-tier surface today; any future disambiguation is a breaking change and must happen before the next freeze.
+2. **`&` has three meanings.** Prefix borrow / reference creation (`&x`, capability `ref`, `src/parser.rs` `prefix_precedence`), bitwise AND on `Int` (infix, `PREC_BITAND`, `src/parser.rs:42`), and the `&&` logical-and spelling family (`and`). A reference type in type position is also written with a capability sigil (`&val T`, §3.9.2).
+3. **Bitwise operators bind tighter than arithmetic.** `&` (level 11), `^` (12), and `|||` (13) all sit above `+`/`-` (level 8) and `*`/`/`/`%` (level 9) in the Pratt table (`src/parser.rs:30-46`), so `1 + 2 & 3` parses as `1 + (2 & 3)` — the reverse of C-family convention. This is a documented quirk (§2.6) preserved for compatibility; parentheses are recommended when mixing arithmetic and bitwise operators.
+4. **Division by zero yields `nil`.** Both integer and float division/modulo by zero evaluate to `nil` rather than trapping or returning an `Error` (`src/vm.rs` `step_idiv`, §2.6.1). This interacts awkwardly with the `! E` error-type and `?` propagation surface (item 1): an arithmetic failure is silent and type-invisible, while every other failure mode in the language is an explicit value.
+
+**Recommendation:** items 1–4 should each get an RFC resolution (keep, rename, or re-precedence with a migration) before the next frozen-tier bump; afterwards they become unchangeable under the tier contract.
 
 ---
 

@@ -46,12 +46,12 @@ effects except `IO.print`/`IO.read`, and all capabilities except `val`.
 ```
 program        = { decl SEP } ;
 fn_decl        = [ "pub" ] "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
+                 (* return-type sigil is "->" (TokenKind::Arrow);
+                    src/parser.rs parse_function, consume_if(Arrow) at :654 *)
 decl           = fn_decl
                 | type_decl          (* enum / struct / variant *)
                 | alias_decl
                 | const_decl ;
-
-fn_decl        = [ "pub" ] "fn" IDENT "(" [ param_list ] ")" [ ":" type ] block ;
 
 param_list     = param { "," param } ;
 param          = IDENT [ ":" type ] ;
@@ -125,7 +125,10 @@ effect_op     = IDENT ":" [ "(" [ type { "," type } ] ")" ] "->" type ;
 perform_expr  = "perform" UPPER_IDENT "." IDENT "(" [ expr_list ] ")" ;
 primary       += perform_expr ;
 primary       += handle_expr ;
-handle_expr   = "handle" expr "{" { handle_arm SEP } "}" ;
+handle_expr   = "handle" expr [ "with" [ IDENT ] ] "{" { handle_arm SEP } "}" ;
+                (* `with` is optional; `with name` references a prior
+                   `handler name { ... }` declaration (src/parser.rs
+                   parse_handle, consume_if(With) at :4182) *)
 handle_arm    = [ "|" ] UPPER_IDENT "." IDENT "(" [ param_list ] ")" [ "resume" ] "=>" expr ;
 cap           = "val" | "iso" | "trn" | "box" | "tag" | "lineariso" ;
 param         += IDENT ":" type "@" cap ;          (* capability-annotated param *)
@@ -142,10 +145,15 @@ behavior      = "behavior" IDENT "(" [ param_list ] ")" block ;
 (* Actor expressions *)
 spawn_expr    = "spawn" [ cap ] IDENT [ "{" [ init_fields ] "}" ]
                 [ "link" | "monitor" ] ;           (* parser desugar *)
-send_expr     = "send" expr "to" expr ;
+send_expr     = "send" [ "remote" ] expr IDENT "(" [ expr { "," expr } ] ")" ;
+                (* keyword form, src/parser.rs parse_send_keyword :3721.
+                   Postfix form `actor ! behavior(args)` (equivalently
+                   `actor <- behavior(args)`) is a Pratt postfix operator
+                   in parse_expr_with_prec (:2466, :2483); both desugar to
+                   the same Expr::Send node. There is no `send a to b`
+                   production. *)
 receive_expr  = "receive" "{" { receive_arm SEP } "}"
                 [ "after" expr "=>" block ] ;
-send_expr     = "send" expr IDENT [ "(" [ expr { "," expr } ] ")" ] ;
 primary       += spawn_expr | send_expr | receive_expr ;
 receive_arm   = [ "|" ] IDENT "(" [ param_list ] ")" "=>" expr ;
 (* Pipe operator *)

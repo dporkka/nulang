@@ -399,5 +399,5 @@ These used to be pitfalls but are now working correctly
 | `Array.push`/`Array.new`/`Array.length`/`Array.set`/`Array.slice` | ✅ Added | Full Array builtin with value semantics |
 | `String.from_char` | ✅ Added | Code point → 1-char string; used by JSON parser |
 | `var` bindings, record-update, ranges | ✅ Added | Mutable locals, `{ r .. f = v }` syntax, `a..b` expressions |
-| `consume` / `recover` expressions | ✅ Added | `consume x` marks linear variable consumed; `recover { body }` wraps result in Ok/Error |
+| `consume` / `recover` expressions | ✅ Added | `consume x` marks linear variable consumed; `recover { body }` is an isolated scope whose result must be sendable (it does not wrap the result in Ok/Error — see SPEC2 §3.9.2) |
 | Numeric conversion primitives | ✅ Added | `Int.to_float`, `Float.to_int`, `Float.to_string`, `String.to_int`, `String.to_float` |
