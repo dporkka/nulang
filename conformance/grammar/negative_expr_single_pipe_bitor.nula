@@ -1,0 +1,2 @@
+// Negative case: neg_expr_single_pipe_bitor — must be rejected by the parser.
+fn f() { 1 | 2 }

@@ -1,0 +1,2 @@
+// Negative case: neg_expr_call_double_comma — must be rejected by the parser.
+fn f() { g(1,, 2) }

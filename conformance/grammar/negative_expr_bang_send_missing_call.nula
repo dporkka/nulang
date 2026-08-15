@@ -1,0 +1,2 @@
+// Negative case: neg_expr_bang_send_missing_call — must be rejected by the parser.
+fn f() { a ! }

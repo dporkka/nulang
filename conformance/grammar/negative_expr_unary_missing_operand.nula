@@ -1,0 +1,2 @@
+// Negative case: neg_expr_unary_missing_operand — must be rejected by the parser.
+fn f() { - }
