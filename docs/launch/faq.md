@@ -46,10 +46,10 @@ docs/STATUS.md.
 If the BEAM works for you, use it — it's battle-tested in ways Nulang won't
 be for years. Nulang's differences: static typing with full inference,
 compile-time data-race freedom via capabilities, effects tracked in types,
-and durable actors whose state survives crashes (on the BEAM, a restarted
-process starts with fresh state; recovery is the application's problem).
-Nulang is a small native runtime, not a VM with OTP's operational tooling —
-that trade cuts both ways.
+and journaled, event-sourced actor state — with the caveat, verified by
+execution, that automatic state rebuild on restart is not yet wired to the
+CLI path (see the kill -9 answer below). Nulang is a small native runtime,
+not a VM with OTP's operational tooling — that trade cuts both ways.
 
 ## Why not Gleam?
 
@@ -85,15 +85,20 @@ that explicitly separate verified behavior from plans.
 
 ## Do durable actors really survive `kill -9`?
 
-Within a process, yes: a supervised persistent actor that crashes is
-restarted with state rebuilt from its journal — this is exercised by
-integration tests and the demo in `docs/launch/demo-script.md`. Across
-processes, the storage backends that would make it work (JSON file, SQLite)
-are implemented and tested at the Rust level, but the CLI currently
-constructs an in-memory store (`src/runtime/mod.rs`), so there is no
-user-facing flag for file-backed recovery yet. Wiring that up is a stated
-pre-1.0 milestone. We know "durable" invites the kill -9 test — that gap is
-disclosed here and in the demo script rather than discovered by you.
+Not yet, end-to-end — verified by running it. What works today: crash
+*containment* (a supervised actor that dies is handled by its supervisor,
+siblings keep state, the process stays up — see the executed demo in
+`docs/launch/demo-script.md`), plus journaling and checkpointing of
+persistent-actor state after every behavior. State-rebuild recovery is
+implemented and pinned by an integration test at the Rust runtime level
+(`recover_actor` with a shared store; JSON-file and SQLite backends have
+round-trip tests), but two wirings are missing: the CLI constructs an
+in-memory store (`src/runtime/mod.rs`) with no flag for a file backend, and
+supervised restarts currently come back with fresh state — confirmed by
+execution while preparing the demo. Wiring recovery into supervisor restarts
+and exposing a file-backed store from the CLI is the top pre-1.0 milestone.
+We know "durable" invites the kill -9 test — the gap is disclosed here
+rather than discovered by you.
 
 ## What's the performance story?
 

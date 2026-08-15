@@ -25,10 +25,12 @@ instructions/state live.
   while `docs/STATUS.md` reports 1679; update the number. Verify every
   README link resolves.
 - [ ] **Merge this launch kit** (`docs/launch/`) to main.
-- [ ] **Execute the demo** per `docs/launch/demo-script.md` (build
-  `--no-default-features`, run `--check` then run; diff output; only then
-  record). If the entity-under-supervision path misbehaves, use the
-  conformance fallback named in the script.
+- [ ] **Demo is executed and current** — `docs/launch/demo-script.md` was run
+  against a real build and its observed output is recorded; the
+  durable-recovery narrative was deliberately replaced with crash containment
+  + honesty beat after execution showed supervised restarts return fresh
+  state. Re-run the two demo programs before recording in case behavior
+  changed on main (update the recorded output if so).
 - [ ] **Record the demo** (asciinema, 60–90 s) and produce the GIF; add it
   to the README above the fold.
 

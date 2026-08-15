@@ -36,11 +36,17 @@ The two big departures from the BEAM:
    algebraic effects so side effects are tracked in signatures. Messages are
    checked for sendability at compile time.
 
-2. **Durability.** On the BEAM, a restarted process comes back with *fresh*
-   state — state recovery is your problem (ETS, DETS, Mnesia, Postgres…).
-   In Nulang, persistent actors checkpoint and journal their state, and when a
-   supervisor restarts one it comes back with state rebuilt. `entity`
-   declarations are event-sourced by default:
+2. **Durability (in progress — honestly).** On the BEAM, a restarted process
+   comes back with *fresh* state — recovery is your problem (ETS, DETS,
+   Mnesia, Postgres…). Nulang's design makes recovery the runtime's job:
+   persistent actors checkpoint and journal their state after every behavior,
+   and `entity` declarations are event-sourced by default. Status check,
+   because this crowd will test it: journaling and the storage backends
+   (in-memory / JSON-file / SQLite) are implemented and tested, and
+   state-rebuild recovery is pinned by integration tests at the runtime level
+   — but it is **not yet wired to supervised restarts on the CLI path**, so a
+   restarted actor currently starts fresh. That wiring is the top pre-1.0
+   milestone. The entity surface itself works today:
 
    ```nulang
    entity ChatRoom {
@@ -85,6 +91,9 @@ BEAM-primitive notes in BEAM_PRIMITIVES.md, 17 verified examples in
 - Expect (and welcome) "just use Elixir + typed_behaviour / Gleam / Mnesia."
   Answer per faq.md: acknowledge the maturity gap first, then explain the
   mechanism difference.
-- Do not oversell durability: within-process supervisor recovery is wired and
-  tested; cross-process (file-backed) recovery exists at the store level but
-  isn't exposed via a CLI flag yet — say so if asked.
+- Do not oversell durability: supervised restarts currently come back with
+  fresh state on the CLI path (verified by execution — see
+  docs/launch/demo-script.md); journal-based state rebuild is implemented and
+  integration-tested at the Rust runtime level but not yet wired to
+  supervisor restarts or a CLI flag. Say so if asked — before being asked,
+  ideally.
