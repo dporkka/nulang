@@ -2,8 +2,8 @@
 
 use crate::bytecode::Constant;
 use crate::value_layout::{
-    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_CLOSURE, TAG_INT, TAG_MASK, TAG_PTR,
-    TAG_STRING,
+    is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK, TAG_CLOSURE, TAG_INT,
+    TAG_MASK, TAG_PTR, TAG_STRING,
 };
 use crate::vm::Value;
 use std::cell::{Cell, UnsafeCell};
@@ -355,15 +355,17 @@ pub extern "C" fn nulang_itof(a: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_ftoi(a: u64) -> u64 {
-    Value::int(f64::from_bits(a) as i64).as_raw()
+    // `as i64` saturates; clamp to the 48-bit payload range (see Value::int).
+    let n = (f64::from_bits(a) as i64).clamp(INT48_MIN, INT48_MAX);
+    Value::int(n).as_raw()
 }
 
-/// Float negate, matching the interpreter's `as_float().unwrap_or(0.0)`:
-/// any NaN bit pattern (i.e. any tagged value) negates to -0.0.
+/// Float negate, matching the interpreter's `FNeg`: floats negate (NaN stays
+/// NaN, canonicalized); any tagged (non-float) value maps to -0.0.
 #[no_mangle]
 pub extern "C" fn nulang_fneg(a: u64) -> u64 {
     let f = f64::from_bits(a);
-    let v = if f.is_nan() { 0.0 } else { f };
+    let v = if is_float_raw(a) { f } else { 0.0 };
     Value::float(-v).as_raw()
 }
 
