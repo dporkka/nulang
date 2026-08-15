@@ -967,15 +967,14 @@ pub fn process_network_packets(
                 }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
-            Packet::Gossip { members } => {
-                // Merge the sender's membership view into ours; higher
-                // incarnation numbers win (see ClusterState::merge_membership).
-                // Each entry carries its own listen address, so no extra
-                // connection bookkeeping is needed for the relayed nodes.
-                // The sender's self-entry is authoritative: it overrides a
-                // heartbeat-discovered ephemeral source-port address for
-                // the sending node (see `merge_membership_from_sender`).
+            Packet::Gossip { members, directory } => {
                 cluster.merge_membership_from_sender(members, incoming.from_node);
+                if !directory.is_empty() {
+                    cluster.merge_directory(directory);
+                    // A re-joined node may have been replaced while away:
+                    // demote any local actor whose directory epoch is newer.
+                    runtime.self_demote_superseded();
+                }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::SpawnRequest {
@@ -1336,6 +1335,44 @@ pub fn process_network_packets(
                 snapshot_json,
             } => {
                 let _ = runtime.receive_migrated_actor(actor_id, nbc_bytes, snapshot_json);
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
+            Packet::NodeGoodbye { node_id, durable } => {
+                // RFC 0014 §1 path 1: the sender declares its durable actors
+                // checkpointed and terminated. Fold its manifest into the
+                // directory (highest-epoch-wins) and confirm-gone it, then
+                // drive re-spawn.
+                if !durable.is_empty() {
+                    let node = NodeId(node_id.0);
+                    cluster.merge_directory(
+                        durable
+                            .into_iter()
+                            .map(|(actor_id, epoch)| {
+                                crate::runtime::cluster::DurableDirectoryEntry {
+                                    actor_id,
+                                    node_id: node,
+                                    epoch,
+                                }
+                            })
+                            .collect(),
+                    );
+                }
+                let node = NodeId(node_id.0);
+                let newly = cluster.mark_removed(node);
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+                if newly {
+                    crate::runtime::distribution::handle_node_removed(runtime, node);
+                }
+            }
+            Packet::ShadowReplicate {
+                actor_id,
+                nbc_bytes,
+                snapshot_json,
+                epoch,
+            } => {
+                // RFC 0014 §3: store the replica, do NOT instantiate it.
+                // The shadow re-spawns from it only on confirmed removal.
+                runtime.store_shadow_replica(actor_id, nbc_bytes, snapshot_json, epoch);
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             _ => {

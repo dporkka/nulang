@@ -1248,8 +1248,9 @@ not landing.
 
 ## Phase 5 — Distributed Systems Excellence (parallel with Phases 1-3)
 
-**Status (2026-08-15): 17 of 18 deliverables implemented; D18 (observability
-dashboard) landed 2026-08-15, D7c open.**
+**Status (2026-08-15): all 18 deliverables implemented. D7c (RFC 0014,
+durable-actor re-spawn on node failure) landed 2026-08-15, closing the last
+Phase 5 open item.**
 
 **Goal.** The distributed actor runtime — not just the single-node
 language — withstands adversarial operational review. A cluster survives a
@@ -1260,9 +1261,8 @@ leak memory forever; an operator can point off-the-shelf tooling at a
 running cluster. This is where Nulang's distributed-actor design either
 becomes provably best-in-class or stays a credible-looking demo.
 
-**Sequencing.** As of the 2026-08-15 update, Groups A-G are implemented
-(D1-D17 plus D18, minus the partials' open halves); remaining:
-D7c (RFC 0014).
+**Sequencing.** All Groups A-G are implemented (D1-D18); no Phase 5 items
+remain open.
 
 **Deliverables.**
 
@@ -1375,8 +1375,8 @@ D7c (RFC 0014).
      both real gaps (incarnation bump, stale-gossip quorum) — the
      plan's "verification vehicle" reasoning paid off.
 7. **Node-death detection triggers real recovery, not silent orphaning.**
-   ✅ **Parts (a)+(b) landed 2026-08-09** (`handle_node_failed` in
-   `distribution.rs`, wired to `ClusterAction::NodeFailed`): (a) the dead
+   ✅ **Landed 2026-08-09..15 (RFC 0014).** Parts (a)+(b) (`handle_node_failed`
+   in `distribution.rs`, wired to `ClusterAction::NodeFailed`): (a) the dead
    node's `RemoteActorCache` entries are invalidated so sends fail fast
    instead of stale-resolving; (b) every local actor that had linked or
    monitored an actor on the failed node receives a
@@ -1384,20 +1384,22 @@ D7c (RFC 0014).
    payload code 6) and the dead registry entries are dropped. The D8
    delivery half also landed: inbound `Packet::Link`/`Monitor` now register
    remote watchers and inbound `Packet::Down` delivers DOWN to local
-   watchers (previously all three were silently dropped). Part (c) remains
-   **open**: designed in **RFC 0014** (confirmed-gone `Removed` state,
-   durable-actor directory, shadow-node snapshot replication,
-   `RespawnOnNodeLoss` policy); not implemented. **RFC 0014** specifies the
-   confirmed-gone gate (new `Removed` membership state via positive
-   `NodeGoodbye` or a majority-gated `removal_confirmation_timeout`
-   promotion), a gossip-replicated durable-actor location directory with
-   epoch-based two-live-copies resolution (self-demote), snapshot
-   replication to a deterministic shadow node at `checkpoint_actor`, a new
-   `RestartPolicy::RespawnOnNodeLoss` supervisor policy, and reuse of the
-   existing `Packet::MigrateActor`/`receive_migrated_actor` transport.
-   It requires the old-node-confirmed-gone gate that a bare
-   failure-detection signal cannot provide; the safety rationale is
-   documented in the `handle_node_failed` doc comment and RFC 0014 §1.
+   watchers. Part (c) — the recovery half — landed 2026-08-15 per
+   **RFC 0014**: a confirmed-gone membership state (promoted from `Failed`
+   past `removal_confirmation_timeout` under quorum, or immediately on a
+   positive `Packet::NodeGoodbye`), a gossip-replicated durable-actor
+   location directory (`DurableDirectoryEntry`, highest-epoch-wins),
+   shadow-node snapshot replication at `checkpoint_actor` (via the new
+   `Packet::ShadowReplicate`, re-spawned through the existing
+   `receive_migrated_actor`), a `RestartPolicy::RespawnOnNodeLoss`
+   supervisor policy (`.nula` `Otp.supervise_child` policy `3`), and
+   epoch-based two-live-copies resolution (`self_demote_superseded` on
+   re-join). The goodbye path checkpoints+terminates the opted actors before
+   declaring them dead, so a re-spawn never races a still-live copy.
+   Verified by directory/removal/goodbye unit tests, a deterministic
+   `cluster_dst` kill→re-spawn scenario (two checkpoints, latest wins), a
+   goodbye-path duplicate assertion, a self-demote test, and an end-to-end
+   `.nula` policy-3 opt-in test.
    **Original analysis (kept for provenance):** zero grep hits for
    `failover`/`rehome`/`migrat` logic across
    `distribution.rs`/`distributed.rs`. `ClusterState` already detects

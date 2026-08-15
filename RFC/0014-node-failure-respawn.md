@@ -1,10 +1,10 @@
 # RFC 0014: Durable-Actor Re-Spawn on Node Failure
 
-- **Status:** Draft
+- **Status:** Implemented (landed 2026-08-15)
 - **Tier:** Stable (extends Stable-tier actor/supervision surface)
 - **Author:** AI assistant
 - **Created:** 2026-08-09
-- **Language-version at effect:** 1.0.0-frozen
+- **Implemented:** 2026-08-15
 - **Supersedes:** none
 - **Depends on:** RFC 0011 (split-brain resolver), RFC 0012 (cross-node
   supervision), RFC 0013 (authenticated transport, for the wire additions'
@@ -356,3 +356,24 @@ Landing the implementation requires, in the same change set:
   drop Durable/EventSourced fields): rejected — violates "from the last
   durable snapshot" for the very state models whose whole point is
   non-CRDT durability.
+
+## Implementation Notes (landed 2026-08-15)
+
+- **`Packet::ShadowReplicate`** (`TYPE_SHADOW_REPLICATE = 16`) replaces
+  §6's "reuse `MigrateActor` unchanged" for the shadow store: receiving a
+  `MigrateActor` instantiates the actor immediately, but a shadow replica
+  must be *stored, not spawned*. A distinct discriminant is the honest
+  encoding of that difference; the snapshot payload shape is unchanged.
+- **Goodbye is a true declaration**: the self-down path (`ClusterAction::
+  Down`) calls `Runtime::goodbye_self` — checkpoint each opted durable actor
+  (replicating the final snapshot to its shadow) and then reap it — before
+  sending `NodeGoodbye`. A goodbye that only listed the manifest would
+  leave the sender's copies alive and race the shadow's re-spawn.
+- **Shadow rule**: the healthy member with the smallest node id excluding
+  the home node (deterministic, no leader election), computed identically at
+  checkpoint time and re-spawn time. A same-epoch later checkpoint replaces
+  the shadow's replica (latest-wins), so re-spawn never loses writes.
+- **Self-demote forwards to the directory's replacement node**, not self, so
+  a re-joined node routes in-flight sends to the survivor that re-spawned.
+- Re-spawn requires a bytecode module (the replica serializes NBC); native
+  closure actors cannot be re-spawned and are not opted in.

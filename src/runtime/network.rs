@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 // Imports from the rest of the crate
 // ---------------------------------------------------------------------------
 
-use super::cluster::{NodeGossip, NodeStatus};
+use super::cluster::{DurableDirectoryEntry, NodeGossip, NodeStatus};
 use super::crdt_manager::{CrdtDeltaOp, CrdtOp};
 use super::supervision::RemoteLink;
 use super::MessagePriority;
@@ -504,6 +504,8 @@ const TYPE_MONITOR: u8 = 11;
 const TYPE_DOWN: u8 = 12;
 const TYPE_CRDT_OP: u8 = 13;
 const TYPE_MIGRATE_ACTOR: u8 = 14;
+const TYPE_NODE_GOODBYE: u8 = 15;
+const TYPE_SHADOW_REPLICATE: u8 = 16;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -601,7 +603,13 @@ pub enum Packet {
     /// where higher incarnation numbers win. This is what gives membership
     /// transitive propagation: a node relays what it knows, so a chain of
     /// pairwise seeds still converges to a full mesh.
-    Gossip { members: Vec<NodeGossip> },
+    Gossip {
+        members: Vec<NodeGossip>,
+        /// Durable-actor location directory entries (RFC 0014 §2),
+        /// piggybacked on the membership gossip round. Additive: older
+        /// peers that predate this field ignore the trailing bytes.
+        directory: Vec<DurableDirectoryEntry>,
+    },
 
     /// Request bytecode for a behavior identified by its BLAKE3 content hash.
     ///
@@ -646,6 +654,24 @@ pub enum Packet {
         nbc_bytes: Vec<u8>,
         /// JSON-serialized [`ActorSnapshot`](crate::runtime::persistence::ActorSnapshot).
         snapshot_json: Vec<u8>,
+    },
+    /// A positive "goodbye" from a node that is shutting down (RFC 0014 §1
+    /// path 1): the sender declares its durable re-spawn-opted actors
+    /// checkpointed and terminated, so receivers may mark it confirmed-gone
+    /// and re-spawn immediately. Carries `(actor_id, epoch)` pairs.
+    NodeGoodbye {
+        node_id: NodeId,
+        durable: Vec<(u64, u64)>,
+    },
+    /// A shadow replica of a durable actor's snapshot (RFC 0014 §3),
+    /// checkpointed from the home node to its deterministic shadow. Stored,
+    /// not instantiated — the shadow re-spawns from it only when the home
+    /// node is confirmed removed.
+    ShadowReplicate {
+        actor_id: u64,
+        nbc_bytes: Vec<u8>,
+        snapshot_json: Vec<u8>,
+        epoch: u64,
     },
 }
 
@@ -713,6 +739,8 @@ impl Packet {
             TYPE_LINK => Self::read_link(payload)?,
             TYPE_MONITOR => Self::read_monitor(payload)?,
             TYPE_DOWN => Self::read_down(payload)?,
+            TYPE_NODE_GOODBYE => Self::read_node_goodbye(payload)?,
+            TYPE_SHADOW_REPLICATE => Self::read_shadow_replicate(payload)?,
             _ => return None,
         };
         Some((seq, packet))
@@ -812,6 +840,8 @@ impl Packet {
             Packet::Monitor { .. } => TYPE_MONITOR,
             Packet::Down { .. } => TYPE_DOWN,
             Packet::MigrateActor { .. } => TYPE_MIGRATE_ACTOR,
+            Packet::NodeGoodbye { .. } => TYPE_NODE_GOODBYE,
+            Packet::ShadowReplicate { .. } => TYPE_SHADOW_REPLICATE,
         }
     }
 
@@ -910,13 +940,22 @@ impl Packet {
             Packet::CrdtOp { op } => {
                 buf.extend_from_slice(&op.to_bytes());
             }
-            Packet::Gossip { members } => {
+            Packet::Gossip { members, directory } => {
                 buf.extend_from_slice(&(members.len() as u32).to_be_bytes());
                 for m in members {
                     buf.extend_from_slice(&m.node_id.0.to_be_bytes());
                     write_addr(buf, &m.address);
                     buf.push(status_to_u8(m.status));
                     buf.extend_from_slice(&m.incarnation.to_be_bytes());
+                }
+                // Directory entries ride AFTER the members so an old peer
+                // (which predates the field) reads the members and simply
+                // ignores the trailing bytes.
+                buf.extend_from_slice(&(directory.len() as u32).to_be_bytes());
+                for e in directory {
+                    buf.extend_from_slice(&e.actor_id.to_be_bytes());
+                    buf.extend_from_slice(&e.node_id.0.to_be_bytes());
+                    buf.extend_from_slice(&e.epoch.to_be_bytes());
                 }
             }
             Packet::FetchBehaviorRequest { content_hash } => {
@@ -966,6 +1005,27 @@ impl Packet {
                 buf.extend_from_slice(nbc_bytes);
                 buf.extend_from_slice(&(snapshot_json.len() as u32).to_be_bytes());
                 buf.extend_from_slice(snapshot_json);
+            }
+            Packet::NodeGoodbye { node_id, durable } => {
+                buf.extend_from_slice(&node_id.0.to_be_bytes());
+                buf.extend_from_slice(&(durable.len() as u32).to_be_bytes());
+                for (actor_id, epoch) in durable {
+                    buf.extend_from_slice(&actor_id.to_be_bytes());
+                    buf.extend_from_slice(&epoch.to_be_bytes());
+                }
+            }
+            Packet::ShadowReplicate {
+                actor_id,
+                nbc_bytes,
+                snapshot_json,
+                epoch,
+            } => {
+                buf.extend_from_slice(&actor_id.to_be_bytes());
+                buf.extend_from_slice(&(nbc_bytes.len() as u32).to_be_bytes());
+                buf.extend_from_slice(nbc_bytes);
+                buf.extend_from_slice(&(snapshot_json.len() as u32).to_be_bytes());
+                buf.extend_from_slice(snapshot_json);
+                buf.extend_from_slice(&epoch.to_be_bytes());
             }
         }
     }
@@ -1196,7 +1256,73 @@ impl Packet {
                 incarnation,
             });
         }
-        Some(Packet::Gossip { members })
+        // Directory entries follow the members; an old peer stops reading
+        // here, so a missing directory tail is treated as empty (additive).
+        let mut directory = Vec::new();
+        if offset + 4 <= payload.len() {
+            let dcount = read_u32(payload, offset)? as usize;
+            offset += 4;
+            for _ in 0..dcount.min(4096) {
+                if offset + 24 > payload.len() {
+                    return None;
+                }
+                let actor_id = read_u64(payload, offset)?;
+                let node_id = NodeId(read_u64(payload, offset + 8)?);
+                let epoch = read_u64(payload, offset + 16)?;
+                offset += 24;
+                directory.push(DurableDirectoryEntry {
+                    actor_id,
+                    node_id,
+                    epoch,
+                });
+            }
+        }
+        Some(Packet::Gossip { members, directory })
+    }
+
+    fn read_node_goodbye(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 12 {
+            return None;
+        }
+        let node_id = NodeId(read_u64(payload, 0)?);
+        let count = read_u32(payload, 8)? as usize;
+        let mut offset = 12usize;
+        let mut durable = Vec::with_capacity(count.min(4096));
+        for _ in 0..count {
+            if offset + 16 > payload.len() {
+                return None;
+            }
+            let actor_id = read_u64(payload, offset)?;
+            let epoch = read_u64(payload, offset + 8)?;
+            offset += 16;
+            durable.push((actor_id, epoch));
+        }
+        Some(Packet::NodeGoodbye { node_id, durable })
+    }
+
+    fn read_shadow_replicate(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 12 {
+            return None;
+        }
+        let actor_id = read_u64(payload, 0)?;
+        let nbc_len = read_u32(payload, 8)? as usize;
+        if payload.len() < 12 + nbc_len + 4 {
+            return None;
+        }
+        let nbc_bytes = payload[12..12 + nbc_len].to_vec();
+        let json_off = 12 + nbc_len;
+        let json_len = read_u32(payload, json_off)? as usize;
+        if payload.len() < json_off + 4 + json_len + 8 {
+            return None;
+        }
+        let snapshot_json = payload[json_off + 4..json_off + 4 + json_len].to_vec();
+        let epoch = read_u64(payload, json_off + 4 + json_len)?;
+        Some(Packet::ShadowReplicate {
+            actor_id,
+            nbc_bytes,
+            snapshot_json,
+            epoch,
+        })
     }
 
     fn read_fetch_behavior_request(payload: &[u8]) -> Option<Self> {
@@ -2486,6 +2612,18 @@ mod tests {
                     incarnation: 0,
                 },
             ],
+            directory: vec![
+                DurableDirectoryEntry {
+                    actor_id: 7,
+                    node_id: NodeId(0x1111_2222_3333_4444),
+                    epoch: 1,
+                },
+                DurableDirectoryEntry {
+                    actor_id: 9,
+                    node_id: NodeId(0xAAAA_BBBB_CCCC_DDDD),
+                    epoch: 3,
+                },
+            ],
         };
 
         let bytes = packet.to_bytes(99);
@@ -2506,6 +2644,7 @@ mod tests {
                 status: NodeStatus::Healthy,
                 incarnation: 3,
             }],
+            directory: vec![],
         };
         let bytes = packet.to_bytes(1);
         // Keep the header + count, chop the entry in half.
@@ -3209,6 +3348,58 @@ mod tests {
 
         transport_a.shutdown();
         transport_b.shutdown();
+    }
+
+    // -- D7c packet round-trips (RFC 0014 §6) ----------------------------
+
+    #[test]
+    fn test_packet_node_goodbye_roundtrip() {
+        let packet = Packet::NodeGoodbye {
+            node_id: NodeId(0xDEAD_BEEF_0000_0001),
+            durable: vec![(7, 1), (9, 3), (u64::MAX, u64::MAX)],
+        };
+        let bytes = packet.to_bytes(42);
+        let (seq, decoded) = Packet::from_bytes(&bytes).expect("node goodbye roundtrip");
+        assert_eq!(seq, 42);
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn test_packet_node_goodbye_rejects_truncated_payload() {
+        let packet = Packet::NodeGoodbye {
+            node_id: NodeId(1),
+            durable: vec![(7, 1)],
+        };
+        let bytes = packet.to_bytes(1);
+        let truncated = &bytes[..bytes.len() - 3];
+        assert!(Packet::from_bytes(truncated).is_none());
+    }
+
+    #[test]
+    fn test_packet_shadow_replicate_roundtrip() {
+        let packet = Packet::ShadowReplicate {
+            actor_id: 0x1111_2222_3333_4444,
+            nbc_bytes: vec![0x4E, 0x55, 0x4C, 0x30, 1, 2, 3, 4],
+            snapshot_json: br#"{"actor_id":7}"#.to_vec(),
+            epoch: 5,
+        };
+        let bytes = packet.to_bytes(77);
+        let (seq, decoded) = Packet::from_bytes(&bytes).expect("shadow replicate roundtrip");
+        assert_eq!(seq, 77);
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn test_packet_shadow_replicate_rejects_truncated_payload() {
+        let packet = Packet::ShadowReplicate {
+            actor_id: 1,
+            nbc_bytes: vec![1, 2, 3, 4, 5],
+            snapshot_json: vec![9, 9, 9],
+            epoch: 1,
+        };
+        let bytes = packet.to_bytes(1);
+        let truncated = &bytes[..bytes.len() - 4];
+        assert!(Packet::from_bytes(truncated).is_none());
     }
 }
 impl NetworkTransport for TcpTransport {

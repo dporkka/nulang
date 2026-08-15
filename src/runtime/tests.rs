@@ -4765,10 +4765,7 @@ fn test_five_node_cluster_split_brain_detects_and_heals() {
 /// surviving majority keeps working.
 #[test]
 fn test_three_node_cluster_static_quorum_downs_minority() {
-    let quorum_config = ClusterConfig {
-        split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
-        probe_interval: Duration::from_secs(5),
-    };
+    let quorum_config = ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 }, probe_interval: Duration::from_secs(5), ..Default::default() };
 
     // Set the config BEFORE enable_distribution so `apply_config` picks
     // up the resolver at enable time.

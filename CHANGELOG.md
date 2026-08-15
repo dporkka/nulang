@@ -727,17 +727,20 @@ in this version; they are recorded here to establish their tier.
   `Http.serve`-based server template is deferred pending a CLI dispatch
   fix (see PLAN.md Phase 4 D6).
 
-- **RFC 0014 — durable-actor re-spawn on node failure (Draft)**: design
-  for PLAN.md Phase 5 deliverable 7 part (c). Specifies the
-  confirmed-gone gate (`Removed` membership state via positive
-  `NodeGoodbye` or majority-gated timeout promotion), a
-  gossip-replicated durable-actor location directory with epoch-based
-  self-demote (no two live copies), snapshot replication to a
-  deterministic shadow node at `checkpoint_actor`, the new
-  `RestartPolicy::RespawnOnNodeLoss` supervisor policy, and reuse of the
-  existing `Packet::MigrateActor` transport. Implementation pending;
-  deliberately not included: Raft/consensus (standing deferral) and
-  silent automatic re-spawn without an explicit policy.
+- **RFC 0014 — durable-actor re-spawn on node failure (Stable)**:
+  implemented 2026-08-15. The confirmed-gone gate (`Removed` membership
+  state promoted from `Failed` past `removal_confirmation_timeout` under
+  quorum, or immediately on a positive `Packet::NodeGoodbye`), a
+  gossip-replicated durable-actor location directory
+  (`DurableDirectoryEntry`, highest-epoch-wins) with epoch-based
+  self-demote (no two live copies), shadow-node snapshot replication at
+  `checkpoint_actor` (new `Packet::ShadowReplicate`, re-spawned through the
+  existing `receive_migrated_actor`), the `RestartPolicy::RespawnOnNodeLoss`
+  supervisor policy (`.nula` `Otp.supervise_child` policy `3`), and the
+  goodbye path (checkpoint + terminate before declaring dead). Re-spawn is
+  opt-in per supervision edge; default supervision is unchanged. Deliberately
+  not included: Raft/consensus (standing deferral) and silent automatic
+  re-spawn without an explicit policy.
 
 - **Node-death recovery (Stable, distributed runtime)**: when the failure
   detector declares a peer node `Failed`, the local runtime now invalidates

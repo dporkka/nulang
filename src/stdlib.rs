@@ -516,7 +516,7 @@ impl StdLib {
                     op: "supervise_child",
                     signature: "supervise_child(sup: Int, child: Actor, policy: Int) -> Nil",
                     implemented_in: ImplSite::RuntimeHost,
-                    description: "Place an existing actor under a supervisor; policy is 0=permanent, 1=temporary, 2=transient (any other value is a no-op). Unknown supervisor ids are nil no-ops.",
+                    description: "Place an existing actor under a supervisor; policy is 0=permanent, 1=temporary, 2=transient, 3=respawn_on_node_loss (RFC 0014, durable children only; any other value is a no-op). Unknown supervisor ids are nil no-ops.",
                 },
                 BuiltinOp {
                     name: "Otp.set_template",

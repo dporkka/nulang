@@ -961,4 +961,199 @@ mod tests {
             );
         }
     }
+
+    // -- D7c: durable-actor re-spawn on node failure (RFC 0014) -----------
+
+    /// Compile `.nula` source through the full frontend into a bytecode
+    /// module (mirrors the integration-test `compile_source`; the effect /
+    /// capability passes are skipped — no linear values in these fixtures).
+    fn compile_module(source: &str) -> crate::bytecode::CodeModule {
+        let tokens = crate::lexer::Lexer::new(source).lex().unwrap();
+        let ast = crate::parser::Parser::new(tokens).parse_module().unwrap();
+        let mut tc = crate::typechecker::TypeChecker::new();
+        tc.check_module(&ast).unwrap();
+        let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
+        let mut mir = crate::mir_lower::lower_module(&hir).unwrap();
+        crate::mir_codegen::compile_mir(&mut mir, "test").unwrap()
+    }
+
+    /// A bytecode `persistent actor` with a `Durable` `count` field and an
+    /// `inc(by)` behavior. Re-spawn requires a bytecode module (the shadow
+    /// replica serializes it as NBC), so native-closure actors can't be used.
+    const COUNTER_SOURCE: &str = r#"
+        persistent actor Counter {
+            state durable count: Int = 0
+            behavior inc(by: Int) { self.count = self.count + by }
+            behavior get() { self.count }
+        }
+    "#;
+
+    /// Spawn a bytecode `Counter`, then opt it into `RespawnOnNodeLoss`
+    /// under a supervisor. Returns the actor id.
+    fn spawn_respawnable_counter(rt: &mut Runtime) -> u64 {
+        use crate::runtime::supervisor::{ChildSpec, RestartPolicy, RestartStrategy};
+
+        let module = compile_module(COUNTER_SOURCE);
+        let idx = module.actor_metadata[0].behavior_indices[0];
+        let id = rt
+            .spawn_from_module(&module, idx, vec![])
+            .as_actor_id()
+            .expect("spawn returns an actor id");
+        let sup = rt.create_supervisor("sup", RestartStrategy::OneForOne);
+        rt.supervise_child(
+            sup,
+            ChildSpec::new("counter", RestartPolicy::RespawnOnNodeLoss),
+            id,
+        );
+        id
+    }
+
+    /// D7c timeout path (RFC 0014 §1 path 2): a durable actor opted into
+    /// `RespawnOnNodeLoss` on a hard-crashed node is re-spawned on its
+    /// deterministic shadow from the last replicated snapshot — exactly one
+    /// live copy, durable field equal to the last checkpoint.
+    #[test]
+    fn test_d7c_respawn_on_node_failure() {
+        use crate::runtime::{ClusterConfig, SplitBrainConfig};
+        use std::time::Duration;
+
+        let mut cluster =
+            DeterministicCluster::new(&[addr(9201), addr(9202), addr(9203)], 7);
+        // A short confirmation window keeps the test from waiting the
+        // default 60 s (failure detection itself is 2 s + 5 s).
+        let config = ClusterConfig {
+            split_brain: SplitBrainConfig::Disabled,
+            probe_interval: Duration::from_secs(5),
+            removal_confirmation_timeout: Duration::from_secs(2),
+            directory_gossip: true,
+        };
+        for i in 0..3 {
+            assert!(cluster.node_mut(i).set_cluster_config(config.clone()));
+        }
+        cluster.run_rounds(20); // converge membership
+
+        let counter = spawn_respawnable_counter(&mut cluster.node_mut(0));
+        // Two checkpoints within one activation: the shadow must retain the
+        // LATEST replica (41, then 51), not the first.
+        cluster.node_mut(0).send_message(counter, "inc", &[Value::int(41)]);
+        cluster.run_rounds(1);
+        cluster.node_mut(0).checkpoint_actor(counter);
+        cluster.node_mut(0).send_message(counter, "inc", &[Value::int(10)]);
+        cluster.run_rounds(1);
+        cluster.node_mut(0).checkpoint_actor(counter);
+        assert_eq!(counter_value(&cluster, 0, counter), 51);
+        // Gossip the directory to the survivors and deliver the replica.
+        cluster.run_rounds(20);
+
+        cluster.crash_node(0);
+        // Failure (2 s + 5 s) + confirmation window (2 s), with margin.
+        cluster.run_rounds(120);
+
+        let mut hosts = Vec::new();
+        for i in 1..3 {
+            if cluster.node(i).actors.contains_key(&counter) {
+                hosts.push((i, counter_value(&cluster, i, counter)));
+            }
+        }
+        assert_eq!(
+            hosts.len(),
+            1,
+            "exactly one survivor must re-spawn the actor (no duplicate)"
+        );
+        assert_eq!(
+            hosts[0].1, 51,
+            "re-spawned actor must restore the LAST durable snapshot (not the first)"
+        );
+    }
+
+    /// D7c goodbye path (RFC 0014 §1 path 1): a self-downing node must
+    /// checkpoint AND terminate its re-spawn-opted durable actors before
+    /// declaring them dead, or the shadow re-spawn would race a still-live
+    /// local copy. `goodbye_self` is what makes the declaration true.
+    #[test]
+    fn test_d7c_goodbye_self_checkpoints_and_terminates() {
+        use crate::runtime::{ClusterConfig, SplitBrainConfig};
+        use std::time::Duration;
+
+        let mut cluster = DeterministicCluster::new(&[addr(9301), addr(9302), addr(9303)], 11);
+        let config = ClusterConfig {
+            split_brain: SplitBrainConfig::Disabled,
+            probe_interval: Duration::from_secs(5),
+            removal_confirmation_timeout: Duration::from_secs(2),
+            directory_gossip: true,
+        };
+        for i in 0..3 {
+            assert!(cluster.node_mut(i).set_cluster_config(config.clone()));
+        }
+        cluster.run_rounds(20);
+
+        let counter = spawn_respawnable_counter(&mut cluster.node_mut(0));
+        cluster.node_mut(0).send_message(counter, "inc", &[Value::int(7)]);
+        cluster.run_rounds(1);
+        cluster.node_mut(0).checkpoint_actor(counter);
+        cluster.run_rounds(20);
+
+        // The self-down path: checkpoint + terminate, then the goodbye.
+        cluster.node_mut(0).goodbye_self();
+
+        // The goodbye declaration is now true: the local copy is gone.
+        assert!(
+            !cluster.node(0).actors.contains_key(&counter),
+            "goodbye_self must terminate the opted actor, not just list it"
+        );
+        // A survivor holds the replica (it received the shadow replicate).
+        let replica_holders = (1..3)
+            .filter(|&i| cluster.node(i).shadow_replicas.contains_key(&counter))
+            .count();
+        assert_eq!(
+            replica_holders, 1,
+            "exactly one survivor must hold the shadow replica"
+        );
+    }
+
+    /// D7c two-live-copies resolution (§5 self-demote): a node whose local
+    /// durable actor was superseded by a higher directory epoch must reap its
+    /// stale copy, so only the re-spawned survivor keeps writing.
+    #[test]
+    fn test_d7c_self_demote_superseded_actor() {
+        use crate::runtime::cluster::DurableDirectoryEntry;
+
+        let mut cluster = DeterministicCluster::new(&[addr(9401), addr(9402)], 13);
+        cluster.run_rounds(20);
+
+        let counter = spawn_respawnable_counter(&mut cluster.node_mut(0));
+        assert_eq!(cluster.node(0).respawn_opted.get(&counter), Some(&1));
+        let other_node = cluster.id(1);
+
+        // Simulate a re-joined node learning that a survivor re-spawned the
+        // actor at a higher epoch (the directory merge in gossip).
+        cluster
+            .node_mut(0)
+            .distributed
+            .cluster
+            .as_mut()
+            .unwrap()
+            .merge_directory(vec![DurableDirectoryEntry {
+                actor_id: counter,
+                node_id: other_node,
+                epoch: 2,
+            }]);
+
+        cluster.node_mut(0).self_demote_superseded();
+
+        assert!(
+            !cluster.node(0).actors.contains_key(&counter),
+            "self-demote must reap the superseded local copy"
+        );
+        assert!(
+            !cluster.node(0).respawn_opted.contains_key(&counter),
+            "self-demote must forget the superseded opt-in"
+        );
+        // The forwarding entry must point at the replacement node, not self.
+        assert_eq!(
+            cluster.node(0).migrated_actors.get(&counter).map(|(n, _)| *n),
+            Some(other_node),
+            "self-demote must forward sends to the directory's replacement node"
+        );
+    }
 }

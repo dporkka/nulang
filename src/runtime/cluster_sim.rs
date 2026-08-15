@@ -261,12 +261,9 @@ mod tests {
     }
 
     fn static_quorum(expected: usize) -> ClusterConfig {
-        ClusterConfig {
-            split_brain: SplitBrainConfig::StaticQuorum {
-                expected_nodes: expected,
-            },
-            probe_interval: Duration::from_secs(5),
-        }
+        ClusterConfig { split_brain: SplitBrainConfig::StaticQuorum {
+            expected_nodes: expected,
+        }, probe_interval: Duration::from_secs(5), ..Default::default() }
     }
 
     /// Enough rounds at 100 ms steps to drive a full failure-detection

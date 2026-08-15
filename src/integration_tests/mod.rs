@@ -4901,6 +4901,34 @@ match { a: 2, b: 9 } with {
         assert!(rt_ref.actors.contains_key(sup_id));
     }
 
+    /// D7c (RFC 0014 §4): the `.nula` supervisor surface — policy `3` on
+    /// `Otp.supervise_child` — opts a persistent child into
+    /// `RespawnOnNodeLoss` (shadow replication + directory registration),
+    /// recorded in the runtime's re-spawn opt-in table.
+    #[test]
+    fn test_otp_supervise_child_respawn_on_node_loss_policy_opts_in() {
+        let source = r#"
+            persistent actor Durable {
+                state durable count: Int = 0
+                behavior bump() { self.count = self.count + 1 }
+            }
+            let sup = perform Otp.create_supervisor("respawn", 0) in
+            let w = spawn Durable {} in
+            let s = perform Otp.supervise_child(sup, w, 3) in
+            w
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let child_id = value.as_actor_id().expect("spawn returns an actor id");
+
+        let rt_ref = rt.borrow();
+        assert_eq!(
+            rt_ref.respawn_opted.get(&child_id),
+            Some(&1),
+            "policy 3 must opt the persistent child into RespawnOnNodeLoss (epoch 1)"
+        );
+    }
+
     #[test]
     fn test_example_worker_pool_runs() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
