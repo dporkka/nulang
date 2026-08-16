@@ -60,6 +60,19 @@ pub(crate) fn spawn_actor_with_id(
         actor.register_behavior("__timer_fired", timer_fired_handler);
     }
     actor.state = crate::runtime::ActorState::Running;
+    // Restart recovery (CLI durability): when a persistent actor is spawned
+    // with an id that already has durable state in the persistence store
+    // (e.g. a previous `nula run` wrote `.nulang/store/actor_<id>/`), overlay
+    // the snapshot and replay the event log instead of keeping the declared
+    // defaults. Actor ids are drawn from a process-local counter that starts
+    // at the same value on every run, so a deterministic program re-spawns
+    // the same entities with the same ids after a restart. Fresh ids (new
+    // actors, or the default in-memory store used by tests) find no snapshot
+    // and are unaffected. Workflow actors have their own journal-based
+    // recovery path (`recover_actor`), so they are skipped here.
+    if persistent && workflow.is_none() {
+        restore_persistent_state(rt, &mut actor);
+    }
     rt.actors.insert(id, actor);
     if workflow.is_some() {
         let seq = crate::runtime::workflow::next_sequence(rt, id);
@@ -93,6 +106,38 @@ pub(crate) fn spawn_actor_with_id(
     }
     rt.enqueue_actor(id);
     id
+}
+
+/// Overlay previously persisted state onto a freshly spawned persistent
+/// actor: restore the durable-field snapshot, then replay the event-sourced
+/// event log (mirroring the restore portion of `Runtime::recover_actor`).
+/// A no-op when the store holds no snapshot for this actor id.
+fn restore_persistent_state(rt: &Runtime, actor: &mut Actor) {
+    // Event-sourced-only actors may have an event log but no snapshot
+    // (EventSourced fields are excluded from snapshots by design), so both
+    // halves run independently.
+    if let Some(snapshot) = rt.persistence.load_snapshot(actor.id) {
+        actor.sequence = snapshot.sequence;
+        actor.waiting_signal = snapshot.waiting_signal;
+        for (name, value) in snapshot.state {
+            let v = value.to_value_on_heap(actor);
+            actor.set_state_field(name, v);
+        }
+    }
+    for entry in rt.persistence.read_events(actor.id) {
+        let v = entry.value.to_value_on_heap(actor);
+        actor.set_state_field(&entry.field_name, v);
+        let current = actor
+            .event_sourced_sequences
+            .get(&entry.field_name)
+            .copied()
+            .unwrap_or(0);
+        if entry.sequence > current {
+            actor
+                .event_sourced_sequences
+                .insert(entry.field_name.clone(), entry.sequence);
+        }
+    }
 }
 
 /// Spawn an actor for `module`'s behavior `behavior_idx`, seeded with the
