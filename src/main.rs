@@ -475,7 +475,7 @@ fn main() {
                     .filter(|k| levenshtein_distance(arg, k) <= 3);
                 eprint!("Error: Unknown option: {}", arg);
                 if let Some(sug) = suggestion {
-                    eprint!(". Did you mean '{}'??", sug);
+                    eprint!(". Did you mean '{}'?", sug);
                 }
                 eprintln!();
                 eprintln!("Run with --help for usage information.");
@@ -1244,7 +1244,7 @@ fn suppress_stdout_stderr() -> (i32, i32) {
 fn restore_stdout_stderr(saved_out: i32, saved_err: i32) {
     extern "C" {
         fn dup2(oldfd: i32, newfd: i32) -> i32;
-        fn close(fd: i32);
+        fn close(fd: i32) -> i32;
     }
     if saved_out >= 0 {
         unsafe {
@@ -2160,7 +2160,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let n = a.len();
     let m = b.len();
-    let mut prev: Vec<usize> = vec![0usize; m + 1];
+    let mut prev: Vec<usize> = (0..=m).collect();
     let mut curr = vec![0usize; m + 1];
     for i in 1..=n {
         curr[0] = i;
