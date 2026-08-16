@@ -7,8 +7,6 @@ use crate::value_layout::{
 };
 use crate::vm::Value;
 use std::cell::{Cell, UnsafeCell};
-use std::ffi::CStr;
-
 // is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).
 
 /// Coerce a raw Nulang value to its string representation: the string content
@@ -34,6 +32,9 @@ fn raw_is_string(raw: u64) -> bool {
         if ptr.is_null() {
             return false;
         }
+        // SAFETY: TAG_PTR values reaching the JIT runtime are produced by
+        // `alloc_obj` on this thread's actor heap, so `ptr` is a live
+        // payload pointer and `header_of` recovers its valid header.
         unsafe {
             let header = &*ActorHeap::header_of(ptr);
             header.type_tag == HeapTypeTag::String
@@ -46,10 +47,18 @@ fn raw_is_string(raw: u64) -> bool {
 /// Allocate a heap string holding `s` and return its tagged pointer value.
 fn alloc_string_value(s: String) -> u64 {
     let bytes = s.into_bytes();
+    // SAFETY: `alloc_obj` returns a fresh payload of `bytes.len() + 1`
+    // bytes, so the copy plus trailing NUL fit exactly. The NUL satisfies
+    // the heap-string null-termination invariant relied on by
+    // `heap_string_payload` and other string readers.
     unsafe {
         if let Some(ptr) = alloc_obj(bytes.len() + 1, HeapTypeTag::String) {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
             *ptr.add(bytes.len()) = 0;
+            debug_assert!(
+                crate::value_layout::ptr_fits_payload(ptr as u64),
+                "heap pointer exceeds 48-bit value payload; address would be truncated"
+            );
             Value::ptr(ptr).as_raw()
         } else {
             Value::nil().as_raw()
@@ -476,19 +485,10 @@ fn resolve_jit_string(raw: u64) -> Option<String> {
         if ptr.is_null() {
             return None;
         }
-        // SAFETY: ptr is a valid ActorHeap allocation with a header.
-        // We check the type tag to ensure it's a string.
-        unsafe {
-            let header = &*ActorHeap::header_of(ptr);
-            if header.type_tag != HeapTypeTag::String {
-                return None;
-            }
-            Some(
-                CStr::from_ptr(ptr as *const std::ffi::c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
+        // SAFETY: ptr is a valid ActorHeap allocation with a header;
+        // `heap_string_payload` re-checks the type tag and bounds the scan
+        // for the NUL terminator by the recorded payload size.
+        unsafe { heap_string_payload(ptr) }
     } else {
         None
     }
@@ -875,19 +875,40 @@ pub fn resolve_string_coerce(raw: u64) -> Option<String> {
         if ptr.is_null() {
             return None;
         }
+        // SAFETY: TAG_PTR values reaching the JIT runtime are produced by
+        // `alloc_obj` on this thread's actor heap; `heap_string_payload`
+        // re-checks the type tag and bounds the NUL scan.
         unsafe {
-            let header = &*ActorHeap::header_of(ptr);
-            if header.type_tag != HeapTypeTag::String {
-                return None;
-            }
-            return Some(
-                std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+            return heap_string_payload(ptr);
         }
     }
     None
+}
+
+/// Read the string content of a heap string payload, or `None` when `ptr`
+/// does not point at a `HeapTypeTag::String` allocation.
+///
+/// Unlike a bare `CStr::from_ptr`, the scan for the NUL terminator is
+/// bounded by the payload size recorded in the object header, so a missing
+/// terminator (heap corruption or a foreign-constructed value) cannot read
+/// past the allocation.
+///
+/// # Safety
+/// `ptr` must be a live payload pointer returned by `alloc_obj` (or the
+/// equivalent actor-heap allocation) on this thread.
+unsafe fn heap_string_payload(ptr: *mut u8) -> Option<String> {
+    let header = &*ActorHeap::header_of(ptr);
+    if header.type_tag != HeapTypeTag::String {
+        return None;
+    }
+    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+    // SAFETY: `ptr..ptr+payload_size` is inside this live allocation.
+    let bytes = std::slice::from_raw_parts(ptr, payload_size);
+    // Find the NUL terminator within the allocation; fall back to the full
+    // payload (matching `to_string_lossy` behavior for unterminated data)
+    // instead of reading out of bounds.
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 #[no_mangle]
