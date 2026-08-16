@@ -1,5 +1,10 @@
 [workspace]
 members = ["crates/nulang-ai"]
+# The browser-playground crate re-uses compiler sources via #[path] includes
+# and builds only for wasm32-unknown-unknown; it is intentionally standalone
+# (its own lockfile, minimal pure-Rust dep set) and excluded from workspace
+# builds/tests so `cargo test --workspace` is unaffected.
+exclude = ["crates/nulang-playground"]
 
 [package]
 name = "nulang"
