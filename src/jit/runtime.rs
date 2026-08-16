@@ -1458,6 +1458,7 @@ unsafe fn call_closure_dispatch(fn_ptr: u64, all: &[u64]) -> u64 {
                 u64,
                 u64,
                 u64,
+                u64,
             ) -> u64 = std::mem::transmute(fn_ptr);
             f(
                 all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9],
@@ -1466,6 +1467,8 @@ unsafe fn call_closure_dispatch(fn_ptr: u64, all: &[u64]) -> u64 {
         }
         12 => {
             let f: unsafe extern "C" fn(
+                u64,
+                u64,
                 u64,
                 u64,
                 u64,
