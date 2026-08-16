@@ -130,11 +130,39 @@ fn resolve_path(base: &Path, import: &str) -> PathBuf {
     } else {
         base.join(p)
     };
-    if resolved.extension().is_none() {
+    let resolved = if resolved.extension().is_none() {
         resolved.with_extension("nula")
     } else {
         resolved
+    };
+    if resolved.exists() || p.is_absolute() {
+        return resolved;
     }
+    // Package-aware fallback: a bare module import (e.g. `import lib`) that
+    // isn't a sibling of the importing file is looked up in the package's
+    // `src/` directory. The package root is found by walking up from the
+    // importing file to the nearest directory containing a `Nulang.toml`.
+    // This is what lets `tests/*.nula` files import the package's own
+    // modules (e.g. `import lib` → `src/lib.nula`) when run by `nula test`.
+    let mut dir = base;
+    loop {
+        if dir.join("Nulang.toml").is_file() {
+            let candidate = dir.join("src").join(p);
+            let candidate = if candidate.extension().is_none() {
+                candidate.with_extension("nula")
+            } else {
+                candidate
+            };
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    resolved
 }
 
 fn decl_name(decl: &Decl) -> Option<&str> {
