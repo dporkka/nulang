@@ -100,7 +100,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target, &opts.with_capabilities,
+                &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -308,6 +308,15 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--store" => {
+                if i + 1 < args.len() {
+                    opts.store_path = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --store requires a directory path argument");
+                    std::process::exit(1);
+                }
+            }
             "--ffi-sandbox" => opts.ffi_sandbox = true,
             "--ffi-allow" => {
                 if i + 1 < args.len() {
@@ -447,6 +456,7 @@ fn main() {
                     "--emit-nbc",
                     "--verify",
                     "--bench",
+                    "--store",
                     "--version",
                     "--verbose",
                     "--color",
@@ -465,7 +475,7 @@ fn main() {
                     .filter(|k| levenshtein_distance(arg, k) <= 3);
                 eprint!("Error: Unknown option: {}", arg);
                 if let Some(sug) = suggestion {
-                    eprint!(". Did you mean '{}'?", sug);
+                    eprint!(". Did you mean '{}'??", sug);
                 }
                 eprintln!();
                 eprintln!("Run with --help for usage information.");
@@ -597,7 +607,7 @@ fn main() {
                 lm = cm;
                 eprintln!("\n--- {} ---", p);
                 if let Ok(s) = std::fs::read_to_string(&p) {
-                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None, &opts.target, &opts.with_capabilities) {
+                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None, &opts.target, &opts.with_capabilities, opts.store_path.as_deref()) {
                         print_error(&e, uc);
                     }
                 }
@@ -631,7 +641,7 @@ fn main() {
                         &opts.backend,
                         opts.out_file.as_deref(),
                         opts.metrics_port,
-                        &opts.target, &opts.with_capabilities,
+                        &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
                     )
                 },
                 n,
@@ -647,7 +657,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target, &opts.with_capabilities,
+                &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -734,7 +744,7 @@ fn main() {
                         backend,
                         out_file,
                         opts.metrics_port,
-                        &opts.target, &opts.with_capabilities,
+                        &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
                     )
                 },
                 n,
@@ -750,7 +760,7 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target, &opts.with_capabilities,
+                &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -782,7 +792,7 @@ fn main() {
             &opts.backend,
             opts.out_file.as_deref(),
             opts.metrics_port,
-            &opts.target, &opts.with_capabilities,
+            &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
         ) {
             print_error(&e, use_color);
             std::process::exit(exit_code(&e));
@@ -826,6 +836,11 @@ struct Options {
     with_capabilities: Vec<String>,
     /// Target ISA for AOT compilation: native (default), ptx, riscv64
     target: String,
+    /// Durable store directory for programs that declare durable/persistent
+    /// entities. `None` = resolve at run time: `NULANG_STORE_PATH` env var,
+    /// else `.nulang/store/`. Only consulted when the program declares
+    /// durable entities; other programs keep the in-memory store.
+    store_path: Option<String>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -853,6 +868,7 @@ impl Default for Options {
             ffi_allow: Vec::new(),
             with_capabilities: Vec::new(),
             target: "native".to_string(),
+            store_path: None,
         }
     }
 }
@@ -913,6 +929,8 @@ fn print_help() {
     println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  --metrics-port <N>  Start Prometheus metrics server on port N");
+    println!("  --store <dir>    Durable store directory for programs declaring durable");
+    println!("                   entities (default: $NULANG_STORE_PATH or .nulang/store/)");
     println!("  --color auto|always|never  Colorize error output (default: auto)");
     println!("  -h, --help       Show this help message");
 }
@@ -1226,7 +1244,7 @@ fn suppress_stdout_stderr() -> (i32, i32) {
 fn restore_stdout_stderr(saved_out: i32, saved_err: i32) {
     extern "C" {
         fn dup2(oldfd: i32, newfd: i32) -> i32;
-        fn close(fd: i32) -> i32;
+        fn close(fd: i32);
     }
     if saved_out >= 0 {
         unsafe {
@@ -1454,6 +1472,7 @@ fn run_source(
     metrics_port: Option<u16>,
     target: &str,
     with_capabilities: &[String],
+    store_path: Option<&str>,
 ) -> NuResult<()> {
     let (ast, type_checker) = run_frontend(source, file_path, verbose, with_capabilities)?;
     match backend {
@@ -1634,8 +1653,39 @@ fn run_source(
                         | nulang::ast::Decl::Workflow { .. }
                 )
             });
+            // Durable/event-sourced entities need a persistent store so
+            // state survives restarts. Resolution order: `--store` flag,
+            // `NULANG_STORE_PATH` env var, default `.nulang/store/`.
+            // Programs without durable declarations keep the in-memory
+            // store (as do `nula test` and the standalone VM paths).
+            let has_durable = ast.decls.iter().any(|d| {
+                matches!(
+                    d,
+                    nulang::ast::Decl::Actor {
+                        persistent: true,
+                        ..
+                    }
+                ) || matches!(
+                    d,
+                    nulang::ast::Decl::Actor { state_fields, .. }
+                    if state_fields.iter().any(|(_, model, _, _)| matches!(
+                        model,
+                        nulang::ast::StateModel::Durable | nulang::ast::StateModel::EventSourced
+                    ))
+                )
+            });
+            let store_dir = if has_actors && has_durable {
+                Some(
+                    store_path
+                        .map(|s| s.to_string())
+                        .or_else(|| std::env::var("NULANG_STORE_PATH").ok())
+                        .unwrap_or_else(|| ".nulang/store".to_string()),
+                )
+            } else {
+                None
+            };
             let value = if has_actors {
-                let (value, runtime) = run_with_runtime(m, metrics_port)?;
+                let (value, runtime) = run_with_runtime(m, metrics_port, store_dir.as_deref())?;
                 // Surface workflow step failures: a failed step used to be
                 // silent (exit 0, no diagnostic) — SPEC2 §10 known-issue #5.
                 let failures = runtime.borrow().workflow_failures();
@@ -1715,6 +1765,20 @@ fn run_source(
     }
 }
 
+/// Swap a runtime's in-memory persistence store for a file-backed
+/// [`JsonFileStore`](nulang::runtime::JsonFileStore) rooted at `dir`.
+/// Used by `nulang run` when the program declares durable/event-sourced
+/// entities so their state survives process restarts.
+fn install_file_store(runtime: &mut nulang::runtime::Runtime, dir: &str) -> NuResult<()> {
+    let store = nulang::runtime::JsonFileStore::new(dir).map_err(|e| NuError::RuntimeError {
+        msg: format!("failed to open durable store at '{}': {}", dir, e),
+        span: Span::default(),
+    })?;
+    runtime.persistence = Box::new(store);
+    eprintln!("[durable] persistent store: {}", dir);
+    Ok(())
+}
+
 /// Execute a module that declares actors against a real `Runtime`.
 ///
 /// The top-level code runs on a VM with runtime-backed callbacks (so
@@ -1725,6 +1789,7 @@ fn run_source(
 fn run_with_runtime(
     m: nulang::bytecode::CodeModule,
     metrics_port: Option<u16>,
+    store_dir: Option<&str>,
 ) -> NuResult<(
     nulang::vm::Value,
     std::rc::Rc<std::cell::RefCell<nulang::runtime::Runtime>>,
@@ -1740,6 +1805,11 @@ fn run_with_runtime(
         // VM (all initial `spawn` calls land here); other shards run their
         // own schedulers in background threads.
         let mut shards = nulang::runtime::Runtime::new_sharded(num_shards);
+        if let Some(dir) = store_dir {
+            for shard in &mut shards {
+                install_file_store(shard, dir)?;
+            }
+        }
         let remaining = shards.split_off(1);
         let shard_0 = shards.pop().unwrap();
 
@@ -1785,6 +1855,9 @@ fn run_with_runtime(
         Ok((value, std::rc::Rc::new(std::cell::RefCell::new(shard_0))))
     } else {
         let runtime = std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
+        if let Some(dir) = store_dir {
+            install_file_store(&mut runtime.borrow_mut(), dir)?;
+        }
         let mut vm = VM::new();
         vm.load_module(m);
         vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
@@ -2087,7 +2160,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let n = a.len();
     let m = b.len();
-    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut prev: Vec<usize> = vec![0usize; m + 1];
     let mut curr = vec![0usize; m + 1];
     for i in 1..=n {
         curr[0] = i;
@@ -2124,7 +2197,8 @@ mod tests {
             run_frontend(source, None, false, &[]).expect("frontend should accept the actor program");
         let module = compile_with_new_pipeline(&ast, "test", &type_checker)
             .expect("actor program should compile");
-        let (_value, runtime) = run_with_runtime(module, None).expect("actor program should run");
+        let (_value, runtime) =
+            run_with_runtime(module, None, None).expect("actor program should run");
         let rt = runtime.borrow();
         let actor = rt.actors.values().next().expect("one actor should exist");
         assert_eq!(
