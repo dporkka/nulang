@@ -9,7 +9,12 @@
 > The hand-rolled recursive-descent parser in `src/parser.rs` is the reference
 > implementation of this grammar. The conformance corpus in
 > `conformance/grammar/` (positive + negative examples) validates the parser
-> against this grammar; see `conformance/README.md` for the check harness.
+> against this grammar; see `conformance/README.md` for the check harness. The
+> corpus deliberately exercises **parser reality**; where the parser and this
+> grammar historically diverged, the drift is logged in
+> `conformance/grammar/README.md` and dispositioned (spec-fix, parser-fix, or
+> accepted leniency) in `docs/SPEC_RECONCILIATION.md`. The productions below
+> reflect the round-1 and round-2 reconciliations.
 >
 > Experimental surface (actors' `@backend`, `workflow`, `agent`, FFI `extern`,
 > Python interop, WIT) is **out of scope** for this grammar and is not part of
@@ -24,19 +29,40 @@
 ```
 IDENT        = lowercase ( lowercase | uppercase | digit | "_" )*
 UPPER_IDENT  = uppercase ( lowercase | uppercase | digit | "_" )*
-INT_LIT      = digit { digit } | "0x" hex_digit { hex_digit }
+INT_LIT      = digit { digit | "_" }
+              | "0x" hex_digit { hex_digit }
+              | "0o" octal_digit { octal_digit }
+              | "0b" bit { bit }
+                 (* the current lexer is more lenient than this: it accepts
+                    out-of-range digits (`0o8`, `0b2`), a bare `0b`, and a
+                    trailing underscore (`1_`). Tracked as a lexer bug — see
+                    docs/SPEC_RECONCILIATION.md round 2, items 10-11. *)
 FLOAT_LIT    = digit { digit } "." digit { digit } [ ("e"|"E") ["+"|"-"] digit { digit } ]
+                 (* the lexer accepts `1.2.3`, parsed as member-access
+                    chaining on a float literal. Lexer bug — same tracking. *)
 STRING_LIT   = '"' { char_escape | printable_char - '"' } '"'
-CHAR_LIT     = "'" ( char_escape | printable_char - "'" ) "'"
 BOOL_LIT     = "true" | "false"
+
+(* There are NO character literals. CHAR_LIT was removed after conformance
+   round 1 confirmed the lexer/parser have no char-literal support. *)
 ```
 
-Reserved keywords (not usable as identifiers): `fn`, `let`, `if`, `else`,
-`match`, `return`, `type`, `alias`, `enum`, `struct`, `effect`, `handle`,
-`perform`, `actor`, `behavior`, `spawn`, `send`, `receive`, `val`, `iso`,
-`trn`, `box`, `tag`, `lineariso`, `true`, `false`, `nil`, `unit`, `pub`,
-`extern`, `where`, `priv`, `loop`, `node`, `monitor`, `link`, `exit`,
-`await`, `subworkflow`, `case`, `do`.
+Note on identifier case: the productions below distinguish `IDENT` from
+`UPPER_IDENT` as the **normative convention** (types, variants, effects, and
+actors are PascalCase; values and functions are camelCase). The reference
+parser is case-insensitive in most of these positions (conformance round 2,
+items 12 and 23); that leniency is accepted and documented in
+`docs/SPEC_RECONCILIATION.md` — it is not a license to write lowercase type
+names in new code.
+
+Reserved keywords (not usable as identifiers): `fn`, `let`, `if`, `then`,
+`else`, `match`, `with`, `in`, `return`, `type`, `alias`, `enum`, `struct`,
+`effect`, `handle`, `perform`, `actor`, `behavior`, `spawn`, `send`,
+`receive`, `val`, `iso`, `trn`, `box`, `tag`, `lineariso`, `true`, `false`,
+`nil`, `unit`, `pub`, `extern`, `where`, `priv`, `loop`, `node`, `monitor`,
+`link`, `exit`, `await`, `subworkflow`, `case`, `do`, `var`, `not`.
+(`resume` and `after` are contextual: `resume` only inside a handle arm,
+`after` only after a `receive` block.)
 
 ## 2. Core productions (Frozen — RFC 0002)
 
@@ -45,39 +71,75 @@ effects except `IO.print`/`IO.read`, and all capabilities except `val`.
 
 ```
 program        = { decl SEP } ;
-fn_decl        = [ "pub" ] "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
+fn_decl        = [ "pub" ] "fn" IDENT [ type_params ] "(" [ param_list ] ")"
+                 [ "->" type ] [ fn_tail ] [ ":" cap ] block ;
                  (* return-type sigil is "->" (TokenKind::Arrow);
-                    src/parser.rs parse_function, consume_if(Arrow) at :654 *)
+                    src/parser.rs parse_function, consume_if(Arrow) at :654.
+                    fn_tail: after the return type, `! {Row}` is an EFFECT
+                    ROW, while `! E` / `throws E` (non-braced) is an ERROR
+                    TYPE, optionally followed by a second `!`/`throws` effect
+                    row (src/parser.rs:892-921). The same `! E` surface in a
+                    nested arrow TYPE is an effect row instead — see
+                    arrow_type below and round-2 drift item 5. *)
+fn_tail        = ( "!" | "throws" )
+                 ( effect_row | type [ ( "!" | "throws" ) effect_row ] ) ;
 decl           = fn_decl
                 | type_decl          (* enum / struct / variant *)
                 | alias_decl
                 | const_decl ;
 
 param_list     = param { "," param } ;
-param          = IDENT [ ":" type ] ;
+param          = [ cap ] IDENT [ ":" type ] ;
+                 (* capability annotations on parameters are PREFIX:
+                    `fn f(val x: Int)` (src/parser.rs try_parse_param_capability
+                    :5871, parse_params :5895). The postfix form
+                    `x: Int @ val` is REJECTED — round-2 drift item 1. *)
 
 type_decl      = [ "pub" ] "type" UPPER_IDENT [ type_params ]
                   ( variant_body | record_body ) ;
 type_params    = "[" IDENT { "," IDENT } "]" ;
-variant_body   = "=" variant { "|" variant } ;
-variant        = UPPER_IDENT [ "(" type { "," type } ")" ] ;
+variant_body   = [ "|" ] variant { "|" variant } ;
+variant        = UPPER_IDENT [ "(" type ")" ] ;
+                 (* a variant constructor carries at most ONE payload type;
+                    multi-payload `A(Int, Int)` is rejected
+                    (src/parser.rs parse_variants :5752) — round-1 drift. *)
 record_body    = "{" { field SEP } "}" ;
 field          = IDENT ":" type ;
-alias_decl     = [ "pub" ] "alias" UPPER_IDENT [ type_params ] "=" type ;
+alias_decl     = [ "pub" ] "type" "alias" UPPER_IDENT [ type_params ] "=" type ;
+                 (* the `type` keyword is mandatory; bare `alias Name = T` is
+                    rejected — round-1 drift. *)
 const_decl     = [ "pub" ] "const" IDENT [ ":" type ] "=" expr ;
 
-(* Expressions — Pratt precedence; listed lowest to highest binding *)
+(* Expressions — Pratt precedence; listed lowest to highest binding.
+   Operator table verified against src/parser.rs:31-46 (PREC_*) and the
+   infix table at :81-94. NOTE (quirk, adopted): shifts and the bitwise
+   operators `&`, `^`, `|||` bind TIGHTER than arithmetic, so
+   `1 + 2 & 3` parses as `1 + (2 & 3)`. Already documented in SPEC2 §2.6
+   and Appendix E item 3; resolution is deferred to an RFC. *)
 expr           = assign_expr ;
-assign_expr    = or_expr [ "=" assign_expr ] ;            (* only in `let`/`const` *)
+assign_expr    = range_expr [ "=" assign_expr ] ;        (* only in `let`/`const` *)
+                 (* there is NO compound assignment: `+=` / `-=` are lexed
+                    but rejected at parse time ("Not a binary operator:
+                    PlusAssign/MinusAssign", src/parser.rs:3019) — round-1
+                    drift. Lvalue checking is semantic, not syntactic:
+                    `1 = 2` parses (accepted leniency, round-2 item 16). *)
+range_expr     = or_expr { ".." or_expr } ;              (* half-open range *)
 or_expr        = and_expr { "||" and_expr } ;
 and_expr       = eq_expr { "&&" eq_expr } ;
 eq_expr        = cmp_expr { ( "==" | "!=" ) cmp_expr } ;
 cmp_expr       = add_expr { ( "<" | ">" | "<=" | ">=" ) add_expr } ;
 add_expr       = mul_expr { ( "+" | "-" ) mul_expr } ;
-mul_expr       = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
-unary_expr     = ( "-" | "!" ) unary_expr | primary ;
+mul_expr       = shift_expr { ( "*" | "/" | "%" ) shift_expr } ;
+shift_expr     = bitand_expr { ( "<<" | ">>" ) bitand_expr } ;
+bitand_expr    = bitxor_expr { "&" bitxor_expr } ;
+bitxor_expr    = bitor_expr { "^" bitor_expr } ;
+bitor_expr     = exp_expr { "|||" exp_expr } ;
+                 (* bitwise-or is `|||`; single `|` is reserved for
+                    arm/pattern syntax — round-1 drift. *)
+exp_expr       = unary_expr [ "**" exp_expr ] ;          (* right-assoc power *)
+unary_expr     = ( "-" | "!" | "not" | "&" | "*" ) unary_expr | primary ;
 
-primary        = INT_LIT | FLOAT_LIT | STRING_LIT | CHAR_LIT | BOOL_LIT
+primary        = INT_LIT | FLOAT_LIT | STRING_LIT | BOOL_LIT
                 | "nil" | "unit"
                 | IDENT
                 | "(" expr { "," expr } ")"            (* paren or tuple *)
@@ -92,23 +154,48 @@ call_expr      = primary "(" [ expr { "," expr } ")" ] ;  (* desugared in Pratt 
 record_literal = "{" { field_init SEP } "}" ;
 field_init     = IDENT [ ":" expr ] ;                     (* `x` desugars to `x: x` *)
 
-if_expr        = "if" expr block [ "else" ( if_expr | block ) ] ;
-match_expr     = "match" expr "{" { match_arm SEP } "}" ;
-match_arm      = [ "case" ] pattern "=>" expr ;
+if_expr        = "if" expr ( "then" ( block | expr ) | expr )
+                 [ "else" ( if_expr | block ) ] ;
+                 (* `then` is REQUIRED when the then-branch is a `{ }` block
+                    and optional before a bare expression
+                    (src/parser.rs parse_if :3563-3578) — round-1 drift. *)
+match_expr     = "match" expr [ "with" ] "{" { match_arm SEP } "}" ;
+match_arm      = [ "case" ] [ "|" ] pattern [ "if" expr ] "=>" expr ;
+                 (* both `case` and `|` arm prefixes are accepted, as are
+                    `if` guards (src/parser.rs parse_match :3615-3633). *)
 pattern        = "_" | INT_LIT | STRING_LIT | BOOL_LIT
-                | IDENT | UPPER_IDENT [ "(" pattern { "," pattern } ")" ]
-lambda         = "fn" "(" [ param_list ] ")" [ "->" type ] block ;
+                | IDENT | UPPER_IDENT [ "(" pattern ")" ]
+                (* single-payload constructor patterns, matching variant *)
+lambda         = "fn" "(" [ param_list ] ")" [ "->" [ type ] ] block ;
+                 (* in lambda position `->` may appear WITHOUT a type
+                    (round-2 item 21); `->` still requires a type in
+                    fn_decl. *)
 block          = "{" { stmt SEP } [ expr ] "}" ;
 stmt           = let_stmt | return_stmt | expr ;
 let_stmt       = "let" IDENT [ ":" type ] "=" expr ;
+                 (* no capability annotations on `let`: both
+                    `let val x = 1` and `let x: Int @ val = 1` are rejected
+                    — round-2 drift item 2. *)
 return_stmt    = "return" [ expr ] ;
 
 (* Types *)
 type           = arrow_type ;
-arrow_type     = atomic_type { "->" atomic_type } ;
+arrow_type     = atomic_type [ "->" arrow_type [ "!" effect_row ] [ ":" cap ] ] ;
+                 (* right-associative; the effect row / capability attach to
+                    the arrow as a whole (src/parser.rs parse_type_arrow
+                    :4933-4953). In TYPE position, `!` always introduces an
+                    effect row (never an error type). *)
 atomic_type    = UPPER_IDENT [ type_args ]    (* named: Int, Bool, String, Vec<T>, ... *)
                 | "(" [ type { "," type } ] ")" ;
 type_args      = "[" type { "," type } "]" ;
+
+effect_row     = "{" [ IDENT { "," IDENT } [ "," "|" IDENT ] | "|" IDENT ] "}" ;
+                 (* OPEN rows require a comma before the row bar when
+                    concrete effects precede it: `{IO, | r}`. `{IO | r}` is
+                    rejected; `{| r}` is fine (src/parser.rs parse_effect_row
+                    :5588) — round-2 drift item 4. In type position a bare
+                    effect name (`Int -> Int ! IO`) is also accepted as a
+                    closed row. *)
 
 SEP            = newline | ";" ;
 ```
@@ -129,22 +216,59 @@ handle_expr   = "handle" expr [ "with" [ IDENT ] ] "{" { handle_arm SEP } "}" ;
                 (* `with` is optional; `with name` references a prior
                    `handler name { ... }` declaration (src/parser.rs
                    parse_handle, consume_if(With) at :4182) *)
-handle_arm    = [ "|" ] UPPER_IDENT "." IDENT "(" [ param_list ] ")" [ "resume" ] "=>" expr ;
-cap           = "val" | "iso" | "trn" | "box" | "tag" | "lineariso" ;
-param         += IDENT ":" type "@" cap ;          (* capability-annotated param *)
-let_stmt      = "let" IDENT ":" type "@" cap "=" expr ;
+handle_arm    = [ "|" ] UPPER_IDENT "." IDENT "(" [ IDENT { "," IDENT } ] ")"
+                [ "resume" ] "=>" expr ;
+                (* arm parameters are BARE names (no type annotations), and
+                   handle arms have NO `if` guards — unlike match, receive,
+                   and catch arms (src/parser.rs parse_handle :4453-4484;
+                   round-2 drift item 7). `case` is not an arm prefix here. *)
+cap           = "val" | "iso" | "trn" | "ref" | "box" | "tag"
+              | "lineariso" | "linear" ;
+                (* full set per src/parser.rs parse_capability :5546 *)
+(* Capability-annotated parameters are the PREFIX form in §2 (`param`).
+   The postfix forms `x: Int @ val` and `let x: Int @ val = ...` from an
+   earlier draft of this section were removed in reconciliation round 2:
+   the parser rejects both (round-2 drift items 1-2). *)
+
+(* Error handling (Stable; slated for removal under DRAFT RFC 0015 —
+   the productions below describe the parser as it exists today) *)
+catch_expr    = "catch" expr ( expr | "{" { catch_arm SEP } "}" ) ;
+catch_arm     = [ "|" ] pattern [ "if" expr ] "=>" expr ;
+                (* catch arms accept `|` prefixes and `if` guards but NOT
+                   the `case` keyword (round-2 drift item 6). An empty arm
+                   block `catch e { }` parses (accepted leniency, item 20).
+                   The postfix form `expr catch expr` desugars identically. *)
+primary       += catch_expr ;
 
 (* Actors — the universal abstraction (SPEC2 Ch. 8) *)
 decl          += actor_decl ;
-actor_decl    = [ "pub" ] "actor" IDENT "{" { actor_member SEP } "}" ;
-actor_member  = state_field | behavior | fn_decl ;
-state_field   = "state" IDENT [ ":" type ] [ "@" state_model ] [ "=" expr ] ;
-state_model   = "local" | "durable" | "event_sourced" | "crdt" ;
-behavior      = "behavior" IDENT "(" [ param_list ] ")" block ;
+actor_decl    = [ "pub" ] [ "persistent" ] "actor" IDENT "{" { actor_member SEP } "}" ;
+actor_member  = state_field | behavior ;
+                (* the parser also accepts the event-sourcing members
+                   `initial`, `version: N`, `events { ... }`, `apply`, and
+                   `migration` (src/parser.rs parse_actor :1003-1086; see
+                   SPEC2 Ch. 9). `fn` declarations are REJECTED inside actor
+                   bodies — round-2 drift item 8. *)
+state_field   = "state" [ state_model ] IDENT [ ":" type ] "=" expr ;
+                (* the state model is a PREFIX keyword —
+                   `state durable b: Int = 0`; there is no `@ model` form
+                   (src/parser.rs parse_state_model :2031, parse_actor
+                   :1009-1023; conformance/grammar/positive_actors_round2.nula
+                   case 18). The `=` initializer is required. *)
+state_model   = "local" | "durable" | "event_sourced" | "crdt" [ IDENT ] ;
+                (* `crdt` may be followed by a CRDT type selector
+                   (`gcounter`, `pncounter`, `gset`, ...) — parse_state_model *)
+behavior      = "behavior" IDENT "(" [ param_list ] ")" [ "->" type ]
+                [ fn_tail ] [ ":" cap ] block ;
 
 (* Actor expressions *)
-spawn_expr    = "spawn" [ cap ] IDENT [ "{" [ init_fields ] "}" ]
-                [ "link" | "monitor" ] ;           (* parser desugar *)
+spawn_expr    = "spawn" [ "link" | "monitor" ] [ "@" expr ] IDENT
+                [ "(" [ expr { "," expr } ] ")" ] [ "{" [ init_fields ] "}" ] ;
+                (* `link`/`monitor` are PREFIX modifiers desugared at parse
+                   time (src/parser.rs parse_spawn :3839-3900). A capability
+                   between `spawn` and the actor name (`spawn iso Counter {}`)
+                   is REJECTED — round-2 drift item 3; capability-of-spawned-
+                   reference syntax is reserved for a future RFC. *)
 send_expr     = "send" [ "remote" ] expr IDENT "(" [ expr { "," expr } ] ")" ;
                 (* keyword form, src/parser.rs parse_send_keyword :3721.
                    Postfix form `actor ! behavior(args)` (equivalently
@@ -153,11 +277,18 @@ send_expr     = "send" [ "remote" ] expr IDENT "(" [ expr { "," expr } ] ")" ;
                    the same Expr::Send node. There is no `send a to b`
                    production. *)
 receive_expr  = "receive" "{" { receive_arm SEP } "}"
-                [ "after" expr "=>" block ] ;
+                [ "after" expr "=>" expr ] ;
+                (* zero arms (`receive {}`) parse, and the after-body is any
+                   expression, not only a block (round-2 item 13). `after` is
+                   a contextual identifier, not a keyword. *)
 primary       += spawn_expr | send_expr | receive_expr ;
-receive_arm   = [ "|" ] IDENT "(" [ param_list ] ")" "=>" expr ;
+receive_arm   = [ "|" ] IDENT "(" [ pattern { "," pattern } ] ")"
+                [ "if" expr ] "=>" expr ;
+                (* arm parameters are PATTERNS and arms accept `if` guards
+                   (src/parser.rs parse_receive :4558). *)
 (* Pipe operator *)
-primary       = primary "|>" IDENT [ "." IDENT ] ;  (* left-associative, desugars to call *)
+pipe_expr     = primary "|>" IDENT [ "." IDENT ] ;
+primary       += pipe_expr ;     (* left-associative, desugars to call *)
 ```
 
 ## 4. Out of scope (Experimental tier)
@@ -184,4 +315,9 @@ of §2 ∪ §3 and reject every string outside it (modulo Experimental §4). The
 `conformance/grammar/` corpus contains positive cases (must parse) and negative
 cases (must reject); `conformance/run.rs` executes them against the current
 parser. A drift between this grammar and the parser is a bug in whichever was
-not most recently updated under an RFC.
+not most recently updated under an RFC. Drift discovered by conformance rounds
+is dispositioned in `docs/SPEC_RECONCILIATION.md`; known parser leniencies that
+are accepted but NOT part of this grammar (trailing commas, case-insensitive
+identifier positions, expression-position `let` chaining without separators,
+`resume(...)` outside handler arms, degenerate empty blocks) are listed there
+rather than encoded above, so this grammar remains the normative target.
