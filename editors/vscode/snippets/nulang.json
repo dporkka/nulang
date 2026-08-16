@@ -1,0 +1,164 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:param}: ${3:Int}) -> ${4:Int} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "Public function": {
+    "prefix": "pfn",
+    "body": [
+      "pub fn ${1:name}(${2:param}: ${3:Int}) -> ${4:Int} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Public function declaration"
+  },
+  "Lambda": {
+    "prefix": "lambda",
+    "body": [
+      "fn (${1:param}: ${2:Int}) -> ${3:Int} { $0 }"
+    ],
+    "description": "Anonymous function (lambda)"
+  },
+  "Let binding": {
+    "prefix": "let",
+    "body": [
+      "let ${1:name} = $0"
+    ],
+    "description": "Let binding"
+  },
+  "Let binding with capability": {
+    "prefix": "letcap",
+    "body": [
+      "let ${1:name}: ${2:Type} @${3|val,iso,trn,ref,box,tag,lineariso|} = $0"
+    ],
+    "description": "Let binding with reference capability"
+  },
+  "Actor": {
+    "prefix": "actor",
+    "body": [
+      "actor ${1:Name} {",
+      "\tstate ${2:field}: ${3:Int} = ${4:0}",
+      "",
+      "\tbehavior ${5:do_thing}(${6:param}: ${7:Int}) {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Actor declaration"
+  },
+  "Behavior": {
+    "prefix": "behavior",
+    "body": [
+      "behavior ${1:name}(${2:param}: ${3:Int}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Actor behavior"
+  },
+  "Spawn actor": {
+    "prefix": "spawn",
+    "body": [
+      "let ${1:ref} = spawn ${2:Actor} {}$0"
+    ],
+    "description": "Spawn an actor instance"
+  },
+  "Send message": {
+    "prefix": "send",
+    "body": [
+      "${1:actor} ! ${2:behavior}(${3:args})"
+    ],
+    "description": "Send a message to an actor (postfix !)"
+  },
+  "Effect declaration": {
+    "prefix": "effect",
+    "body": [
+      "effect ${1:Name} {",
+      "\t${2:op}: (${3:Int}) -> ${4:String}",
+      "}"
+    ],
+    "description": "Effect declaration"
+  },
+  "Handle expression": {
+    "prefix": "handle",
+    "body": [
+      "handle ${1:expr} with {",
+      "\t${2:Effect}.${3:op}(${4:args}) resume => ${5:value}",
+      "}"
+    ],
+    "description": "Handle performed effects"
+  },
+  "Match expression": {
+    "prefix": "match",
+    "body": [
+      "match ${1:expr} {",
+      "\tcase ${2:pattern} => ${3:value}",
+      "\tcase _ => ${4:default}",
+      "}"
+    ],
+    "description": "Match expression with case arms"
+  },
+  "If expression": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If expression"
+  },
+  "If/else expression": {
+    "prefix": "ifelse",
+    "body": [
+      "if ${1:condition} {",
+      "\t${2}",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If/else expression"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:x} in ${2:items} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "For-in loop"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "While loop"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": [
+      "import ${1:stdlib::${2:json}}"
+    ],
+    "description": "Import a module"
+  },
+  "Type declaration": {
+    "prefix": "type",
+    "body": [
+      "type ${1:Name} = ${2:Variant}(${3:Int}) | ${4:Other}"
+    ],
+    "description": "Variant type declaration"
+  },
+  "IO.print": {
+    "prefix": "print",
+    "body": [
+      "perform IO.print(\"${1:message}\")"
+    ],
+    "description": "Print to stdout"
+  }
+}
