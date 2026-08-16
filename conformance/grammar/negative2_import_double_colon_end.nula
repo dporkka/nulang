@@ -1,0 +1,2 @@
+// Negative case: neg2_import_double_colon_end — must be rejected by the parser (round 2).
+import a::::b

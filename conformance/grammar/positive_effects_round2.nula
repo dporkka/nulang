@@ -1,0 +1,108 @@
+// Positive cases: algebraic effects round 2 — handler scoping, multiple
+// handlers, effect rows in signatures (grammar.ebnf §3; parser reality
+// noted inline).
+
+effect Rand2 { next: -> Int }
+effect Log2 { write: String -> Unit }
+effect Ask2 { get: -> Int }
+
+// case 01: two handle expressions in sequence (sequential handler scoping)
+fn e2_seq_handlers() {
+    let a = handle { perform Rand2.next() } { | Rand2.next() resume => 1 }
+    let b = handle { perform Log2.write("x") } { | Log2.write(s) resume => unit }
+    a
+}
+// case 02: handlers for different effects nested
+fn e2_nested_diff_effects() {
+    handle {
+        handle { perform Rand2.next() } { | Rand2.next() resume => 10 }
+    } { | Log2.write(s) resume => unit }
+}
+// case 03: inner handler shadows outer for the same effect
+fn e2_shadow_same_effect() {
+    handle {
+        handle { perform Rand2.next() } { | Rand2.next() resume => 2 }
+    } { | Rand2.next() resume => 3 }
+}
+// case 04: one handler with arms for two different effects
+fn e2_multi_effect_handler() {
+    handle { perform Rand2.next() } {
+        | Rand2.next() resume => 1
+        | Log2.write(s) resume => unit
+    }
+}
+// case 05: named handler with multiple arms, referenced by `with name`
+handler multi_handler = {
+    | Rand2.next() resume => 7
+    | Log2.write(s) resume => unit
+}
+fn e2_named_multi_arm() { handle { perform Rand2.next() } with multi_handler }
+// case 06: two named handlers used in two handle expressions
+handler r_handler = { | Rand2.next() resume => 1 }
+handler l_handler = { | Log2.write(s) resume => unit }
+fn e2_two_named() {
+    let a = handle { perform Rand2.next() } with r_handler
+    let b = handle { perform Log2.write("y") } with l_handler
+    a
+}
+// case 07: handler arm body performs another effect
+fn e2_arm_performs() {
+    handle { perform Rand2.next() } {
+        | Rand2.next() resume => { perform Log2.write("tick"); 1 }
+    }
+}
+// case 08: resume value threaded through arithmetic
+fn e2_resume_arith() {
+    handle { perform Rand2.next() + 1 } { | Rand2.next() resume => 41 }
+}
+// case 09: resume invoked with a computed expression
+fn e2_resume_computed() {
+    handle { perform Rand2.next() } { | Rand2.next() resume => resume(6 * 7) }
+}
+// case 10: handle inside a match arm
+fn e2_handle_in_match() {
+    match 1 {
+        case _ => handle { perform Rand2.next() } { | Rand2.next() resume => 0 }
+    }
+}
+// case 11: match inside a handle body
+fn e2_match_in_handle() {
+    handle { match 1 { case _ => perform Rand2.next() } } { | Rand2.next() resume => 0 }
+}
+// case 12: perform inside a lambda body
+fn e2_perform_in_lambda() {
+    let f = fn() { perform Rand2.next() }
+    handle { f() } { | Rand2.next() resume => 5 }
+}
+// case 13: effect row with two effects in a function type
+fn e2_row_two(f: Int -> Int ! {Rand2, Log2}) { f }
+// case 14: open effect row with row variable
+fn e2_row_open(f: Int -> Int ! {Rand2, | r}) { f }
+// case 15: braced effect row on the function's own return arrow
+fn e2_own_row() -> Int ! {Rand2} { perform Rand2.next() }
+// case 16: single-effect row without braces
+fn e2_row_bare(f: Int -> Int ! Rand2) { f }
+// case 17: one named handler reused by two handle expressions
+fn e2_handler_reused() {
+    let a = handle { perform Rand2.next() } with r_handler
+    let b = handle { perform Rand2.next() } with r_handler
+    a + b
+}
+// case 18: handle as the scrutinee of a match
+fn e2_handle_as_scrutinee() {
+    match handle { perform Rand2.next() } { | Rand2.next() resume => 1 } {
+        case 1 => 10
+        case _ => 0
+    }
+}
+// case 19: deeply nested handlers (three levels)
+fn e2_deep_nest() {
+    handle {
+        handle {
+            handle { perform Rand2.next() } { | Rand2.next() resume => 1 }
+        } { | Rand2.next() resume => 2 }
+    } { | Rand2.next() resume => 3 }
+}
+// case 20: effect op with tuple argument types
+effect Pair2 { swap: (Int, Int) -> Int }
+fn e2_tuple_args() { perform Pair2.swap(1, 2) }

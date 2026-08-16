@@ -1,0 +1,42 @@
+// Positive cases: error types and effect rows in signatures, round 2
+// (src/parser.rs parse_type_arrow / parse_effect_row; round-1 covered the
+// basic `-> T ! E` form).
+// NOTE: in fn-signature position `! E` parses E as an error TYPE name
+// (resolved at parse time), while inside a nested arrow type `!` starts
+// an effect row — see README drift log.
+
+type MyError = { msg: String }
+
+// case 01: error type on a function's own signature
+fn err_own() -> Int ! MyError { 1 }
+// case 02: error type combined with `throws` form
+fn err_throws() -> Int throws String { 1 }
+// case 03: error type with a multi-effect braced row
+fn err_row_multi(f: Int -> Int ! {IO, Rand}) { f }
+// case 04: open effect row with a row variable
+fn err_row_open(f: Int -> Int ! {IO, | r}) { f }
+// case 05: effect row followed by a capability annotation
+fn err_row_cap(f: Int -> Int ! IO : val) { f }
+// case 06: error type on a nested arrow (right side)
+fn err_nested_right(f: Int -> (String -> Int ! Error)) { f }
+// case 07: arrow chain where only the final arrow has an effect row
+fn err_chain(f: Int -> String -> Int ! IO) { f }
+// case 08: error type in a lambda annotation
+fn err_lambda() { let g = fn(x: Int) -> Int ! Error { x }; g }
+// case 09: braced row with three effects
+fn err_row_three(f: Int -> Int ! {IO, Rand, Net}) { f }
+// case 10: error type on a behavior signature via param
+actor ErrActor {
+    behavior run(f: Int -> Int ! {IO}) { f }
+}
+// case 11: open row with only a row variable
+fn err_row_only_var(f: Int -> Int ! {r}) { f }
+// case 12: error type in a type alias body
+type alias Risky = Int -> Int ! Error
+// case 13: function type with effect row as a return type
+fn err_ret_fntype() -> (Int -> Int ! {IO}) { err_ret_helper }
+fn err_ret_helper(x: Int) -> Int ! {IO} { x }
+// case 14: two capabilities and an effect row across a complex signature
+fn err_complex(iso f: Int -> Int ! {IO} : val, x: Int) { x }
+// case 15: error type with unit return
+fn err_unit_ret() -> Unit ! MyError { unit }

@@ -1,0 +1,2 @@
+// Negative case: neg2_star_assign — must be rejected by the parser (round 2).
+fn f() { let x = 1; x *= 2; x }

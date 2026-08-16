@@ -1,0 +1,2 @@
+// Negative case: neg2_effect_missing_brace2 — must be rejected by the parser (round 2).
+effect E op: -> Int }

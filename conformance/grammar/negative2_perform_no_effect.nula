@@ -1,0 +1,2 @@
+// Negative case: neg2_perform_no_effect — must be rejected by the parser (round 2).
+fn f() { perform op() }

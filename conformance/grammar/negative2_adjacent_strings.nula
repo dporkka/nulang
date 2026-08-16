@@ -1,0 +1,2 @@
+// Negative case: neg2_adjacent_strings — must be rejected by the parser (round 2).
+fn f() { g("a" "b") }

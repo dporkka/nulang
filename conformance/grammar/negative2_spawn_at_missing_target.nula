@@ -1,0 +1,2 @@
+// Negative case: neg2_spawn_at_missing_target — must be rejected by the parser (round 2).
+fn f() { spawn@ Counter {} }

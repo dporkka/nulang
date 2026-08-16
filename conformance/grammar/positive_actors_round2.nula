@@ -1,0 +1,105 @@
+// Positive cases: actors round 2 — spawn forms, supervision modifiers,
+// receive guards/timeouts, mixed members (grammar.ebnf §3 + parser
+// extensions noted inline).
+
+actor Worker {
+    state n: Int = 0
+    behavior run(x: Int) { n = x }
+}
+
+// case 01: spawn with positional args and named registration
+fn b_spawn_args_as() { spawn Worker(1) as "w1" }
+// case 02: spawn with link modifier and positional args
+fn b_spawn_link_args() { spawn link Worker(2) }
+// case 03: spawn with monitor modifier and named registration
+fn b_spawn_monitor_as() { spawn monitor Worker { n = 0 } as "w2" }
+// case 04: spawn with remote target `spawn@node` (parser extension)
+fn b_spawn_remote() { spawn@node1 Worker { n = 0 } }
+// case 05: spawn result bound and used with postfix send
+fn b_spawn_then_send() {
+    let w = spawn Worker { n = 0 }
+    w ! run(1)
+}
+// case 06: spawn with field init using colon separator
+fn b_spawn_colon_init() { spawn Worker { n: 3 } }
+// case 07: spawn with multiple field-init separators (semicolons)
+actor TwoFields {
+    state a: Int = 0
+    state b: Int = 0
+    behavior noop() { unit }
+}
+fn b_spawn_semi_fields() { spawn TwoFields { a = 1; b = 2 } }
+// case 08: behavior with a block-bodied if expression
+actor WithIf {
+    state n: Int = 0
+    behavior set(x: Int) { if x > 0 then { n = x } else { n = 0 } }
+}
+// case 09: receive with a guard on the arm (parser extension)
+fn b_receive_guard() {
+    receive {
+        | got(x) if x > 10 => 1
+        | got(x) => 0
+    }
+}
+// case 10: receive with after-timeout and guarded arms
+fn b_receive_guard_after() {
+    receive {
+        | got(x) if x > 10 => 1
+        | got(x) => 0
+    } after 50 => { 0 - 1 }
+}
+// case 11: receive with computed timeout expression
+fn b_receive_timeout_expr() {
+    let ms = 100
+    receive { | got(x) => x } after ms * 2 => { 0 }
+}
+// case 12: receive arm bodies calling behaviors on other actors
+fn b_receive_send_chain() {
+    let w = spawn Worker { n = 0 }
+    receive { | got(x) => send w run(x) }
+}
+// case 13: ask with timeout, result bound
+fn b_ask_bound() {
+    let w = spawn Worker { n = 0 }
+    let r = ask w run(1) timeout 25
+    r
+}
+// case 14: postfix `<-` async send chained after spawn
+fn b_arrow_send() {
+    let w = spawn Worker { n = 0 }
+    w <- run(9)
+}
+// case 15: remote send with string node expression
+fn b_remote_send_str() { send remote w run(1) }
+// case 16: behavior with capability-annotated parameter
+actor CapBehaviors {
+    behavior take(iso x: Int, val y: Int) { x }
+}
+// case 17: behavior whose body is a match expression
+actor MatchBody {
+    behavior classify(x: Int) {
+        match x {
+            case 0 => "zero"
+            case _ => "other"
+        }
+    }
+}
+// case 18: state with every model keyword in one actor
+actor AllModels {
+    state local a: Int = 0
+    state durable b: Int = 0
+    state event_sourced c: Int = 0
+    state crdt d: Int = 0
+    behavior noop() { unit }
+}
+// case 19: spawn nested inside a behavior body
+actor Spawner {
+    behavior make() { spawn Worker { n = 1 } }
+}
+// case 20: receive with tuple-pattern-style multiple params and pipe arms
+fn b_receive_multi_params() {
+    receive {
+        | pair(a, b) => a + b
+        | single(a) => a
+    }
+}
