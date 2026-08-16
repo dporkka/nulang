@@ -1,0 +1,54 @@
+// Positive cases: imports and type aliases, round 2
+// (src/parser.rs parse_import, parse_type_alias; grammar.ebnf §2
+// alias_decl — note the parser requires `type alias` or `type Name =`).
+// NOTE: the parser resolves type names at parse time, so `Vec` is
+// declared here as a local generic.
+
+type Wrap2[T] = W2(T)
+
+// case 01: bare module import
+import math
+// case 02: two-segment import path with `::`
+import math::utils
+// case 03: deep import path
+import std::collections::hash_map
+// case 04: import path with underscores and digits
+import net2::http_client
+// case 05: multiple imports in sequence
+import a
+import b::c
+import d::e::f
+// case 06: alias of a primitive type
+type alias UserId = Int
+// case 07: alias of a string type
+type alias Name = String
+// case 08: alias of a tuple type
+type alias Pair2 = (Int, Int)
+// case 09: alias of an arrow type
+type alias Mapper = Int -> Int
+// case 10: alias of an arrow type with an effect row
+type alias Effectful = Int -> Int ! IO
+// case 11: alias with a type parameter over a declared generic
+type alias Boxed[T] = Wrap2[T]
+// case 12: alias used in a parameter type
+fn ia_alias_param(x: UserId) { x }
+// case 13: alias used in a return type
+fn ia_alias_ret() -> Name { "n" }
+// case 14: alias used in a let annotation
+fn ia_alias_let() { let x: UserId = 1; x }
+// case 15: `type Name = <non-variant type>` desugars to an alias
+type Score = Int
+// case 16: `type Name = <arrow type>` desugars to an alias
+type Transform = Int -> String
+// case 17: `type Name = <tuple type>` desugars to an alias
+type Tri = (Int, Int, Int)
+// case 18: pub type alias of a record type expression
+pub type alias PointAlias = { x: Int, y: Int }
+// case 19: opaque alias (parser extension: `opaque type`)
+opaque type TokenId = Int
+// case 20: alias referencing another alias
+type alias IdAlias = UserId
+// case 21: alias of a parenthesized type
+type alias ParenInt = (Int)
+// case 22: alias of a generic instantiation
+type alias IntVec = Wrap2[Int]
