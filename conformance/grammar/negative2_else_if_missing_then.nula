@@ -1,0 +1,2 @@
+// Negative case: neg2_else_if_missing_then — must be rejected by the parser (round 2).
+fn f() { if true then { 1 } else if false { 2 } }

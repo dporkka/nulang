@@ -1,0 +1,2 @@
+// Negative case: neg2_generic_missing_close2 — must be rejected by the parser (round 2).
+fn f(x: Wrap[Int { x }

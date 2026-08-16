@@ -1,0 +1,2 @@
+// Negative case: neg2_param_missing_comma — must be rejected by the parser (round 2).
+fn f(x y: Int) { x }
