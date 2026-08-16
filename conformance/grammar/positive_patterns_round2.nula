@@ -1,0 +1,48 @@
+// Positive cases: pattern matching round 2 — guards, or-patterns, alias
+// patterns, record/tuple patterns, literal variety (parser extensions
+// beyond grammar.ebnf §2 pattern noted inline).
+
+// case 01: guard comparing the bound variable
+fn p2_guard_cmp() { match 5 { case x if x > 3 => 1; case _ => 0 } }
+// case 02: guard with a compound condition
+fn p2_guard_compound() { match 5 { case x if x > 3 && x < 10 => 1; case _ => 0 } }
+// case 03: guard on a constructor payload binding
+fn p2_guard_ctor() { match 1 { case Some(x) if x == 1 => x; case _ => 0 } }
+// case 04: or-pattern of two constructors (parser extension: arm duplication)
+fn p2_or_ctors() { match 1 { case Some(x) | None => 0; case _ => 1 } }
+// case 05: or-pattern of integer literals
+fn p2_or_ints() { match 2 { case 1 | 2 | 3 => 1; case _ => 0 } }
+// case 06: or-pattern with a guard
+fn p2_or_guard() { match 2 { case 1 | 2 if true => 1; case _ => 0 } }
+// case 07: alias pattern binding a whole constructor (parser extension `@`)
+fn p2_alias_ctor() { match 1 { case s @ Some(x) => x; case _ => 0 } }
+// case 08: alias pattern binding a nested constructor
+fn p2_alias_nested() { match 1 { case s @ Some(Some(x)) => x; case _ => 0 } }
+// case 09: tuple pattern at the top level
+fn p2_tuple() { match (1, 2) { case (a, b) => a + b; case _ => 0 } }
+// case 10: tuple pattern with a wildcard slot
+fn p2_tuple_wild() { match (1, 2) { case (a, _) => a; case _ => 0 } }
+// case 11: record pattern with two fields
+fn p2_record() { match 1 { case { x: a, y: b } => a + b; case _ => 0 } }
+// case 12: record pattern with a nested constructor field
+fn p2_record_nested() { match 1 { case { x: Some(v) } => v; case _ => 0 } }
+// case 13: float literal pattern
+fn p2_float() { match 1.5 { case 1.5 => 1; case _ => 0 } }
+// case 14: nil literal pattern
+fn p2_nil() { match nil { case nil => 1; case _ => 0 } }
+// case 15: unit literal pattern
+fn p2_unit() { match unit { case unit => 1; case _ => 0 } }
+// case 16: triple-nested constructor pattern
+fn p2_triple_nest() { match 1 { case Some(Some(Some(x))) => x; case _ => 0 } }
+// case 17: constructor pattern containing a tuple pattern
+fn p2_ctor_tuple() { match 1 { case Some((a, b)) => a; case _ => 0 } }
+// case 18: constructor pattern containing a record pattern
+fn p2_ctor_record() { match 1 { case Some({ x: v }) => v; case _ => 0 } }
+// case 19: or-pattern mixing literals and wildcard-free constructors
+fn p2_or_mixed() { match 1 { case 0 | None => 0; case _ => 1 } }
+// case 20: guard referencing an alias binding
+fn p2_guard_alias() { match 1 { case s @ Some(x) if x > 0 => x; case _ => 0 } }
+// case 21: arms separated by commas (parser tolerance)
+fn p2_comma_sep() { match 1 { case 1 => 1, case _ => 0 } }
+// case 22: deeply nested tuple-in-tuple pattern
+fn p2_tuple_nested() { match 1 { case ((a, b), c) => a + b + c; case _ => 0 } }
