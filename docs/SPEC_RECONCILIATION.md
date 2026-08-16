@@ -145,106 +145,86 @@ next frozen-tier bump.
 
 ---
 
-# Round 2 — Grammar Conformance Reconciliation
+# Round 2 (branch `docs/spec-reconciliation-2`)
 
-Reconciliation pass over the round-1 and round-2 drift findings in
-`conformance/grammar/README.md` (drift log) against `spec/grammar.ebnf`
-and `SPEC2.md`. Ground truth was established by reading `src/parser.rs`
-(`parse_if` :3513, `try_parse_param_capability` :5871, `parse_spawn`
-:3839, `parse_actor` :969-1105, `parse_handle` :4424, `parse_catch_prefix`
-:4494 / postfix catch :2884, `parse_receive`, `parse_effect_row` :5588,
-fn-signature error-type/effect annotation :884-930, the Pratt table
-:30-100) and `src/lexer.rs` (`read_number` :585, `keyword()` :1193).
-No Rust source was modified.
+Reconciliation of the drift findings produced by grammar conformance rounds 1
+and 2 (`conformance/grammar/README.md` drift log: 8 round-1 items pinned in
+case comments; round 2 added 8 hard rejections + 16 parser leniencies).
+Ground truth was re-verified against `src/parser.rs` and `src/lexer.rs` on
+`main` (tip `b33b9e7`). No Rust source and no `.nula` program logic was
+modified. Disposition classes: **spec-fix** (the spec was wrong; grammar.ebnf
+and/or SPEC2 corrected to match the reference parser), **parser-fix** (known
+parser deviation; fix scheduled — spec unchanged), **accepted** (intentional
+leniency; documented, spec unchanged or annotated).
 
-Branch: `docs/spec-reconciliation-2`.
+Summary: **17 spec-fixes, 6 parser-fixes, 9 accepted** (32 drift rows total).
 
-**Disposition counts (32 items): 17 spec-fixes, 7 parser-fixes
-scheduled, 8 accepted leniencies.**
+## 8. Round-1 carryover (EBNF §1–§3 corrections applied in this pass)
 
-## Round-1 drift log items — dispositions
+These items were logged in round 1 (`conformance/grammar/README.md`) but the
+EBNF corrections themselves land in this pass.
 
-| # | Item | Disposition | Resolution |
-|---|------|-------------|------------|
-| R1.1 | `if` requires `then` | **Spec fix** | Precise rule: `then` is optional for an expression then-branch but **required** for a block then-branch (`src/parser.rs:3563-3577`). `grammar.ebnf` §2 `if_expr` and SPEC2 §6.6 updated. |
-| R1.2 | Variant payloads take a single type | **Spec fix** | `grammar.ebnf` §2 `variant` now allows one payload type; multi-value constructors take a tuple payload (SPEC2 §3.5 already said this). |
-| R1.3 | Capabilities on parameters are prefix (`val x: Int`) | **Spec fix** | This is the implemented, Pony-style syntax; the EBNF's postfix `x: Int @ val` production was removed. `grammar.ebnf` §2 `param`, SPEC2 §2.7/A.2 updated. |
-| R1.4 | Type aliases require `type alias` or a non-variant `type Name =` body | **Spec fix** | Bare `alias Name = T` rejected (`src/parser.rs:2159`, :735 alias only under `type`). `grammar.ebnf` §2 `alias_decl`/`alias_body`, SPEC2 A.2 updated. |
-| R1.5 | No character literals | **Spec fix** | `CHAR_LIT` removed from `grammar.ebnf`; SPEC2 §2.5.4/§3.6 already marked `Char` Planned. |
-| R1.6 | No compound assignment (`+=`, `-=`) | **Spec fix** | Tokens lex but are rejected at parse time; documented in `grammar.ebnf` §2 `assign_expr`. |
-| R1.7 | Bitwise/shift binds tighter than arithmetic | **Accepted** | Documented Pratt quirk (SPEC2 §2.6 + Appendix E item 3); changing it is a breaking change reserved for an RFC before the next freeze. `grammar.ebnf` §2 now encodes the real precedence levels. |
-| R1.8 | Bitwise-or is `\|\|`; single `\|` reserved | **Spec fix** | `grammar.ebnf` §2 expression ladder now includes `<<`/`>>`/`&`/`^`/`\|\|`/`**` at the parser's levels (`src/parser.rs:30-46`). |
+| # | Drift | Ground truth | Disposition |
+|---|---|---|---|
+| 8.1 | `if` requires `then` | `then` is optional before a bare expression but **required** before a `{ }` block branch (`src/parser.rs` `parse_if` :3563-3578) | **spec-fix** — grammar.ebnf §2 `if_expr` and SPEC2 §6.6 / Appendix A `conditional` corrected |
+| 8.2 | Variant payloads take a single type | `parse_variants` (:5752) parses at most one `(type)` payload | **spec-fix** — grammar.ebnf `variant` |
+| 8.3 | Parameter capabilities are prefix (`val x: Int`), not postfix (`x: Int @ val`) | `try_parse_param_capability` (:5871) consumes a capability keyword *before* the parameter name; no postfix `@ cap` parse exists | **spec-fix** — grammar.ebnf §2 `param = [ cap ] IDENT [ ":" type ]`; §3 postfix production removed. Matches ML-flavored design intent; prefix form is implemented reality (see also 9.1) |
+| 8.4 | Type aliases require `type alias`; bare `alias Name = T` rejected | Appendix A already correct | **spec-fix** — grammar.ebnf `alias_decl` now `"type" "alias" ...` |
+| 8.5 | No character literals | No `CharLit` token in `src/lexer.rs` | **spec-fix** — `CHAR_LIT` removed from grammar.ebnf §1 |
+| 8.6 | No compound assignment (`+=`/`-=` rejected: "Not a binary operator") | Tokens exist (`src/lexer.rs` PlusAssign :141) and sit in the Pratt table, but `parse_expr_with_prec` rejects them at :3019 | **accepted** (no spec change) — grammar.ebnf already excludes compound assignment; annotated with a comment. The dead tokens are harmless; removal is a cleanup, not a language change |
+| 8.7 | Bitwise/shift operators bind tighter than arithmetic (Pratt quirk) | `PREC_SHIFT`=10 … `PREC_BITOR`=13 sit above `PREC_TERM`/`PREC_FACTOR` (:39-44) | **spec-fix** — grammar.ebnf §2 expression chain now encodes the real precedence (`<<`/`>>`, `&`, `^`, `|||`, `**`, `..`); quirk remains listed in SPEC2 Appendix E item 3 for RFC resolution |
+| 8.8 | Bitwise-or is `|||`; single `|` reserved for arm/pattern syntax | Infix table maps `Pipe3` to `PREC_BITOR` (:94); no `|` infix production | **spec-fix** — folded into the §2 expression chain above |
 
-## Round-2 drift log items — dispositions
+## 9. Round-2 hard rejections (EBNF said legal; parser is stricter)
 
-### Hard rejections (parser stricter than the old EBNF) — all spec fixes
+| # | Drift | Ground truth | Disposition |
+|---|---|---|---|
+| 9.1 | Postfix capability on params (`fn f(x: Int @ val)`) rejected | see 8.3 | **spec-fix** — postfix production removed from grammar.ebnf §3 (item 1) |
+| 9.2 | Capabilities on `let` rejected (both `let x: Int @ val = 1` and `let val x = 1`) | `let_stmt` parsing has no capability path | **spec-fix** — the §3 `let_stmt` capability production removed (item 2). Capability-qualified *types* on `let` (`let x: &iso [Int] = ...`, SPEC2 §3.9) remain and are unrelated surface |
+| 9.3 | `spawn [cap]` rejected (`spawn iso Counter {}`) | `parse_spawn` (:3839) has no capability parse; it does parse prefix `link`/`monitor`, `@target`, and positional args | **spec-fix** — grammar.ebnf §3 `spawn_expr` rewritten to the real form; `link`/`monitor` moved to prefix position. Capability-of-spawned-reference syntax reserved for a future RFC (item 3) |
+| 9.4 | Open effect row requires comma before the bar: `{IO, | r}`; `{IO | r}` rejected; `{| r}` fine | `parse_effect_row` (:5588): after an effect name only `,` continues the loop | **spec-fix** — grammar.ebnf §2 `effect_row` + SPEC2 Appendix A.5 corrected (item 4). SPEC2 body text already used the comma form |
+| 9.5 | `!` after a fn-signature return type is an error TYPE (`fn f() -> Int ! MyError`); inside a nested arrow type `!` introduces an effect row (`f: Int -> Int ! IO`) | `parse_function` :892-921 (`! {..}` row / `! E` or `throws E` error type, optional second `!`/`throws` row) vs `parse_type_arrow` :4933-4953 (`!` always a row) | **spec-fix** — grammar.ebnf §2 `fn_decl`/`fn_tail`/`arrow_type` + SPEC2 Appendix A.2 `fn_effect` (item 5). Tension with `!` overloading already tracked in SPEC2 Appendix E item 1 |
+| 9.6 | `case` not accepted in `catch` arms (match arms accept it) | `parse_catch_prefix` (:4494): catch arms are bare or `|`-prefixed, with optional `if` guards | **spec-fix** — `catch_expr`/`catch_arm` productions added to grammar.ebnf §3 and SPEC2 Appendix A.3 (item 6). NOTE: all `catch`/`fail` forms are slated for **removal** under **DRAFT RFC 0015**; the productions describe the parser as it exists today. If RFC 0015 is accepted, this grammar surface is deleted rather than maintained — flagged here per the RFC-note policy, RFCs themselves not rewritten |
+| 9.7 | Handle arms have no `if` guards (match/receive/catch arms do) | `parse_handle` (:4453-4484): arm params are **bare identifiers** (no types) and no guard parse exists | **spec-fix** — grammar.ebnf §3 `handle_arm` corrected (bare params, no guard) and SPEC2 Appendix A.3 annotated (item 7). Guards on handle arms are a reasonable future RFC; not scheduled |
+| 9.8 | No `fn` members in actor bodies | `parse_actor` (:1003-1086) accepts only `state`, `behavior`, `initial`, `version`, `events`, `apply`, `migration` | **spec-fix** — grammar.ebnf §3 `actor_member` and SPEC2 Appendix A.6 corrected; the additional event-sourcing members are listed (item 8) |
 
-| # | Item | Disposition | Resolution |
-|---|------|-------------|------------|
-| 1 | Postfix `@cap` on params rejected | **Spec fix** | EBNF §3 `param += IDENT ":" type "@" cap` removed; prefix-only is normative (`src/parser.rs:5871`). |
-| 2 | Capabilities on `let` rejected (both forms) | **Spec fix** | EBNF §3 capability `let_stmt` removed; `grammar.ebnf` §2 `let_stmt` documents the rejection. Capability-qualified let surface remains **Planned**. |
-| 3 | `spawn [cap]` rejected | **Spec fix** | EBNF §3 `spawn_expr` rewritten to the real grammar (`[link\|monitor]`, `[@node]`, positional args XOR field-init block, trailing `as "name"`); no capability parsing exists in `parse_spawn` (:3839). Capability-qualified spawn remains **Planned**. SPEC2 §8.7 updated. |
-| 4 | Open effect row requires comma before `\|` (`{IO, \| r}`) | **Spec fix** | EBNF §2 `effect_row` and SPEC2 A.5 now require the comma; `{IO \| r}` rejected, `{ \| r}` and `{r}` accepted (`parse_effect_row` :5588). |
-| 5 | `! E` after a fn-signature return type is an error TYPE; in nested arrow types `!` starts an effect row | **Spec fix** | Positional split documented in EBNF `sig_suffix`/`error_type` vs `arrow_type` and SPEC2 A.2/A.5; already listed as design tension (SPEC2 Appendix E item 1). A future disambiguation is a breaking change for an RFC. |
-| 6 | `case` not accepted in `catch` arms | **Spec fix** | EBNF §3 `catch_expr`/`catch_arm` added (guards and `\|` prefixes allowed, no `case`); SPEC2 §6.11 documents it. Consistent with RFC 0015 (Draft), which removes `catch` — see §"RFC notes" below. |
-| 7 | No guards on `handle` arms | **Spec fix** | `handle_arm` admits bare parameter names and no guards (`parse_handle` :4424); SPEC2 §4.4 documents the asymmetry with match/catch/receive. |
-| 8 | No `fn` members in actor bodies | **Spec fix** | EBNF §3 `actor_member` = `state` \| `behavior` \| `initial` \| `version` \| `events` \| `apply` \| `migration` (`parse_actor` :1003-1105); SPEC2 §8.1/A.6 updated. |
+## 10. Round-2 parser leniencies
 
-### Parser leniencies — dispositions
+### 10a. Parser bugs — fix scheduled (spec unchanged; parser to converge)
 
-| # | Item | Disposition | Proposed resolution |
-|---|------|-------------|---------------------|
-| 9 | Unterminated block comments lex to EOF; nested `/* /* */` swallows the file | **Parser fix scheduled** | Lexer should error on unterminated `/*` at EOF. |
-| 10 | `0o8`, `0b2`, bare `0b`, `1_` "lex as numbers" — in fact the lexer splits radix-prefixed/separated digit runs into `Int` + identifier (`0b1010` → `0` + `b1010`), which can then parse as adjacent expressions | **Parser fix scheduled** | Lex `0b`/`0o`/`0x` prefixes and `_` separators properly, or raise a lex error. SPEC2 §2.5.1 now documents the deviation; until fixed these forms are rejected-by-design. |
-| 11 | `1.2.3` parses (member-access chaining on a float literal) | **Parser fix scheduled** | Reject a second `.` immediately following a float literal's fraction. |
-| 12 | Case conventions unenforced: lowercase type/effect names (`type x = Int`, `perform rand.int()`), uppercase module segments accepted | **Accepted leniency** | The IDENT/UPPER_IDENT distinction remains normative in the EBNF for variant constructors; elsewhere it is a naming convention. A lint (not a parse error) is the intended enforcement. |
-| 13 | `receive {}` and non-block `after` bodies parse | **Spec fix** | Adopted: EBNF §3 `receive_expr` admits an empty arm block and any expression `after` body (matches the standalone `after ms => expr` sugar). |
-| 14 | `resume(1)` outside a handler arm parses as an ordinary expression | **Parser fix scheduled** | Known deviation: `resume` should be an error outside a handler arm (or unambiguous function-call syntax); today it fails only at runtime ("VM error", SPEC2 §4.4.2). |
-| 15 | Trailing commas tolerated in call args, match arms, type params, tuple types | **Accepted leniency** | Documented as tolerated-not-normative in the EBNF header and reflected in the productions (`[ "," ]`). |
-| 16 | `1 = 2` (assignment to a literal) parses | **Accepted leniency** | Lvalue checking is semantic, not syntactic; documented in EBNF `assign_expr`. |
-| 17 | `#{...}` interpolation parses only the first expression, silently ignoring trailing tokens | **Parser fix scheduled** | Parser must consume the full expression and require the closing `}`. SPEC2 §2.5.3 documents the deviation. |
-| 18 | `type X = A B` (missing `\|`) parses; second variant name not an error at parse time | **Parser fix scheduled** | Variant parser should require `\|` between constructors. |
-| 19 | `let x = 1 let y = 2` parses (separator-less chaining) | **Accepted leniency** | Statement separators are effectively optional between `let` bindings; harmless in expression-position `let` chains. |
-| 20 | `g() catch { }` (empty catch block) parses | **Accepted leniency** | Harmless (desugars to a match that re-raises); `catch` itself is slated for removal under RFC 0015 (Draft). Documented in SPEC2 §6.11. |
-| 21 | `fn(x: Int) -> { x }` (lambda `->` with no type) parses, while `fn f() -> { 1 }` is rejected | **Spec fix** | Adopted: EBNF §2 `lambda` allows `->` without a type; declarations still require one. SPEC2 A.3 updated. |
-| 22 | `const = 1` (missing name) parses | **Parser fix scheduled** | `parse_const` should require an identifier. Noted in EBNF `const_decl`. |
-| 23 | `fn Foo() {}` — uppercase function names accepted | **Accepted leniency** | Same convention-level case leniency as item 12. |
-| 24 | Dot-imports (`import a.b`) produce a dedicated diagnostic ("use `::`") | **Accepted** | Intentional helpful error; EBNF `import_decl` documents the `::` requirement. No change. |
+| # | Leniency | Proposed resolution |
+|---|---|---|
+| 10.1 | Unterminated block comments (`/* ...` to EOF) lex without error; nested `/* /* */` swallows the rest of the file (item 9) | Lexer must error on unterminated block comment (standard ML-family behavior); add negative conformance case. Scheduled as a lexer bug fix |
+| 10.2 | Digit-set violations accepted: `0o8`, `0b2`, bare `0b`, trailing underscore `1_` (item 10) | Lexer must validate digit sets per radix and reject a trailing separator. Scheduled as a lexer bug fix |
+| 10.3 | `1.2.3` parses (member-access chaining on a float literal) (item 11) | Lexer must reject a second `.` immediately following a float literal's digits. Scheduled as a lexer bug fix |
+| 10.4 | Interpolation `#{...}` parses only the first expression and silently ignores trailing tokens (`"#{a b}"` parses as `a`); a stray `}` becomes literal text (item 17) | Silent token dropping is a parser bug: reject trailing tokens before the closing `}`. Scheduled |
+| 10.5 | `type X = A B` (missing `|` between variants) parses without error at parse time (item 18) | `parse_variants` must require `|` or end-of-body after each variant. Scheduled |
+| 10.6 | `const = 1` (missing const name) parses (item 22) | `parse_const` must require an identifier. Scheduled |
 
-## RFC notes
+### 10b. Accepted leniencies (documented; grammar remains the normative target)
 
-- **RFC 0015 (Draft, error-model consolidation)** proposes removing `catch`
-  entirely. Dispositions 6 and 20 document *current* `catch` surface and do
-  not contradict the RFC; if 0015 is accepted, `catch_expr`/`catch_arm`
-  leave `grammar.ebnf` §3 under its deprecation plan (RFC 0015 §"Migration").
-  No RFC text was changed.
-- **RFC 0002 (Frozen Core)** is unaffected: every Core-production change
-  above is a *correction toward the parser* that round-1/round-2 conformance
-  evidence shows was the implemented behavior at freeze time (prefix
-  capabilities were already the only implemented form). No Core semantics
-  changed.
-- **Launch docs** (`docs/LAUNCH.md`, `docs/launch/`): spot-checked claims
-  about capabilities, spawn, and effect rows match the reconciled grammar
-  (prefix capabilities, `spawn Actor { ... }`); no contradictions found.
+| # | Leniency | Rationale |
+|---|---|---|
+| 10.7 | Case-insensitive identifier positions: lowercase type/effect names (`type x = Int`, `perform rand.int()`) and uppercase module names (`import Foo`) parse where the grammar distinguishes `IDENT`/`UPPER_IDENT` (item 12). Uppercase function names `fn Foo() {}` likewise (item 23) | The case convention is normative style, not a parser concern; enforced by convention/linting, not the grammar. grammar.ebnf §1 now says so explicitly |
+| 10.8 | `receive {}` (no arms) and `receive ... after 100 => 0` (non-block after-body) parse (item 13) | Harmless degenerate forms; grammar.ebnf §3 `receive_expr` adjusted to the real, simpler shape (`{ receive_arm }` was already zero-or-more; after-body is `expr`). Classified spec-fix-adjacent but listed here as accepted behavior |
+| 10.9 | `resume(1)` outside a handler arm parses as an ordinary call expression (item 14) | `resume` is contextual (only meaningful in handle arms); treating it as an identifier elsewhere is intentional and keeps it off the keyword list |
+| 10.10 | Trailing commas tolerated in call args, match arms, type params, tuple types (item 15) | Intentional ergonomic leniency; grammar keeps the strict form as the normative target |
+| 10.11 | `1 = 2` (assignment to a literal) parses; lvalue checking is not syntactic (item 16) | Standard phase separation (lvalue checks are semantic, as in Rust). Grammar annotates `=`-expressions as valid only in `let`/`const` as design intent |
+| 10.12 | `let x = 1 let y = 2` parses (expression-position `let` chaining with no separator) (item 19) | Consequence of `let` being an expression whose body captures following expressions (ML-style `let ... in` desugar); accepted |
+| 10.13 | `g() catch { }` (empty catch-arm block) parses (item 20) | Harmless degenerate form (desugars to a match with only the default `Ok` arm); accepted. Entire `catch` surface is slated for removal under DRAFT RFC 0015 anyway |
+| 10.14 | Dot-imports produce a dedicated diagnostic ("use `::` ... not `.`") (item 24) | Not drift at all — intentional, helpful strictness; recorded here for completeness |
 
-## Files changed in this round
+## 11. Round-2 notes on cross-document consistency
 
-- `spec/grammar.ebnf` — header conformance-suite note; lexical section
-  (`CHAR_LIT` removed, radix-literal deviation note, interpolation);
-  corrected keyword list from `src/lexer.rs`; §2 expression ladder with the
-  real Pratt levels (`**`, `<<`/`>>`, `&`, `^`, `|||`, `..`, `|>`);
-  `if_expr`, `variant`, `alias_decl`, `param`, `lambda`, `pattern` (or/alias/
-  tuple/record/nil/unit), `sig_suffix`/`effect_row`/`error_type`; §3
-  `handle_arm`, `catch_expr`, prefix-only capabilities, `actor_member`,
-  `state_field`, `spawn_expr`, `receive_expr` guards/after; §5 leniency
-  inventory. Validated: balanced `[]`/`{}`/`()`, no duplicate `=`
-  nonterminal definitions (the round-1 duplicate-production class of bug).
-- `SPEC2.md` — §2.5.1 radix-literal deviation, §2.5.3 `#{...}`
-  interpolation implemented + first-expression deviation, §2.7 capability
-  annotation row, §6.6 required-`then` rule, §6.11 catch paragraph, §6.12
-  stale "no `with`" removed, §4.4 handle-arm guard asymmetry, §6.14
-  receive guards/after/empty, §8.1 actor members, §8.7 spawn forms,
-  Appendix A (A.2 parameters/function_definition/alias note; A.3
-  conditional/lambda/handle/catch/actor_expr; A.4 or-patterns; A.5
-  effect_row comma rule; A.6 actor_member/state/initial).
-- `docs/SPEC_RECONCILIATION.md` — this section.
+- **RFC 0015 (Draft, error-model consolidation)** proposes removing all
+  `catch` forms and `fail`. Round-2 dispositions 9.6/10.13 document `catch` as
+  it exists today per the reference parser; if RFC 0015 is accepted, those
+  productions are deleted rather than maintained. No contradiction — but the
+  RFC's migration timeline should reference the grammar productions added in
+  9.6. RFCs were not rewritten.
+- **grammar.ebnf §5** now states that accepted parser leniencies (§10b above)
+  are deliberately NOT encoded in the grammar, so §2 ∪ §3 remains the
+  normative target for future implementations.
+- `cap` in grammar.ebnf §3 was also extended to the full parser set
+  (`ref`, `linear` added; `src/parser.rs` `parse_capability` :5546) — a
+  spec-fix folded into item 8.3's edit.
