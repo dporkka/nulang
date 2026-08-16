@@ -711,7 +711,7 @@ impl WasmFxBackend {
             }
             CirExpr::ConstF64(v) => {
                 // Floats ride in i64 as raw bits (mirrors mir_wasm.rs).
-                body.instruction(&Instruction::I64Const(v.to_bits() as i64));
+                body.instruction(&Instruction::I64Const(value_layout::float_bits(*v) as i64));
             }
             CirExpr::ConstBool(b) => {
                 body.instruction(&Instruction::I64Const(value_layout::tag_bool(*b) as i64));
