@@ -535,6 +535,13 @@ impl ActorHeap {
         let sc = (*header_ptr).size_class;
         let sc_idx = sc as usize;
 
+        // classify_total_size only ever produces valid discriminants, so an
+        // out-of-range class here means header corruption; catch it in
+        // debug builds instead of silently leaking the block.
+        debug_assert!(
+            sc_idx < NUM_SIZE_CLASSES,
+            "free: header size class {sc_idx} out of range (corrupt header?)"
+        );
         if sc_idx < NUM_SIZE_CLASSES {
             // Intrusive free list: the first 8 bytes of the (now dead) payload
             // store a pointer to the previous head of the free list.
