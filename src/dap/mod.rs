@@ -231,13 +231,11 @@ fn compile_source(source: &str, file_path: Option<&str>, name: &str) -> NuResult
     let tokens = lexer.lex()?;
     let mut parser = Parser::new(tokens);
     let mut ast = parser.parse_module()?;
-    let mut pd: Vec<crate::ast::Decl> = pa
+    let pd: Vec<crate::ast::Decl> = pa
         .decls
         .into_iter()
         .filter(|d| matches!(d, crate::ast::Decl::VariantType { .. }))
         .collect();
-    pd.append(&mut ast.decls);
-    ast.decls = pd;
 
     // 2. Import resolution.
     let base_dir = Path::new(file_path.unwrap_or("."))
@@ -246,6 +244,14 @@ fn compile_source(source: &str, file_path: Option<&str>, name: &str) -> NuResult
         .to_path_buf();
     let mut visited = HashSet::new();
     crate::resolver::resolve_imports(&mut ast, &base_dir, &mut visited)?;
+
+    // Prepend the prelude AFTER import resolution (see main::run_frontend):
+    // `resolve_imports` prepends imported declarations, and the typechecker
+    // binds variant constructors in declaration order, so the prelude's
+    // `Option`/`Result` declarations must come first in the final AST.
+    let mut pd = pd;
+    pd.append(&mut ast.decls);
+    ast.decls = pd;
 
     // 3. Type check.
     let mut type_checker = TypeChecker::new();
