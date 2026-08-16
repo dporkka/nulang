@@ -1,0 +1,2 @@
+// Negative case: neg_type_record_missing_type — must be rejected by the parser.
+type Foo = { x: }

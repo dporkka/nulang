@@ -1,0 +1,83 @@
+// Positive cases: expressions and operators (grammar.ebnf §2 expr tower,
+// plus parser Pratt extensions documented in src/parser.rs:30-46).
+
+// case 01: addition
+fn ex_add() { 1 + 2 }
+// case 02: subtraction
+fn ex_sub() { 3 - 4 }
+// case 03: multiplication
+fn ex_mul() { 5 * 6 }
+// case 04: division
+fn ex_div() { 7 / 8 }
+// case 05: modulo
+fn ex_mod() { 9 % 2 }
+// case 06: equality
+fn ex_eq() { 1 == 2 }
+// case 07: inequality
+fn ex_ne() { 1 != 2 }
+// case 08: less-than
+fn ex_lt() { 1 < 2 }
+// case 09: greater-than
+fn ex_gt() { 1 > 2 }
+// case 10: less-than-or-equal
+fn ex_le() { 1 <= 2 }
+// case 11: greater-than-or-equal
+fn ex_ge() { 1 >= 2 }
+// case 12: logical and
+fn ex_and() { true && false }
+// case 13: logical or
+fn ex_or() { true || false }
+// case 14: unary minus
+fn ex_neg() { -5 }
+// case 15: logical not
+fn ex_not() { !true }
+// case 16: double unary minus
+fn ex_neg_neg() { --5 }
+// case 17: unary minus on parenthesized sum
+fn ex_neg_paren() { -(1 + 2) }
+// case 18: parenthesized expression
+fn ex_paren() { (1) }
+// case 19: tuple of two
+fn ex_tuple2() { (1, 2) }
+// case 20: tuple of three with mixed literals
+fn ex_tuple3() { (1, "a", true) }
+// case 21: shift-left (parser Pratt extension)
+fn ex_shl() { 1 << 3 }
+// case 22: shift-right
+fn ex_shr() { 256 >> 2 }
+// case 23: bitwise and
+fn ex_bitand() { 6 & 3 }
+// case 24: bitwise xor
+fn ex_bitxor() { 6 ^ 3 }
+// case 25: bitwise or is `|||` (single `|` is reserved: grammar.ebnf §2 note)
+fn ex_bitor() { 6 ||| 3 }
+// case 26: power operator, right-associative
+fn ex_pow() { 2 ** 3 }
+// case 27: power right-associativity surface
+fn ex_pow_chain() { 2 ** 3 ** 2 }
+// case 28: exclusive range operator
+fn ex_range() { 1..10 }
+// case 29: range with expressions
+fn ex_range_expr() { 1 + 1..10 - 2 }
+// case 30: assignment expression
+fn ex_assign() { let x = 1; x = 2 }
+// case 31: reassignment with computed value
+fn ex_reassign() { let x = 1; x = x + 2 }
+// case 32: assignment through an expression
+fn ex_assign_expr() { let x = 1; let y = (x = 2); y }
+// case 33: block as expression with trailing value
+fn ex_block_expr() { let y = { 1 + 2 }; y }
+// case 34: nested blocks
+fn ex_nested_block() { { { { 7 } } } }
+// case 35: postfix try operator `?` on a call
+fn ex_try_op() { let x = f()?; x }
+// case 36: call with no arguments
+fn ex_call0() { f() }
+// case 37: call with multiple arguments
+fn ex_call3() { f(1, "a", true) }
+// case 38: nested calls
+fn ex_call_nested() { f(g(h(1))) }
+// case 39: chained binary expression mixing levels
+fn ex_mixed() { 1 + 2 * 3 == 7 && true || false }
+// case 40: identifier reference
+fn ex_ident() { let x = 1; x }

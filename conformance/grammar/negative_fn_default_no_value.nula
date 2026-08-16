@@ -1,0 +1,2 @@
+// Negative case: neg_fn_default_no_value — must be rejected by the parser.
+fn f(x: Int =) { x }

@@ -1,0 +1,2 @@
+// Negative case: neg_fn_bad_arrow — must be rejected by the parser.
+fn f() => Int {}

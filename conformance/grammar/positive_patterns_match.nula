@@ -1,0 +1,61 @@
+// Positive cases: match expressions and patterns (grammar.ebnf §2
+// match_expr / match_arm / pattern).
+
+// case 01: wildcard pattern
+fn pat_wildcard() { match 1 { case _ => 0 } }
+// case 02: integer literal pattern
+fn pat_int() { match 1 { case 1 => 10; case _ => 0 } }
+// case 03: string literal pattern
+fn pat_string() { match "a" { case "a" => 1; case _ => 0 } }
+// case 04: bool literal patterns
+fn pat_bool() { match true { case true => 1; case false => 0 } }
+// case 05: identifier binding pattern
+fn pat_bind() { match 5 { case x => x } }
+// case 06: constructor pattern, no payload
+fn pat_ctor_nullary() { match 1 { case None => 0; case _ => 1 } }
+// case 07: constructor pattern with one payload pattern
+fn pat_ctor_one() { match 1 { case Some(x) => x; case _ => 0 } }
+// case 08: constructor pattern with a tuple payload pattern
+fn pat_ctor_tuple() { match 1 { case Pair((a, b)) => a; case _ => 0 } }
+// case 09: nested constructor pattern
+fn pat_ctor_nested() { match 1 { case Some(Some(x)) => x; case _ => 0 } }
+// case 10: arm without the optional `case` keyword
+fn pat_no_case_kw() { match 1 { _ => 0 } }
+// case 11: mixed arms with and without `case`
+fn pat_mixed_kw() { match 1 { case 1 => 1; _ => 0 } }
+// case 12: arm body is a block
+fn pat_arm_block() { match 1 { case _ => { 1 + 2 } } }
+// case 13: match on a call expression
+fn pat_scrutinee_call() { match f(1) { case _ => 0 } }
+// case 14: match as a statement-level expression
+fn pat_stmt() { let x = 1; match x { case _ => 0 }; x }
+// case 15: wildcard with nested constructor payload wildcard
+fn pat_ctor_wildcards() { match 1 { case Some(_) => 1; case _ => 0 } }
+// case 16: negative-int pattern via unary minus on literal
+fn pat_negative_int() { match 0 - 1 { case _ => 0 } }
+// case 17: multiple arms separated by newlines only (SEP = newline)
+fn pat_newline_sep() {
+    match 1 {
+        case 1 => 1
+        case 2 => 2
+        case _ => 0
+    }
+}
+// case 18: arms separated by semicolons (SEP = ";")
+fn pat_semi_sep() { match 1 { case 1 => 1; case 2 => 2; case _ => 0 } }
+// case 19: match on a string with string arms
+fn pat_string_multi() {
+    match "x" {
+        case "x" => 1
+        case "y" => 2
+        case _ => 0
+    }
+}
+// case 20: deeply nested match
+fn pat_nested_match() {
+    match 1 {
+        case _ => match 2 {
+            case _ => match 3 { case _ => 42 }
+        }
+    }
+}

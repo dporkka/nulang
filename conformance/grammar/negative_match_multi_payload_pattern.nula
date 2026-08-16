@@ -1,0 +1,2 @@
+// Negative case: neg_match_multi_payload_pattern — must be rejected by the parser.
+fn f() { match 1 { case Pair(a, b) => a; case _ => 0 } }

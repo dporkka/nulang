@@ -1,0 +1,2 @@
+// Negative case: neg_record_lit_missing_field — must be rejected by the parser.
+fn f() { { : 1 } }

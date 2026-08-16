@@ -1,0 +1,54 @@
+// Positive cases: literals (grammar.ebnf §1, primary).
+// Each `fn` is one minimal case targeting one production.
+
+// case 01: decimal integer literal
+fn lit_int() { 42 }
+// case 02: zero
+fn lit_zero() { 0 }
+// case 03: hexadecimal integer literal
+fn lit_hex() { 0xFF }
+// case 04: hex with lowercase digits
+fn lit_hex_lower() { 0xdeadbeef }
+// case 05: float literal
+fn lit_float() { 3.14 }
+// case 06: float with exponent
+fn lit_float_exp() { 1.5e10 }
+// case 07: float with negative exponent
+fn lit_float_neg_exp() { 2.5e-3 }
+// case 08: float with explicit positive exponent
+fn lit_float_pos_exp() { 1.0E+6 }
+// case 09: empty string literal
+fn lit_string_empty() { "" }
+// case 10: simple string literal
+fn lit_string() { "hello" }
+// case 11: string with escape sequences
+fn lit_string_escapes() { "tab\t newline\n quote\" backslash\\" }
+// case 12: string with unicode escape
+fn lit_string_unicode_escape() { "smile \u{1F600}" }
+// case 13: string with carriage-return escape
+fn lit_string_cr() { "a\rb" }
+// case 14: interpolated string (parser desugars #{...})
+fn lit_string_interp() { "sum is #{1 + 2}" }
+// case 15: f-string literal
+fn lit_fstring() { f"plain" }
+// case 16: f-string with interpolation
+fn lit_fstring_interp() { f"val {1}" }
+// case 17: string with a raw newline inside the quotes
+fn lit_string_raw_newline() { "line one
+line two" }
+// case 18: string with unicode escape of an ASCII char
+fn lit_string_unicode_ascii() { "\u{41}" }
+// case 19: true literal
+fn lit_true() { true }
+// case 20: false literal
+fn lit_false() { false }
+// case 21: nil literal
+fn lit_nil() { nil }
+// case 22: unit literal
+fn lit_unit() { unit }
+// case 23: large integer literal
+fn lit_big_int() { 9223372036854775807 }
+// case 24: string with spaces and punctuation
+fn lit_string_punct() { "Hello, World! 123 @#$" }
+// case 25: const without type annotation (must be final decl — parser quirk)
+const name = "nulang"

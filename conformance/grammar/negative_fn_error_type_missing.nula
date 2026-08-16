@@ -1,0 +1,2 @@
+// Negative case: neg_fn_error_type_missing — must be rejected by the parser.
+fn f() -> Int ! {}

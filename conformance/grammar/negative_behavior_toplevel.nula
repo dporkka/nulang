@@ -1,0 +1,2 @@
+// Negative case: neg_behavior_toplevel — must be rejected by the parser.
+behavior b() { 1 }

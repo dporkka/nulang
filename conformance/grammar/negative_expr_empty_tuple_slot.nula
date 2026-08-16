@@ -1,0 +1,2 @@
+// Negative case: neg_expr_empty_tuple_slot — must be rejected by the parser.
+fn f() { (1, , 2) }

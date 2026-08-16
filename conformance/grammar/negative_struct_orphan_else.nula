@@ -1,0 +1,2 @@
+// Negative case: neg_struct_orphan_else — must be rejected by the parser.
+fn f() { else { 1 } }

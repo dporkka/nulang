@@ -1,0 +1,2 @@
+// Negative case: neg_lit_interp_unterminated — must be rejected by the parser.
+fn f() { "#{1" }

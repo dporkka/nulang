@@ -1,0 +1,2 @@
+// Negative case: neg_send_missing_behavior — must be rejected by the parser.
+fn f() { send bob }

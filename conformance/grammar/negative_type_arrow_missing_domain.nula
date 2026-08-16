@@ -1,0 +1,2 @@
+// Negative case: neg_type_arrow_missing_domain — must be rejected by the parser.
+fn f(x: -> Int) { x }
