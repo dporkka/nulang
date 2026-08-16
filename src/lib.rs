@@ -18,6 +18,7 @@ pub mod core_vm;
 pub mod cranelift_utils;
 pub mod dap;
 pub mod diagnostic;
+pub mod difffuzz;
 pub mod docgen;
 pub mod dst;
 pub mod effect_checker;
