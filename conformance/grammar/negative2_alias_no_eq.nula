@@ -1,0 +1,2 @@
+// Negative case: neg2_alias_no_eq — must be rejected by the parser (round 2).
+type alias X

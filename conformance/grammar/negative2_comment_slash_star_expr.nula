@@ -1,0 +1,2 @@
+// Negative case: neg2_comment_slash_star_expr — must be rejected by the parser (round 2).
+fn f() { 1 /* unterminated

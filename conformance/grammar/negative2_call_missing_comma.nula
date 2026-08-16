@@ -1,0 +1,2 @@
+// Negative case: neg2_call_missing_comma — must be rejected by the parser (round 2).
+fn f() { g(1 2) }

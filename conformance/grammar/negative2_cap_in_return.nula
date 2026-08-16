@@ -1,0 +1,2 @@
+// Negative case: neg2_cap_in_return — must be rejected by the parser (round 2).
+fn f() -> val Int { 1 }
