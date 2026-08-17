@@ -28,10 +28,10 @@ use std::panic::AssertUnwindSafe;
 // Minimal xorshift64 RNG — no external dependencies
 // ---------------------------------------------------------------------------
 
-struct XorShift64(u64);
+pub(crate) struct XorShift64(pub(crate) u64);
 
 impl XorShift64 {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 7;
@@ -40,14 +40,14 @@ impl XorShift64 {
         x
     }
 
-    fn range(&mut self, min: usize, max: usize) -> usize {
+    pub(crate) fn range(&mut self, min: usize, max: usize) -> usize {
         if min >= max {
             return min;
         }
         min + (self.next() as usize % (max - min))
     }
 
-    fn index<T>(&mut self, slice: &[T]) -> usize {
+    pub(crate) fn index<T>(&mut self, slice: &[T]) -> usize {
         if slice.is_empty() {
             return 0;
         }
@@ -60,7 +60,7 @@ impl XorShift64 {
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
-fn seed_corpus() -> Vec<&'static str> {
+pub(crate) fn seed_corpus() -> Vec<&'static str> {
     vec![
         // --- Literals ---
         "42",
@@ -287,7 +287,7 @@ fn seed_corpus() -> Vec<&'static str> {
 // ---------------------------------------------------------------------------
 
 /// Delete a random character from the source.
-fn mutate_delete(rng: &mut XorShift64, source: &str) -> String {
+pub(crate) fn mutate_delete(rng: &mut XorShift64, source: &str) -> String {
     if source.is_empty() {
         return source.to_string();
     }
@@ -299,7 +299,7 @@ fn mutate_delete(rng: &mut XorShift64, source: &str) -> String {
 }
 
 /// Insert a random character at a random position.
-fn mutate_insert(rng: &mut XorShift64, source: &str) -> String {
+pub(crate) fn mutate_insert(rng: &mut XorShift64, source: &str) -> String {
     let chars = b"abcdefghijklmnopqrstuvwxyz0123456789 \n\t+-*/%=<>!&|.,;:(){}[]_\"'";
     let idx = rng.range(0, source.len() + 1);
     let ch = chars[rng.index(chars)] as char;
@@ -311,7 +311,7 @@ fn mutate_insert(rng: &mut XorShift64, source: &str) -> String {
 }
 
 /// Swap two adjacent characters.
-fn mutate_swap(rng: &mut XorShift64, source: &str) -> String {
+pub(crate) fn mutate_swap(rng: &mut XorShift64, source: &str) -> String {
     if source.len() < 2 {
         return source.to_string();
     }
@@ -322,7 +322,7 @@ fn mutate_swap(rng: &mut XorShift64, source: &str) -> String {
 }
 
 /// Duplicate a character at a random position.
-fn mutate_duplicate(rng: &mut XorShift64, source: &str) -> String {
+pub(crate) fn mutate_duplicate(rng: &mut XorShift64, source: &str) -> String {
     if source.is_empty() {
         return source.to_string();
     }
@@ -336,7 +336,7 @@ fn mutate_duplicate(rng: &mut XorShift64, source: &str) -> String {
 }
 
 /// Replace a random span with another span from the corpus.
-fn mutate_splice(rng: &mut XorShift64, source: &str, corpus: &[&str]) -> String {
+pub(crate) fn mutate_splice(rng: &mut XorShift64, source: &str, corpus: &[&str]) -> String {
     if source.len() < 2 || corpus.is_empty() {
         return source.to_string();
     }
@@ -352,7 +352,7 @@ fn mutate_splice(rng: &mut XorShift64, source: &str, corpus: &[&str]) -> String 
 }
 
 /// Truncate the source at a random point.
-fn mutate_truncate(rng: &mut XorShift64, source: &str) -> String {
+pub(crate) fn mutate_truncate(rng: &mut XorShift64, source: &str) -> String {
     if source.len() < 2 {
         return source.to_string();
     }
@@ -361,7 +361,7 @@ fn mutate_truncate(rng: &mut XorShift64, source: &str) -> String {
 }
 
 /// Double the entire source.
-fn mutate_double(source: &str) -> String {
+pub(crate) fn mutate_double(source: &str) -> String {
     let mut s = String::with_capacity(source.len() * 2 + 1);
     s.push_str(source);
     s.push('\n');
@@ -370,7 +370,7 @@ fn mutate_double(source: &str) -> String {
 }
 
 /// Apply a random mutation.
-fn mutate(rng: &mut XorShift64, source: &str, corpus: &[&str]) -> String {
+pub(crate) fn mutate(rng: &mut XorShift64, source: &str, corpus: &[&str]) -> String {
     match rng.range(0, 7) {
         0 => mutate_delete(rng, source),
         1 => mutate_insert(rng, source),
@@ -474,7 +474,7 @@ fn fuzz_one(rng: &mut XorShift64, corpus: &[&str]) -> Result<(), (String, String
 
 /// A mutant that compiles to bytecode, ready for differential execution.
 #[allow(dead_code)]
-struct CompiledMutant {
+pub(crate) struct CompiledMutant {
     code_module: crate::bytecode::CodeModule,
     mir_module: crate::mir::Module,
 }
@@ -484,17 +484,29 @@ struct CompiledMutant {
 /// by construction and have nothing to differentially execute; that's
 /// `fuzz_one`'s job to check for panics, not this function's.
 #[allow(dead_code)]
-fn compile_for_diff(source: &str) -> Option<CompiledMutant> {
+pub(crate) fn compile_for_diff(source: &str) -> Option<CompiledMutant> {
+    compile_for_diff_verbose(source).ok()
+}
+
+/// `compile_for_diff` with the failing pipeline stage in the error —
+/// used by the grammar-based generator tests, where a compile failure is
+/// a generator bug that needs a precise diagnosis.
+#[allow(dead_code)]
+pub(crate) fn compile_for_diff_verbose(source: &str) -> Result<CompiledMutant, String> {
     let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex().ok()?;
+    let tokens = lexer.lex().map_err(|e| format!("lex: {:?}", e))?;
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().ok()?;
+    let ast = parser.parse_module().map_err(|e| format!("parse: {:?}", e))?;
     let mut type_checker = TypeChecker::new();
-    type_checker.check_module(&ast).ok()?;
+    type_checker
+        .check_module(&ast)
+        .map_err(|e| format!("typecheck: {}", e))?;
     let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
-    let mut mir_module = crate::mir_lower::lower_module(&hir).ok()?;
-    let code_module = crate::mir_codegen::compile_mir(&mut mir_module, "fuzz-diff").ok()?;
-    Some(CompiledMutant {
+    let mut mir_module =
+        crate::mir_lower::lower_module(&hir).map_err(|e| format!("mir: {:?}", e))?;
+    let code_module = crate::mir_codegen::compile_mir(&mut mir_module, "fuzz-diff")
+        .map_err(|e| format!("codegen: {:?}", e))?;
+    Ok(CompiledMutant {
         code_module,
         mir_module,
     })
@@ -512,7 +524,7 @@ fn compile_for_diff(source: &str) -> Option<CompiledMutant> {
 /// carry different indices and print as different opaque `#Value(..)`
 /// fallback hex — a false-positive divergence, not a real one.
 #[allow(dead_code)]
-fn run_once(vm: &mut crate::vm::VM) -> Result<(crate::vm::Value, String), String> {
+pub(crate) fn run_once(vm: &mut crate::vm::VM) -> Result<(crate::vm::Value, String), String> {
     match panic::catch_unwind(AssertUnwindSafe(|| vm.run())) {
         Ok(Ok(value)) => Ok((value, value.to_string_repr())),
         Ok(Err(e)) => Err(format!("runtime error: {}", e)),
@@ -533,7 +545,7 @@ fn run_once(vm: &mut crate::vm::VM) -> Result<(crate::vm::Value, String), String
 /// (string, closure, actor ref, heap object) — those need module-aware
 /// resolution this fuzzer doesn't attempt (see `run_once` doc comment).
 #[allow(dead_code)]
-fn is_safely_comparable(v: crate::vm::Value) -> bool {
+pub(crate) fn is_safely_comparable(v: crate::vm::Value) -> bool {
     v.is_nil() || v.is_unit() || v.is_bool() || v.is_int() || v.is_float()
 }
 
@@ -551,7 +563,7 @@ fn is_safely_comparable(v: crate::vm::Value) -> bool {
 /// normalize it to a fixed marker before comparing — otherwise every
 /// runaway mutant is a guaranteed false-positive divergence.
 #[allow(dead_code)]
-fn normalize_error(msg: &str) -> String {
+pub(crate) fn normalize_error(msg: &str) -> String {
     if msg.contains("Step limit exceeded") {
         "step limit exceeded".to_string()
     } else {
@@ -574,7 +586,7 @@ fn normalize_error(msg: &str) -> String {
 /// "result type has no stable cross-run identity" (`Uncomparable` — e.g. a
 /// top-level closure or actor ref; see `resolve_key`).
 #[allow(dead_code)]
-fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
+pub(crate) fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
     const HOT_ITERATIONS: usize = 1200; // > jit::mod's HOT_THRESHOLD (1000)
                                         // Caps warmup cost for a mutant whose OWN body loops heavily (the seed
                                         // corpus includes large-loop programs, e.g. vm_bench.rs-style hot
@@ -765,7 +777,7 @@ fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffOutcome {
+pub(crate) enum DiffOutcome {
     /// Mutant didn't compile to bytecode — nothing to differentially run.
     NothingToCompile,
     /// Interpreter, JIT, and optionally AOT/WASM agreed.

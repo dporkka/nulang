@@ -49,6 +49,8 @@ wasmfx-backend = ["wasm-backend", "wasmtime/gc-null"]
 http-client = ["dep:reqwest", "dep:tokio"]
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio", "dep:tracing-opentelemetry"]
 tls = []
+# Differential fuzzing driver binary (src/bin/nula_difffuzz.rs).
+difffuzz = []
 
 [dependencies]
 # Memory & concurrency
@@ -137,6 +139,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "nulang"
 path = "src/main.rs"
+
+[[bin]]
+name = "nula_difffuzz"
+path = "src/bin/nula_difffuzz.rs"
+required-features = ["difffuzz"]
 
 [profile.release]
 opt-level = 3
