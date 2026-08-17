@@ -29,6 +29,7 @@ pub mod fuzz;
 pub mod hir;
 pub mod hir_lower;
 pub mod integration_tests;
+pub mod iso_arena;
 pub mod jit;
 pub mod lexer;
 #[cfg(feature = "lsp")]
