@@ -1,0 +1,5 @@
+// Negative case: neg_type_record_newline_sep — must be rejected by the parser.
+type T = {
+ a: Int
+ b: String
+}

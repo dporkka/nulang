@@ -1,0 +1,2 @@
+// Negative case: neg_struct_empty_paren_call_kw — must be rejected by the parser.
+fn f() { case }

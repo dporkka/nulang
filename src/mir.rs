@@ -310,6 +310,8 @@ pub enum RValue {
         behavior_idx: usize,
         init: Vec<(String, RValue)>,
         target_node: Option<LocalId>,
+        /// Spawn-time capability grant tokens (e.g. `Net::TcpOut(h:p)`).
+        capabilities: Vec<String>,
     },
     /// `send actor behavior(args...)`. Fire-and-forget; evaluates to 0.
     Send {
@@ -664,6 +666,7 @@ mod tests {
             behavior_idx: 0,
             init: vec![],
             target_node: None,
+            capabilities: vec![],
         };
         let _ = RValue::Send {
             actor: LocalId(0),

@@ -1,0 +1,74 @@
+:root {
+  --bg: #0f1420;
+  --panel: #171e2e;
+  --border: #2a3550;
+  --text: #dbe4f5;
+  --muted: #8fa1c0;
+  --accent: #5aa9ff;
+  --ok: #4ade80;
+  --err: #f87171;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+header { padding: 1.25rem 1.5rem 0.5rem; }
+h1 { margin: 0; font-size: 1.5rem; }
+.tagline { color: var(--muted); margin: 0.25rem 0 0; }
+main { padding: 1rem 1.5rem 2rem; max-width: 1200px; }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+select, button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.95rem;
+}
+button { cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+button:not(:disabled):hover { border-color: var(--accent); }
+#run { font-weight: 600; }
+#status { color: var(--muted); font-size: 0.85rem; }
+#status.ok { color: var(--ok); }
+#status.err { color: var(--err); }
+
+.panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+@media (max-width: 800px) { .panes { grid-template-columns: 1fr; } }
+.pane h2 { font-size: 0.85rem; color: var(--muted); margin: 0 0 0.35rem; text-transform: uppercase; letter-spacing: 0.05em; }
+textarea, pre {
+  width: 100%;
+  min-height: 22rem;
+  margin: 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  tab-size: 4;
+}
+textarea { resize: vertical; }
+pre { white-space: pre-wrap; overflow: auto; }
+pre.err { color: var(--err); border-color: var(--err); }
+
+.about { margin-top: 1.25rem; color: var(--muted); }
+.about summary { cursor: pointer; }
+.about a { color: var(--accent); }
+.about code { background: var(--panel); padding: 0.1rem 0.3rem; border-radius: 4px; }

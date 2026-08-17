@@ -884,7 +884,7 @@ fn make_int_loop_module(limit: i64) -> CodeModule {
     module.emit(Instruction::new3(OpCode::IAdd, 1, 7, 1)); // 6:  i += 1
     module.emit(Instruction::new3(OpCode::IAdd, 0, 7, 0)); // 7:  acc += 1
     module.emit(Instruction::new3(OpCode::IMul, 8, 7, 8)); // 8:  r8 *= 1
-    module.emit(Instruction::new3(OpCode::IAdd, 9, 8, 9)); // 9:  r9 += r8 (r9 starts 0 -> 2)
+    module.emit(Instruction::new3(OpCode::IAdd, 8, 7, 9)); // 9:  r9 = r8 + 1 (written before read)
     module.emit(Instruction::new3(OpCode::ISub, 9, 8, 10)); // 10: r10 = r9 - r8
     module.emit(Instruction::new3(OpCode::ICmpLt, 1, 6, 5)); // 11: r5 = i < LIMIT
     let back: i16 = -7; // 12: JmpT r5 -> pc 5
@@ -1052,9 +1052,9 @@ fn test_typed_tiering_hot_float_loop() {
                                          // Loop body (pc 4..=9): 6 straight-line compilable opcodes.
     module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 0)); // 4: acc += i
     module.emit(Instruction::new3(OpCode::FAdd, 1, 7, 1)); // 5: i += 1.0
-    module.emit(Instruction::new3(OpCode::FAdd, 8, 7, 8)); // 6: filler r8 += 1.0
-    module.emit(Instruction::new3(OpCode::FAdd, 9, 8, 9)); // 7: filler r9 += r8
-    module.emit(Instruction::new3(OpCode::FAdd, 10, 9, 10)); // 8: filler r10 += r9
+    module.emit(Instruction::new3(OpCode::FAdd, 7, 7, 8)); // 6: filler r8 = 1.0 + 1.0
+    module.emit(Instruction::new3(OpCode::FAdd, 8, 7, 9)); // 7: filler r9 = r8 + 1.0
+    module.emit(Instruction::new3(OpCode::FAdd, 9, 8, 10)); // 8: filler r10 = r9 + r8
     module.emit(Instruction::new3(OpCode::FCmpLt, 1, 6, 5)); // 9: r5 = i < LIMIT
     let back: i16 = -6; // 10: JmpT r5 -> pc 4
     module.emit(Instruction::new3(
@@ -1195,13 +1195,15 @@ fn test_absent_metadata_uses_scalar_path() {
     clobbered.emit(Instruction::new1(OpCode::Const2, 8)); // 4
                                                           // Clobber AFTER all constant setup so no register fact survives the
                                                           // meet at the loop head: forward state is all-Unknown here.
-    clobbered.emit(Instruction::new2(OpCode::Spawn, 0, 0)); // 5: clobbers analysis state
+    // Spawn's result register is op3: target r9, which the loop body
+    // overwrites before any read, so the clobber cannot poison arithmetic.
+    clobbered.emit(Instruction::new3(OpCode::Spawn, 0, 0, 9)); // 5: clobbers analysis state
                                                             // Loop body (pc 6..=12): same shape as make_int_loop_module.
     clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));
     clobbered.emit(Instruction::new3(OpCode::IAdd, 1, 7, 1));
     clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 7, 0));
     clobbered.emit(Instruction::new3(OpCode::IMul, 8, 7, 8));
-    clobbered.emit(Instruction::new3(OpCode::IAdd, 9, 8, 9));
+    clobbered.emit(Instruction::new3(OpCode::IAdd, 8, 7, 9));
     clobbered.emit(Instruction::new3(OpCode::ISub, 9, 8, 10));
     clobbered.emit(Instruction::new3(OpCode::ICmpLt, 1, 6, 5));
     let back: i16 = -7; // 13: JmpT r5 -> pc 6

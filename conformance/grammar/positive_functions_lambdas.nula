@@ -1,0 +1,71 @@
+// Positive cases: functions and lambdas (grammar.ebnf §2 fn_decl / lambda /
+// param, plus error-type and effect-row surface from src/parser.rs:885-960).
+
+// case 01: empty function body
+fn f_empty() {}
+// case 02: pub function
+pub fn f_pub() { 1 }
+// case 03: single untyped parameter
+fn f_param_untyped(x) { x }
+// case 04: single typed parameter
+fn f_param_typed(x: Int) { x }
+// case 05: multiple parameters
+fn f_params(a: Int, b: String, c: Bool) { a }
+// case 06: explicit return type
+fn f_ret() -> Int { 42 }
+// case 07: return with value
+fn f_return() -> Int { return 42 }
+// case 08: bare return
+fn f_return_bare() { return }
+// case 09: let with type annotation
+fn f_let_typed() { let x: Int = 1; x }
+// case 10: let without type annotation
+fn f_let_untyped() { let x = 1; x }
+// case 11: lambda assigned to a binding
+fn f_lambda() { let add = fn(a, b) { a + b }; add(1, 2) }
+// case 12: lambda with typed params and return type
+fn f_lambda_typed() { let f = fn(x: Int) -> Int { x }; f(1) }
+// case 13: lambda with no parameters
+fn f_lambda_nullary() { let f = fn() { 7 }; f() }
+// case 14: generic function (parser extension: type params on fn)
+fn f_generic[T](x: T) -> T { x }
+// case 15: error type syntax `-> T ! E` (src/parser.rs:892-899)
+fn f_error_type() -> Int ! String { 42 }
+// case 16: `throws` error type form (src/parser.rs:900-917)
+fn f_throws_error() -> Int throws String { 42 }
+// case 17: effect row annotation `! {IO}`
+fn f_effect_row() -> Int ! {IO} { 42 }
+// case 18: error type plus effect row `! E ! {IO}`
+fn f_error_and_effect() -> Int ! String ! {IO} { 42 }
+// case 19: effect row with multiple effects
+fn f_effect_row_multi() ! {IO, Rand} { 1 }
+// case 20: single-expression shorthand body `= expr` (src/parser.rs:950)
+fn f_shorthand() -> Int = 42
+// case 21: default parameter value (parser extension)
+fn f_default(x: Int = 5) -> Int { x }
+// case 22: requires contract clause (src/parser.rs:925-945)
+fn f_requires(x: Int) -> Int requires x > 0 { x }
+// case 23: ensures contract clause
+fn f_ensures(x: Int) -> Int ensures x >= 0 { x }
+// case 24: capability-annotated parameter, prefix form `val x: Int`
+// (parser ground truth: try_parse_param_capability, src/parser.rs:5871)
+fn f_cap_param(val x: Int) { x }
+// case 25: capability-annotated parameter with iso
+fn f_cap_param_iso(iso x: Int) { x }
+// case 26: function capability annotation `: val` after signature
+fn f_cap_fn(x: Int) -> Int: val { x }
+// case 27: nested function-scoped lambdas
+fn f_lambda_nested() { let f = fn(x) { fn(y) { x } }; f(1) }
+// case 28: parameter list with trailing newline separators
+fn f_multiline_params(
+    a: Int,
+    b: Int
+) -> Int { a + b }
+// case 29: statements separated by semicolons
+fn f_semi_stmts() { let a = 1; let b = 2; a + b }
+// case 30: statements separated by newlines
+fn f_newline_stmts() {
+    let a = 1
+    let b = 2
+    a + b
+}

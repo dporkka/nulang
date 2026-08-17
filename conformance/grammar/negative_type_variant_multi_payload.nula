@@ -1,0 +1,2 @@
+// Negative case: neg_type_variant_multi_payload — must be rejected by the parser.
+type Shape = Rect(Float, Float)

@@ -1,0 +1,2 @@
+// Negative case: neg_handle_arm_no_effect_dot — must be rejected by the parser.
+fn f() { handle 1 { | int() => 1 } }

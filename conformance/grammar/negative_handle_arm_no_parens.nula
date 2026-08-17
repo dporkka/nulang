@@ -1,0 +1,2 @@
+// Negative case: neg_handle_arm_no_parens — must be rejected by the parser.
+fn f() { handle 1 { | Rand.int => 1 } }

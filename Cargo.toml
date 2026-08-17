@@ -1,5 +1,10 @@
 [workspace]
 members = ["crates/nulang-ai"]
+# The browser-playground crate re-uses compiler sources via #[path] includes
+# and builds only for wasm32-unknown-unknown; it is intentionally standalone
+# (its own lockfile, minimal pure-Rust dep set) and excluded from workspace
+# builds/tests so `cargo test --workspace` is unaffected.
+exclude = ["crates/nulang-playground"]
 
 [package]
 name = "nulang"
@@ -57,6 +62,8 @@ tcp = []
 # package registry client, and `nula deploy`. Disable for a minimal build
 # without the `ureq` dependency.
 ureq = ["dep:ureq"]
+# Differential fuzzing driver binary (src/bin/nula_difffuzz.rs).
+difffuzz = []
 
 [dependencies]
 # Memory & concurrency
@@ -145,6 +152,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "nulang"
 path = "src/main.rs"
+
+[[bin]]
+name = "nula_difffuzz"
+path = "src/bin/nula_difffuzz.rs"
+required-features = ["difffuzz"]
 
 [profile.release]
 opt-level = 3

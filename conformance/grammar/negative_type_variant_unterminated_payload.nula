@@ -1,0 +1,2 @@
+// Negative case: neg_type_variant_unterminated_payload — must be rejected by the parser.
+type Foo = A(Int

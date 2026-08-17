@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">Nulang</h1>
 <p align="center">
-  An actor-based language with algebraic effects, capability-based types, and durable/distributed actors — built for software that outlasts a process.
+  An actor-based language with algebraic effects, capability-based types, and durable/distributed actors for building resilient software.
 </p>
 <p align="center">
   <a href="https://nulang.org">Website</a> •
@@ -128,7 +128,7 @@ perform IO.print("Hello, " + name + "!")
 | [`CHANGELOG.md`](CHANGELOG.md) | Changelog organized by stability tier (Frozen / Stable / Experimental) |
 | [`GOVERNANCE.md`](GOVERNANCE.md) | Stability tiers, RFC process, and language versioning |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Implementation architecture and module map |
-| [`editors/vscode/`](editors/vscode/) | VS Code extension (syntax highlighting + LSP) — build a `.vsix` or install manually |
+| [`editors/vscode/`](editors/vscode/) | VS Code extension (syntax highlighting, language essentials, snippets) — build a `.vsix` or install manually |
 | [`RFC/`](RFC/) | RFC proposals (format stability, frozen core, deprecation cycles, roadmap) |
 
 ---

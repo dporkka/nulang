@@ -1,0 +1,2 @@
+// Negative case: neg_alias_lowercase_name — must be rejected by the parser.
+alias foo = Int

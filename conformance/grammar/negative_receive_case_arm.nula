@@ -1,0 +1,2 @@
+// Negative case: neg_receive_case_arm — must be rejected by the parser.
+fn f() { receive { case => 1 } }

@@ -1,0 +1,2 @@
+// Negative case: neg_lit_exp_no_digits — must be rejected by the parser.
+fn f() { 1.5e }

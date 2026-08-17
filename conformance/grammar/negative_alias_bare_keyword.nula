@@ -1,0 +1,2 @@
+// Negative case: neg_alias_bare_keyword — must be rejected by the parser.
+alias Meters = Int

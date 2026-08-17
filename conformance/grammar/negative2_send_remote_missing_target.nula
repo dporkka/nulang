@@ -1,0 +1,2 @@
+// Negative case: neg2_send_remote_missing_target — must be rejected by the parser (round 2).
+fn f() { send remote hello() }

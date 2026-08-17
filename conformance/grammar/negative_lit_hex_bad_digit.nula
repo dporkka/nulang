@@ -1,0 +1,2 @@
+// Negative case: neg_lit_hex_bad_digit — must be rejected by the parser.
+fn f() { 0xGG }

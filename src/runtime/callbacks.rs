@@ -804,7 +804,16 @@ pub(crate) struct BytecodeRuntimeCallbacks {
     actor_id: u64,
 }
 
+// SAFETY: `runtime` is a transient borrow of the executing `Runtime` that
+// is valid for the duration of the behavior invocation. The scheduler
+// guarantees that a `Runtime` (and thus each callback instance wrapping a
+// pointer to it) is only driven from one thread at a time, so no two
+// threads can alias the `&mut Runtime` produced by dereferencing `runtime`.
 unsafe impl Send for BytecodeRuntimeCallbacks {}
+// SAFETY: shared references only grant access through `Sync` if methods can
+// be called concurrently; all callback methods mutate through the raw
+// pointer and are only invoked while the owning thread is executing the
+// behavior, so cross-thread concurrent use cannot occur by construction.
 unsafe impl Sync for BytecodeRuntimeCallbacks {}
 
 impl BytecodeRuntimeCallbacks {

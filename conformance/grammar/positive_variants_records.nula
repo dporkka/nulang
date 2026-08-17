@@ -1,0 +1,49 @@
+// Positive cases: type declarations — variants, records, aliases, consts
+// (grammar.ebnf §2 type_decl / variant_body / record_body / alias_decl /
+// const_decl).
+
+// case 01: nullary variant declaration
+type Color = Red | Green | Blue
+// case 02: single variant with payload
+type Wrapper = Wrap(Int)
+// case 03: variant with a tuple payload (parser: one payload type per variant)
+type Shape = Circle(Float) | Rect((Float, Float))
+// case 04: generic variant type
+type Option[T] = Some(T) | None
+// case 05: generic variant with two type parameters
+type Result[T, E] = Ok(T) | Err(E)
+// case 06: record type declaration
+type Point = { x: Int, y: Int }
+// case 07: record with a single field
+type Single = { only: Int }
+// case 08: pub type declaration
+pub type PubPoint = { x: Int, y: Int }
+// case 09: alias declaration (parser form: `type alias`)
+type alias Meters = Int
+// case 10: pub alias
+pub type alias Seconds = Int
+// case 11: generic alias
+type alias Pair[T] = (T, T)
+// case 15: record literal with field inits
+fn rec_lit() { { x: 1, y: 2 } }
+// case 16: record literal with one field
+fn rec_lit_one_field() { { x: 1 } }
+// case 17: record literal with explicit repeated name
+fn rec_lit_same_name() { let x = 1; { x: x, y: 2 } }
+// case 18: variant construction in expression position
+fn rec_variant_ctor() { Some(1) }
+// case 19: nested record type
+type Nested = { inner: Point, label: String }
+// case 20: variant payloads referencing other declared types
+type Tree = Leaf(Int) | Node((Tree, Tree))
+// case 21: record fields separated by commas across newlines
+type MultiLine = {
+    a: Int,
+    b: String
+}
+// case 22: empty-ish variant family of one nullary constructor
+type Unit2 = MkUnit2
+// case 12: const declaration with type annotation.
+// NOTE: parser quirk — a top-level const must be the final declaration in
+// the file (its value expression consumes following tokens otherwise).
+const answer: Int = 42

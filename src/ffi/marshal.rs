@@ -104,6 +104,19 @@ pub fn bool_to_value(b: bool) -> Value {
     Value::bool(b)
 }
 
+/// Pack a raw pointer into a Nulang pointer value, returning `Value::nil()`
+/// when the address does not fit in the 48-bit payload (e.g. LA57 or
+/// AArch64-52 virtual addresses). Packing a truncated address would produce
+/// a dangling pointer that is later dereferenced as if valid, so failing
+/// closed here is strictly safer than the legacy masking behavior.
+fn ptr_to_value_checked(p: *mut u8) -> Value {
+    if crate::value_layout::ptr_fits_payload(p as u64) {
+        Value::ptr(p)
+    } else {
+        Value::nil()
+    }
+}
+
 /// Marshal a C string return value into a Nulang pointer value.
 ///
 /// The string is copied into a `CString` and the pointer is leaked to the VM
@@ -116,9 +129,10 @@ pub unsafe fn cstr_to_value(s: *const c_char) -> Value {
     if s.is_null() {
         return Value::nil();
     }
+    // SAFETY: caller guarantees `s` is a valid, null-terminated C string.
     let cstr = CStr::from_ptr(s);
     let cstring = CString::new(cstr.to_bytes()).unwrap_or_else(|_| CString::default());
-    Value::ptr(cstring.into_raw() as *mut u8)
+    ptr_to_value_checked(cstring.into_raw() as *mut u8)
 }
 
 /// Free a pointer value previously created by `cstr_to_value`.
@@ -137,7 +151,7 @@ pub fn voidptr_to_value(p: *mut c_void) -> Value {
     if p.is_null() {
         Value::nil()
     } else {
-        Value::ptr(p as *mut u8)
+        ptr_to_value_checked(p as *mut u8)
     }
 }
 

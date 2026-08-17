@@ -1,0 +1,2 @@
+// Negative case: neg_fn_missing_body — must be rejected by the parser.
+fn f()

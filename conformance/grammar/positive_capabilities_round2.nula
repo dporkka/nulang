@@ -1,0 +1,51 @@
+// Positive cases: reference capabilities in all positions, round 2
+// (grammar.ebnf §3 cap; parser prefix form — see README drift log).
+// NOTE: the parser resolves type names at parse time, so the generic
+// types used below are declared first.
+
+type CBox[T] = CWrap(T)
+
+// case 01: multiple capability-annotated params in one function
+fn c_multi_caps(val a: Int, iso b: Int, tag c: Int) { a }
+// case 02: capability on a param with a generic type
+fn c_cap_generic(box v: CBox[Int]) { v }
+// case 03: capability param on a lambda
+fn c_lambda_cap() { let g = fn(val x: Int) { x }; g }
+// case 04: capability param on an actor behavior
+actor CapActor {
+    behavior take(iso x: Int) { x }
+}
+// case 05: function capability annotation `: iso` after signature
+fn c_fn_cap_iso() : iso { 1 }
+// case 06: function capability annotation `: tag`
+fn c_fn_cap_tag() : tag { 2 }
+// case 07: function capability annotation `: box`
+fn c_fn_cap_box() : box { 3 }
+// case 08: reference type `&ref` in parameter position
+fn c_ref_type_ref(x: &ref Int) { x }
+// case 09: reference type `&val` in parameter position
+fn c_ref_type_val(x: &val Int) { x }
+// case 10: reference type `&iso` in parameter position
+fn c_ref_type_iso(x: &iso Int) { x }
+// case 11: reference type `&box` in parameter position
+fn c_ref_type_box(x: &box Int) { x }
+// case 12: reference type in return position
+fn c_ref_type_ret() -> &ref Int { c_ref_helper() }
+fn c_ref_helper() -> &ref Int { c_ref_helper() }
+// case 13: reference type around a generic type
+fn c_ref_generic(x: &ref CBox[Int]) { x }
+// case 14: capability param with arrow type
+fn c_cap_arrow_param(val f: Int -> Int) { f }
+// case 15: `linear` capability keyword on a parameter (parser extension:
+// Capability::Linear accepted alongside `lineariso`)
+fn c_cap_linear(linear x: Int) { x }
+// case 16: capability param followed by defaulted param
+fn c_cap_then_default(iso x: Int, y: Int = 5) { x + y }
+// case 17: arrow type with effect row and capability annotation
+fn c_arrow_effect_cap(f: Int -> Int ! IO : val) { f }
+// case 18: capability on every parameter of a wide signature
+fn c_wide(val a: Int, val b: Int, val c: Int, val d: Int) { a + b + c + d }
+// case 19: mixed capability and plain parameters
+fn c_mixed(iso a: Int, b: Int, val c: Int) { b }
+// case 20: nested reference type in a tuple type
+fn c_ref_in_tuple(p: (&ref Int, &val String)) { p }

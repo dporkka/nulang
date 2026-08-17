@@ -324,6 +324,8 @@ pub enum RValue {
         init: Vec<(String, Operand)>,
         /// Remote spawn target (`spawn@node_expr Foo(...)`); `None` = local.
         target_node: Option<Operand>,
+        /// Spawn-time capability grant tokens (e.g. `Net::TcpOut(h:p)`).
+        capabilities: Vec<String>,
         ty: Type,
     },
     Send {

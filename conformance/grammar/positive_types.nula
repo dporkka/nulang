@@ -1,0 +1,49 @@
+// Positive cases: type syntax (grammar.ebnf §2 type / arrow_type /
+// atomic_type / type_args, §3 capabilities — prefix form per parser).
+// NOTE: the parser resolves type names at parse time, so generic types
+// used below are declared in this file first.
+
+type Wrapper[T] = Wrap(T)
+type Either2[A, B] = Left2(A) | Right2(B)
+type PointRec = { x: Int, y: Int }
+
+// case 01: named primitive type
+fn t_named(x: Int) { x }
+// case 02: arrow (function) type
+fn t_arrow(f: Int -> Int) { f }
+// case 03: right-nested arrow type
+fn t_arrow_chain(f: Int -> Int -> Int) { f }
+// case 04: generic type application
+fn t_generic(v: Wrapper[Int]) { v }
+// case 05: multi-argument generic type
+fn t_generic2(m: Either2[String, Int]) { m }
+// case 06: nested generic type
+fn t_generic_nested(v: Wrapper[Wrapper[Int]]) { v }
+// case 07: tuple type
+fn t_tuple(p: (Int, String)) { p }
+// case 08: unit type as tuple-of-zero
+fn t_unit_type(x: ()) { x }
+// case 09: parenthesized type
+fn t_paren(x: (Int)) { x }
+// case 10: arrow type with tuple domain
+fn t_arrow_tuple(f: (Int, Int) -> Int) { f }
+// case 11: capability-annotated parameter — val (prefix form)
+fn t_cap_val(val x: Int) { x }
+// case 12: capability — iso
+fn t_cap_iso(iso x: Int) { x }
+// case 13: capability — trn
+fn t_cap_trn(trn x: Int) { x }
+// case 14: capability — box
+fn t_cap_box(box x: Int) { x }
+// case 15: capability — tag
+fn t_cap_tag(tag x: Int) { x }
+// case 16: capability — lineariso
+fn t_cap_lineariso(lineariso x: Int) { x }
+// case 17: capability — ref (parser-supported)
+fn t_cap_ref(ref x: Int) { x }
+// case 18: user-defined record type name
+fn t_user_type(p: PointRec) { p }
+// case 19: user-defined generic instantiation
+fn t_user_generic(o: Wrapper[Int]) { o }
+// case 20: arrow type returning a generic
+fn t_arrow_generic(f: Int -> Wrapper[Int]) { f }

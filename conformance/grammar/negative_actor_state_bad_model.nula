@@ -1,0 +1,2 @@
+// Negative case: neg_actor_state_bad_model — must be rejected by the parser.
+actor A { state volatile n = 0 behavior b() {} }

@@ -1,0 +1,45 @@
+// Positive cases: string literals and interpolation, round 2
+// (src/parser.rs parse_interpolated_string; src/lexer.rs f-strings).
+
+// case 01: interpolation with a binary expression
+fn s2_interp_arith() { "sum: #{1 + 2 * 3}" }
+// case 02: interpolation with a function call
+fn s2_interp_call() { "val: #{compute(1, 2)}" }
+// case 03: interpolation with a parenthesized expression
+fn s2_interp_paren() { "val: #{(1 + 2) * 3}" }
+// case 04: multiple interpolations in one string
+fn s2_interp_multi() { "#{1}-#{2}-#{3}" }
+// case 05: interpolation at the very start and end
+fn s2_interp_edges() { "#{1} middle #{2}" }
+// case 06: interpolation containing a string literal
+fn s2_interp_string() { "outer #{\"inner\"} done" }
+// case 07: interpolation with a comparison
+fn s2_interp_cmp() { "ok? #{1 < 2}" }
+// case 08: interpolation with unary minus
+fn s2_interp_unary() { "neg: #{0 - 5}" }
+// case 09: f-string with a simple interpolation
+fn s2_fstring_simple() { let x = 1; f"x is {x}" }
+// case 10: f-string with an expression interpolation
+fn s2_fstring_expr() { f"sum {1 + 2}" }
+// case 11: f-string with multiple interpolations
+fn s2_fstring_multi() { f"{1} and {2} and {3}" }
+// case 12: f-string without any interpolation is a plain literal
+fn s2_fstring_plain() { f"no holes" }
+// case 13: triple-quoted f-string with interpolation
+fn s2_fstring_triple() { f"""line {1}
+line {2}""" }
+// case 14: plain triple-quoted string
+fn s2_triple_plain() { """spanning
+two lines""" }
+// case 15: string containing a lone hash (not an interpolation)
+fn s2_lone_hash() { "100% #1" }
+// case 16: interpolation with a block expression
+fn s2_interp_block() { "v #{ { let t = 2; t * 10 } }" }
+// case 17: interpolation with an if expression
+fn s2_interp_if() { "#{if 1 < 2 then { \"y\" } else { \"n\" }}" }
+// case 18: string with every escape in one literal
+fn s2_all_escapes() { "tab\t nl\n quote\" backslash\\ cr\r" }
+// case 19: empty f-string
+fn s2_fstring_empty() { f"" }
+// case 20: interpolation with a match expression
+fn s2_interp_match() { "#{match 1 { case 1 => \"one\"; case _ => \"other\" }}" }

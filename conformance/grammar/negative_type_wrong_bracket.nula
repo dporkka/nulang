@@ -1,0 +1,2 @@
+// Negative case: neg_type_wrong_bracket — must be rejected by the parser.
+fn f(x: Vec[Int) { x }

@@ -1,0 +1,2 @@
+// Negative case: neg2_double_arrow_fn — must be rejected by the parser (round 2).
+fn f() -> -> Int { 1 }

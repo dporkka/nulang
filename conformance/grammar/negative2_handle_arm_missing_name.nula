@@ -1,0 +1,3 @@
+// Negative case: neg2_handle_arm_missing_name — must be rejected by the parser (round 2).
+effect E { op: -> Int }
+fn f() { handle { perform E.op() } { | E.() resume => 1 } }

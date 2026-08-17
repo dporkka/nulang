@@ -180,6 +180,24 @@ pub fn tag_ptr(offset: u32) -> u64 {
     TAG_PTR | (offset as u64)
 }
 
+/// True when a **full pointer address** fits in the 48-bit payload without
+/// truncation.
+///
+/// The modern `TAG_PTR` encoding stores a 32-bit heap *offset* (see
+/// [`tag_ptr`]/[`as_ptr_raw`]), which is portable everywhere. However, the
+/// legacy `Value::ptr`/`Value::as_ptr` path in `vm.rs` stores the raw
+/// pointer address masked with [`PAYLOAD_MASK`]. On platforms with virtual
+/// address spaces wider than 48 bits (x86-64 LA57 5-level paging, AArch64
+/// with 52-bit VA, or any allocator returning high addresses), that masking
+/// silently truncates the address and produces a dangling pointer.
+///
+/// Pointer-producing code on the legacy path should check this predicate
+/// (or `debug_assert!` it) before packing an address into a value.
+#[inline]
+pub fn ptr_fits_payload(addr: u64) -> bool {
+    addr & !PAYLOAD_MASK == 0
+}
+
 /// Pack a raw u64 bit pattern into a tagged closure value.
 #[inline]
 pub fn tag_closure(payload: u64) -> u64 {
@@ -310,6 +328,17 @@ mod tests {
         let raw = tag_ptr(0xABCD);
         assert!(is_ptr_raw(raw));
         assert_eq!(as_ptr_raw(raw), 0xABCD);
+    }
+
+    #[test]
+    fn test_ptr_fits_payload() {
+        assert!(ptr_fits_payload(0));
+        assert!(ptr_fits_payload(0x0000_7FFF_FFFF_FFF8)); // typical x86-64 user VA
+        assert!(ptr_fits_payload(PAYLOAD_MASK));
+        // LA57 / AArch64-52 style addresses above 2^48 would be truncated
+        // by the legacy `Value::ptr` masking path.
+        assert!(!ptr_fits_payload(0x0001_0000_0000_0000));
+        assert!(!ptr_fits_payload(0x00FF_FFFF_FFFF_FFFF));
     }
 
     #[test]

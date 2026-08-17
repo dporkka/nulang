@@ -1,0 +1,2 @@
+// Negative case: neg_lex_c_style_inc — must be rejected by the parser.
+fn f() { let x = 1; x++ }
