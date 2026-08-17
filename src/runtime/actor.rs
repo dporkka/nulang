@@ -105,7 +105,7 @@ impl FlightRecorder {
             seq,
             sender,
             behavior_id,
-            payload_len: payload.len(),
+            payload_len,
             payload_summary,
         };
 
@@ -239,6 +239,11 @@ pub struct Actor {
     pub query_handlers: HashMap<String, Value>,
     /// True if this actor was generated from an `agent` declaration.
     pub is_agent: bool,
+    /// Spawn-time capability manifest (canonical tokens such as
+    /// `Net::TcpOut(host:port)`), installed by `spawn Foo() with [...]`.
+    /// Network host functions reject destinations not present in this set;
+    /// empty means no outbound network grants (ungranted-by-default).
+    pub capabilities: std::collections::BTreeSet<String>,
     /// Execution backend for this actor.
     pub backend: ActorBackend,
     /// True while a background worker thread holds an in-flight LLM request
@@ -351,6 +356,7 @@ impl Actor {
             received_signals: Vec::new(),
             query_handlers: HashMap::new(),
             is_agent: false,
+            capabilities: std::collections::BTreeSet::new(),
             backend: ActorBackend::default(),
             #[cfg(feature = "ai-runtime")]
             llm_inflight: false,
