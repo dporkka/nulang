@@ -3,7 +3,7 @@
 
 Extracts every ```nulang fenced block from SPEC2.md, README.md, and
 docs/**/*.md, writes each block to a temp file, and runs
-`$NULANG_BIN check <file>` on it. Prints one PASS/FAIL line per snippet
+`$NULANG_BIN --check <file>` on it. Prints one PASS/FAIL line per snippet
 with its source file:line, and exits 1 if any snippet fails.
 
 A block is SKIPPED (never silently — it is reported) when:
@@ -14,9 +14,9 @@ A block is SKIPPED (never silently — it is reported) when:
 Usage:
     python3 scripts/check_doc_snippets.py [--parse-only] [FILE ...]
 
-    --parse-only   Use the CLI's parse-only mode instead of full `check`
-                   when the CLI supports one (e.g. `nulang check --parse-only`);
-                   otherwise falls back to plain `check`.
+    --parse-only   Use the CLI's parse-only mode instead of `--check`
+                   when the CLI supports one; the current CLI has none,
+                   so this falls back to plain `--check`.
     FILE ...       Restrict scanning to these files (default: SPEC2.md,
                    README.md, docs/**/*.md).
 
@@ -93,21 +93,22 @@ def main():
 
     files = args.files if args.files else default_files()
 
-    # Determine the check subcommand. --parse-only maps to a parse-only
-    # CLI flag if `nulang check --help` advertises one; otherwise use check.
-    check_args = ["check"]
+    # The CLI's check mode is `nulang --check <FILE>` (type-check, don't
+    # run); there is no parse-only mode in the current CLI, so --parse-only
+    # probes `nulang --help` for one and otherwise falls back to --check.
+    check_args = ["--check"]
     if args.parse_only:
         try:
             help_out = subprocess.run(
-                [nulang, "check", "--help"],
+                [nulang, "--help"],
                 capture_output=True, text=True, timeout=30).stdout
         except Exception:
             help_out = ""
         for flag in ("--parse-only", "--parse", "--no-typecheck"):
             if flag in help_out:
-                check_args = ["check", flag]
+                check_args = [flag]
                 break
-        # else: no parse-only mode supported; plain `check` is the fallback.
+        # else: no parse-only mode supported; --check is the fallback.
 
     npass = nfail = nskip = 0
     failures = []
