@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">Nulang</h1>
 <p align="center">
-  An actor-based language with algebraic effects, capability-based types, and durable/distributed actors — built for software that outlasts a process.
+  An actor-based language with algebraic effects, capability-based types, and durable/distributed actors for building resilient software.
 </p>
 <p align="center">
   <a href="https://nulang.org">Website</a> •
