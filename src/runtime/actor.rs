@@ -105,7 +105,7 @@ impl FlightRecorder {
             seq,
             sender,
             behavior_id,
-            payload_len,
+            payload_len: payload.len(),
             payload_summary,
         };
 
