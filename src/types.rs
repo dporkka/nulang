@@ -1104,6 +1104,7 @@ pub enum ErrorCode {
     E010MatchNoArms,
     E011StepLimitExceeded,
     E012UnhandledEffect,
+    E013FfiBoundaryViolation,
 }
 
 impl ErrorCode {
@@ -1121,6 +1122,7 @@ impl ErrorCode {
             ErrorCode::E010MatchNoArms => "E010",
             ErrorCode::E011StepLimitExceeded => "E011",
             ErrorCode::E012UnhandledEffect => "E012",
+            ErrorCode::E013FfiBoundaryViolation => "E013",
         }
     }
     pub fn explain(&self) -> &'static str {
@@ -1146,6 +1148,9 @@ impl ErrorCode {
             ErrorCode::E011StepLimitExceeded => "The VM step limit was exceeded.",
             ErrorCode::E012UnhandledEffect => {
                 "An effect was performed but no handler exists for it."
+            }
+            ErrorCode::E013FfiBoundaryViolation => {
+                "A capability-qualified VM-heap type was used at an FFI boundary; foreign threads are not tracked by ORCA. Move the value into a serialized form (String) or an externally-managed opaque handle."
             }
         }
     }
@@ -1762,6 +1767,14 @@ impl NuError {
     /// Return the canonical error code for this error, preferring structured
     /// fields over message-pattern heuristics.
     pub fn error_code(&self) -> Option<ErrorCode> {
+        // FFI foreign-heap boundary violations are TypeErrors with a
+        // dedicated stable code (E0208); classify them before the generic
+        // structured-field and message heuristics below.
+        if matches!(self, NuError::TypeError { .. })
+            && self.msg_str().contains("cannot cross the FFI boundary")
+        {
+            return Some(ErrorCode::E013FfiBoundaryViolation);
+        }
         // Structured-field shortcuts (more reliable than string matching).
         match self {
             NuError::TypeError {
