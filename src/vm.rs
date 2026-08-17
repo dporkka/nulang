@@ -4430,7 +4430,6 @@ impl VM {
             }
             OpCode::ClosureCall => {
                 let closure_val = self.frames[frame_idx].regs[instr.op1 as usize];
-                let argc = instr.op2;
                 let dst = instr.op3;
                 let (func_idx, closure_env) = self.resolve_function(closure_val, module_idx)?;
                 let code_offset = self
@@ -4444,9 +4443,7 @@ impl VM {
                     })?;
                 let mut new_frame = Frame::new(Some(frame_idx), module_idx);
                 new_frame.pc = code_offset;
-                for i in 0..(argc as usize).min(256) {
-                    new_frame.regs[i] = self.frames[frame_idx].regs[i];
-                }
+                new_frame.regs = self.frames[frame_idx].regs;
                 new_frame.return_dst = dst;
                 new_frame.closure_env = closure_env;
                 self.frames.push(new_frame);
