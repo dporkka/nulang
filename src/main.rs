@@ -386,6 +386,7 @@ fn main() {
             }
             "-v" | "--verbose" => opts.verbose = true,
             "--all-errors" => opts.all_errors = true,
+            "--json" => opts.json = true,
             "--metrics-port" => {
                 if i + 1 < args.len() {
                     match args[i + 1].parse::<u16>() {
@@ -456,6 +457,7 @@ fn main() {
                     "--emit-nbc",
                     "--verify",
                     "--bench",
+                    "--json",
                     "--store",
                     "--version",
                     "--verbose",
@@ -674,7 +676,28 @@ fn main() {
         };
         if let Err(e) = check_source(&source, Some(&path), opts.verbose, opts.all_errors, &opts.with_capabilities) {
             let code = exit_code(&e);
-            if opts.all_errors {
+            if opts.json {
+                // Machine-readable mode: the JSON report is the ONLY output on
+                // stdout; nothing human-rendered is printed.
+                let diags = if opts.all_errors {
+                    let all = collect_all_frontend_errors(&source, Some(&path));
+                    if all.is_empty() {
+                        nulang::json_diagnostics::diagnostics_from_error(&e)
+                    } else {
+                        all.iter()
+                            .flat_map(nulang::json_diagnostics::diagnostics_from_error)
+                            .collect()
+                    }
+                } else {
+                    nulang::json_diagnostics::diagnostics_from_error(&e)
+                };
+                let report = nulang::json_diagnostics::JsonReport::new(
+                    "check",
+                    Some(path.clone()),
+                    diags,
+                );
+                print!("{}", report.to_json_string());
+            } else if opts.all_errors {
                 let all = collect_all_frontend_errors(&source, Some(&path));
                 if all.is_empty() {
                     print_error(&e, use_color);
@@ -688,7 +711,16 @@ fn main() {
             }
             std::process::exit(code);
         }
-        println!("Type check passed.");
+        if opts.json {
+            let report = nulang::json_diagnostics::JsonReport::new(
+                "check",
+                Some(path.clone()),
+                Vec::new(),
+            );
+            print!("{}", report.to_json_string());
+        } else {
+            println!("Type check passed.");
+        }
         return;
     }
 
@@ -826,6 +858,9 @@ struct Options {
     watch: Option<String>,
     explain: Option<String>,
     all_errors: bool,
+    /// Emit machine-readable JSON diagnostics on stdout (see
+    /// `nulang::json_diagnostics` for the schema).
+    json: bool,
     bench_count: Option<usize>,
     /// Start a Prometheus-format metrics server on this port.
     metrics_port: Option<u16>,
@@ -862,6 +897,7 @@ impl Default for Options {
             watch: None,
             explain: None,
             all_errors: false,
+            json: false,
             bench_count: None,
             metrics_port: None,
             ffi_sandbox: false,
@@ -925,6 +961,7 @@ fn print_help() {
     println!("  --watch <file>   Re-run on changes");
     println!("  --explain <CODE> Error code help");
     println!("  --all-errors     Report all type errors (not just the first)");
+    println!("  --json           Emit machine-readable JSON diagnostics on stdout");
     println!("  --bench [N]      Benchmark: run N times (default 10), print timing stats");
     println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
