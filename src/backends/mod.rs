@@ -137,7 +137,7 @@ pub trait JitBackend {
 // WASM backend — the interface for MIR→WASM compilers + host runtimes
 // ---------------------------------------------------------------------------
 
-/// A WASM backend compiles MIR to WASM bytes and provides a host
+/// A WASM backend compiles MIR to a `.wasm` module and provides a host
 /// runtime to execute it. The default implementation uses `wasm-encoder` +
 /// `wasmtime` (`src/mir_wasm.rs` + `src/wasm_runtime.rs`, feature
 /// `wasm-backend`). A future runtime could implement this trait with a
@@ -387,11 +387,11 @@ impl Default for DefaultTlsProvider {
 
 /// A crypto provider supplies hashing, secure random, and optional signing.
 /// The default implementation uses BLAKE3 + `getrandom` + `ed25519-dalek`
-/// (`src/runtime/identity.rs`). A future runtime could implement
+/// (`src/runtime/identity.rs`). A future runtime could implement this with
 /// a hardware security module, a different hash function, or whatever
 /// cryptographic primitives exist in 2125.
 pub trait CryptoProvider: Send + Sync {
-    /// Compute the BLAKE3-256 hash of `data` (32 bytes).
+    /// Compute the BLAKE3-256 hash of `data`.
     /// (The algorithm is BLAKE3, not SHA-256 — the output length is 32 bytes.)
     fn hash(&self, data: &[u8]) -> [u8; 32];
 
@@ -490,7 +490,7 @@ impl DefaultCryptoProvider {
         DefaultCryptoProvider { signing_key: None }
     }
 
-    /// Create a provider with a signing key.
+    /// Create a provider with an Ed25519 signing key for `sign()`.
     pub fn with_signing_key(key: ed25519_dalek::SigningKey) -> Self {
         DefaultCryptoProvider {
             signing_key: Some(key),
