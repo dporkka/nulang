@@ -45,6 +45,22 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-17 (perf/optimizations branch)
+
+- **`StrBuilder` builtin effect** — mutable growable string buffer
+  (`StrBuilder.new/push/to_string/len/reset`). Appends are amortized O(1) with
+  capacity doubling, converting O(n²) text assembly (the `+` concat path) to
+  O(n). Wrapped in `stdlib::string` (`builder`/`builder_push`/…). Measured
+  ~6× faster than `+` at 30 KB, widening super-linearly. (Experimental)
+- **`Map` builtin effect** — mutable open-addressed hash map
+  (`Map.new/insert/get/remove/contains/size`). String keys compare by content;
+  capacity doubles at 0.5 load; keys/values participate in ORCA reclamation.
+  Replaces the O(n) linear-scan `std.map` for keyed workloads. (Experimental)
+- **Per-send allocation removal** — `behavior_id_for` and distributed content-
+  hash lookup no longer build a `format!(".{name}")` string per send.
+- **Actor heap density** — default per-actor bump block 64 KiB → 16 KiB
+  (~4× actor density, ≈64k actors/GB). Growth chaining unchanged.
+
 ### Added since 1.0.0-frozen — 2026-08-15
 
 - **Aether borrow-semantics features (P0–P5).** Six borrows from the
