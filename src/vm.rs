@@ -1811,6 +1811,39 @@ pub fn is_debug_pause(err: &NuError) -> bool {
     matches!(err, NuError::VMError { msg, .. } if msg.split('\n').next() == Some(DEBUG_PAUSE_MSG))
 }
 
+/// Runtime error for integer arithmetic overflowing the 48-bit tagged range.
+/// Used by the compiled-code runtime helpers (`src/jit/runtime.rs`), which
+/// cannot unwind and report the error via `record_arith_error`.
+pub fn int_overflow_error(op: &str, a: i64, b: i64) -> NuError {
+    NuError::runtime_error(
+        format!(
+            "integer overflow: `{}` on {} and {} exceeds the 48-bit range \
+             [{}, {}] supported by the VM encoding \
+             (spec: Int is i64; wider encoding is a known limitation)",
+            op,
+            a,
+            b,
+            crate::value_layout::INT48_MIN,
+            crate::value_layout::INT48_MAX
+        ),
+        Span::default(),
+    )
+}
+
+/// Runtime error for arithmetic on operands of the wrong type.
+/// Used by the compiled-code runtime helpers (`src/jit/runtime.rs`).
+pub fn arith_type_error(op: &str, a: Value, b: Value) -> NuError {
+    NuError::runtime_error(
+        format!(
+            "type error: arithmetic `{}` requires numeric operands, got {} and {}",
+            op,
+            a.to_string_repr(),
+            b.to_string_repr()
+        ),
+        Span::default(),
+    )
+}
+
 /// Captured environment of a closure: the lifted function it wraps plus the
 /// values captured at creation time.
 #[derive(Debug, Clone)]

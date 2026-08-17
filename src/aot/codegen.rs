@@ -2911,6 +2911,7 @@ fn compile_rvalue(
             behavior_idx,
             init,
             target_node,
+            capabilities: _,
         } => {
             if target_node.is_some() {
                 return Err(AotCompileError::Unsupported(

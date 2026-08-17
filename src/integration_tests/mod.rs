@@ -9563,6 +9563,7 @@ match { a: 2, b: 9 } with {
                     behavior_idx: 0,
                     init: vec![],
                     target_node: Some(node),
+                    capabilities: vec![],
                 },
             );
             builder.terminate(crate::mir::Terminator::Return(Some(out)));
