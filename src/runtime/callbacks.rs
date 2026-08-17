@@ -1192,6 +1192,12 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     return Some(crate::vm::Value::unit());
                 }
             }
+            if effect_name == "StrBuilder" {
+                return crate::vm::strbuilder_op(self, constants, op_name.unwrap_or(""), regs);
+            }
+            if effect_name == "Map" {
+                return crate::vm::hashmap_op(self, constants, op_name.unwrap_or(""), regs);
+            }
             self.perform_effect(effect_name, regs)
         }
     }
