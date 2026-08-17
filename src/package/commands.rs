@@ -64,12 +64,16 @@ pub fn run(args: &[String]) -> NuResult<()> {
             cmd_new(path_arg, template)
         }
         Some("init") => cmd_init(),
-        Some("build") => cmd_build(),
+        Some("build") => {
+            let json = args[1..].iter().any(|a| a == "--json");
+            cmd_build(json)
+        }
         Some("build-wasm") => cmd_build_wasm(),
         Some("test") => {
             let mut filter: Option<&str> = None;
             let mut verbose = false;
             let mut watch = false;
+            let mut json = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -81,6 +85,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
                     }
                     "--verbose" | "-v" => verbose = true,
                     "--watch" | "-w" => watch = true,
+                    "--json" => json = true,
                     other => {
                         return Err(NuError::PackageError {
                             msg: format!("unknown flag '{}' for nula test", other),
@@ -93,7 +98,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
             if watch {
                 cmd_test_watch(filter, verbose)
             } else {
-                cmd_test(filter, verbose)
+                cmd_test(filter, verbose, json)
             }
         }
         Some("run") => {
@@ -565,7 +570,7 @@ fn nulang_exe(args: &[&str]) -> NuResult<()> {
 /// `nula build`: resolve dependencies, write the lockfile, type-check entry.
 /// `nula build`: resolve dependencies, write the lockfile, type-check and
 /// compile to a .nbc artifact in .nula/dist/.
-fn cmd_build() -> NuResult<()> {
+fn cmd_build(json: bool) -> NuResult<()> {
     let root = package_root()?;
     let manifest_path = root.join(MANIFEST_FILE);
     let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
@@ -576,6 +581,10 @@ fn cmd_build() -> NuResult<()> {
 
     let entry = prepare_package()?;
     let entry_str = entry.to_string_lossy().into_owned();
+
+    if json {
+        return cmd_build_json(&root, &name, &entry_str);
+    }
 
     let dist_dir = root.join(".nula").join("dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| NuError::PackageError {
@@ -593,6 +602,107 @@ fn cmd_build() -> NuResult<()> {
     nulang_exe(&["--emit-nbc", "--out", &nbc_path_str, &entry_str])?;
     println!("Build succeeded.");
     Ok(())
+}
+
+/// `nula build --json`: machine-readable build report. The JSON report is
+/// the only output on stdout; progress stays on stderr. Type-check
+/// diagnostics are produced by the child `nulang --check --json` invocation
+/// and forwarded (re-wrapped as `command: "build"`) so consumers see one
+/// schema.
+fn cmd_build_json(root: &Path, name: &str, entry_str: &str) -> NuResult<()> {
+    use crate::json_diagnostics::{
+        diagnostic_from_message, JsonReport, SCHEMA_VERSION,
+    };
+
+    // Step 1: type-check with JSON diagnostics, capturing the child's stdout.
+    eprintln!("Building {}...", name);
+    eprintln!("  Type-checking {}...", entry_str);
+    let check = nulang_exe_output(&["--json", "--check", entry_str])?;
+    if !check.status.success() {
+        let stdout = String::from_utf8_lossy(&check.stdout);
+        // Forward the child's structured diagnostics when parseable; fall
+        // back to a single opaque error otherwise.
+        let report = match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            Ok(v) if v["diagnostics"].is_array() => serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "command": "build",
+                "file": entry_str,
+                "ok": false,
+                "diagnostics": v["diagnostics"],
+            })
+            .to_string(),
+            _ => JsonReport::new(
+                "build",
+                Some(entry_str.to_string()),
+                vec![diagnostic_from_message(format!(
+                    "nulang --check exited with {}",
+                    check.status
+                ))],
+            )
+            .to_json_string(),
+        };
+        println!("{}", report.trim_end());
+        return Err(NuError::PackageError {
+            msg: format!("type check failed for {}", entry_str),
+            span: Span::default(),
+        });
+    }
+
+    // Step 2: compile to .nbc (stdout captured so only JSON reaches stdout).
+    let dist_dir = root.join(".nula").join("dist");
+    std::fs::create_dir_all(&dist_dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot create {}: {}", dist_dir.display(), e),
+        span: Span::default(),
+    })?;
+    let nbc_path = dist_dir.join(format!("{}.nbc", name));
+    let nbc_path_str = nbc_path.to_string_lossy().into_owned();
+    eprintln!("  Compiling {} to .nbc...", name);
+    let compile = nulang_exe_output(&["--emit-nbc", "--out", &nbc_path_str, entry_str])?;
+    if !compile.status.success() {
+        let stderr = String::from_utf8_lossy(&compile.stderr).trim().to_string();
+        let report = JsonReport::new(
+            "build",
+            Some(entry_str.to_string()),
+            vec![diagnostic_from_message(format!(
+                "nulang --emit-nbc exited with {}: {}",
+                compile.status, stderr
+            ))],
+        );
+        print!("{}", report.to_json_string());
+        return Err(NuError::PackageError {
+            msg: format!("compilation failed for {}", entry_str),
+            span: Span::default(),
+        });
+    }
+
+    let report = JsonReport::new("build", Some(entry_str.to_string()), Vec::new());
+    print!("{}", report.to_json_string());
+    Ok(())
+}
+
+/// Run the nulang exe with piped stdout/stderr, returning the full output.
+/// Used by `--json` modes where child output must not reach our stdout.
+fn nulang_exe_output(args: &[&str]) -> NuResult<std::process::Output> {
+    let exe = std::env::current_exe().map_err(|e| NuError::PackageError {
+        msg: format!("cannot locate nulang executable: {}", e),
+        span: Span::default(),
+    })?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    if std::env::var_os("NULANG_STDLIB").is_none() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("stdlib");
+            if candidate.is_dir() {
+                cmd.env("NULANG_STDLIB", &candidate);
+            }
+        }
+    }
+    cmd.output().map_err(|e| NuError::PackageError {
+        msg: format!("failed to run nulang ({}): {}", exe.display(), e),
+        span: Span::default(),
+    })
 }
 
 /// `nula build-wasm`: compile package to .wasm + AOT .cwasm.
@@ -705,7 +815,7 @@ fn collect_mtimes_recursive(dir: &Path, out: &mut Vec<(PathBuf, std::time::Syste
 /// With `--verbose` (or `-v`): prints each test file name before execution,
 /// shows ✓ PASS / ✗ FAIL per file, and displays error messages for failures.
 /// Default (non-verbose) output is clean and greppable.
-fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
+fn cmd_test(filter: Option<&str>, verbose: bool, json: bool) -> NuResult<()> {
     eprintln!("Preparing package...");
     let _entry = prepare_package()?;
     let tests_dir = package_root()?.join("tests");
@@ -725,7 +835,13 @@ fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
     };
     test_files.sort();
     if test_files.is_empty() {
-        println!("No tests found in {}", tests_dir.display());
+        if json {
+            let mut report = crate::json_diagnostics::JsonReport::new("test", None, Vec::new());
+            report.tests = Some(Vec::new());
+            print!("{}", report.to_json_string());
+        } else {
+            println!("No tests found in {}", tests_dir.display());
+        }
         return Ok(());
     }
 
@@ -787,17 +903,47 @@ fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
     eprintln!("running {} tests", tests.len());
     let mut passed = 0;
     let mut failed = 0;
+    let mut json_results: Vec<crate::json_diagnostics::JsonTestResult> = Vec::new();
 
     for test in &tests {
         let file_str = test.file_to_run.to_string_lossy().into_owned();
-        match run_test_file(&file_str) {
+        let started = std::time::Instant::now();
+        // In --json mode the child's stdout is captured (discarded) so the
+        // JSON report is the only thing on our stdout.
+        let outcome = if json {
+            run_test_file_captured(&file_str)
+        } else {
+            run_test_file(&file_str)
+        };
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match outcome {
             Ok(()) => {
                 passed += 1;
-                println!("test {} ... ok", test.display);
+                if json {
+                    json_results.push(crate::json_diagnostics::JsonTestResult {
+                        name: test.display.clone(),
+                        status: "ok".to_string(),
+                        duration_ms,
+                        diagnostics: Vec::new(),
+                    });
+                } else {
+                    println!("test {} ... ok", test.display);
+                }
             }
             Err(stderr_output) => {
                 failed += 1;
-                if verbose {
+                if json {
+                    json_results.push(crate::json_diagnostics::JsonTestResult {
+                        name: test.display.clone(),
+                        status: "failed".to_string(),
+                        duration_ms,
+                        diagnostics: vec![
+                            crate::json_diagnostics::diagnostic_from_message(
+                                stderr_output.trim().to_string(),
+                            ),
+                        ],
+                    });
+                } else if verbose {
                     println!("test {} ... FAILED", test.display);
                     for line in stderr_output.lines() {
                         println!("   {}", line);
@@ -818,6 +964,24 @@ fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
     }
     let _ = std::fs::remove_dir(&temp_dir);
 
+    if json {
+        let diagnostics = json_results
+            .iter()
+            .flat_map(|t| t.diagnostics.clone())
+            .collect();
+        let mut report =
+            crate::json_diagnostics::JsonReport::new("test", None, diagnostics);
+        report.tests = Some(json_results);
+        print!("{}", report.to_json_string());
+        if failed > 0 {
+            return Err(NuError::PackageError {
+                msg: format!("{} test(s) failed", failed),
+                span: Span::default(),
+            });
+        }
+        return Ok(());
+    }
+
     println!("\ntest result: {} passed; {} failed", passed, failed);
     if failed > 0 {
         return Err(NuError::PackageError {
@@ -834,7 +998,7 @@ fn cmd_test_watch(filter: Option<&str>, verbose: bool) -> NuResult<()> {
     let root = package_root()?;
 
     // Initial run
-    let _ = cmd_test(filter, verbose);
+    let _ = cmd_test(filter, verbose, false);
 
     // Collect initial mtimes for all .nula files under src/ and tests/
     let src_dir = root.join("src");
@@ -853,7 +1017,7 @@ fn cmd_test_watch(filter: Option<&str>, verbose: bool) -> NuResult<()> {
             // Clear screen
             print!("\x1B[2J\x1B[H");
             eprintln!("re-running tests...");
-            let _ = cmd_test(filter, verbose);
+            let _ = cmd_test(filter, verbose, false);
         }
     }
 }
@@ -910,11 +1074,25 @@ fn strip_main_function(source: &str) -> String {
 /// Run a test file via `nulang`, capturing stderr so error messages appear
 /// after the test name (avoiding interleaved output).
 /// Returns `Ok(())` on success, `Err(stderr_string)` on failure.
+/// Like [`run_test_file`], but captures (discards) the child's stdout so the
+/// parent's stdout stays clean for `--json` output.
+fn run_test_file_captured(file_path: &str) -> Result<(), String> {
+    run_test_file_impl(file_path, false)
+}
+
 fn run_test_file(file_path: &str) -> Result<(), String> {
+    run_test_file_impl(file_path, true)
+}
+
+fn run_test_file_impl(file_path: &str, inherit_stdout: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate nulang: {}", e))?;
     let mut cmd = Command::new(&exe);
     cmd.arg(file_path);
-    cmd.stdout(std::process::Stdio::inherit());
+    if inherit_stdout {
+        cmd.stdout(std::process::Stdio::inherit());
+    } else {
+        cmd.stdout(std::process::Stdio::piped());
+    }
     cmd.stderr(std::process::Stdio::piped());
     if std::env::var_os("NULANG_STDLIB").is_none() {
         if let Some(exe_dir) = exe.parent() {
@@ -1595,7 +1773,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        let result = cmd_test(None, false);
+        let result = cmd_test(None, false, false);
         assert!(result.is_err(), "test outside package should fail");
 
         let _ = std::fs::remove_dir_all(&dir);
