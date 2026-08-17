@@ -1385,6 +1385,7 @@ impl<'c> FnLowerer<'c> {
                 actor_type,
                 init,
                 target_node,
+                capabilities,
                 ..
             } => {
                 let idx = self.ctx.spawn_behavior_idx(actor_type);
@@ -1410,6 +1411,7 @@ impl<'c> FnLowerer<'c> {
                         behavior_idx: idx,
                         init: init_rvs,
                         target_node: target_local,
+                        capabilities: capabilities.clone(),
                     },
                 );
                 Ok(())

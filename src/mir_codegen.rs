@@ -1067,6 +1067,7 @@ impl MirCodegen {
                 behavior_idx,
                 init,
                 target_node,
+                capabilities: _,
             } => {
                 if let Some(node) = target_node {
                     let node_reg = self.local_reg(*node);

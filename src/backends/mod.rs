@@ -295,7 +295,7 @@ impl<T: crate::runtime::NetworkTransport> Transport for T {
         to_addr: std::net::SocketAddr,
         packet: crate::runtime::Packet,
     ) {
-        crate::runtime::NetworkTransport::send(self, node_id, to_addr, packet)
+        crate::runtime::NetworkTransport::send(self, to_node, to_addr, packet)
     }
     fn receive(&self) -> Vec<crate::runtime::IncomingPacket> {
         crate::runtime::NetworkTransport::receive(self)
@@ -525,12 +525,15 @@ impl CryptoProvider for DefaultCryptoProvider {
 
     fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8; 64]) -> bool {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        let vk = match VerifyingKey::from_bytes(public_key) {
+        let Ok(pk_bytes) = <[u8; 32]>::try_from(public_key) else {
+            return false;
+        };
+        let vk = match VerifyingKey::from_bytes(&pk_bytes) {
             Ok(k) => k,
             Err(_) => return false,
         };
         let sig = Signature::from_bytes(signature);
-        vk.verify(&sig, message).is_ok()
+        vk.verify(message, &sig).is_ok()
     }
 }
 
