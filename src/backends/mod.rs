@@ -295,7 +295,7 @@ impl<T: crate::runtime::NetworkTransport> Transport for T {
         to_addr: std::net::SocketAddr,
         packet: crate::runtime::Packet,
     ) {
-        crate::runtime::NetworkTransport::send(self, node_id, to_addr, packet)
+        crate::runtime::NetworkTransport::send(self, to_node, to_addr, packet)
     }
     fn receive(&self) -> Vec<crate::runtime::IncomingPacket> {
         crate::runtime::NetworkTransport::receive(self)
@@ -355,7 +355,6 @@ pub trait ServerTlsConfig: Send + Sync + std::any::Any {}
 
 /// Client-side TLS configuration.
 pub trait ClientTlsConfig: Send + Sync + std::any::Any {}
-
 /// A TLS-wrapped stream.
 pub trait TlsStream: std::io::Read + std::io::Write + Send {
     /// Get the peer's certificate chain, if any.
@@ -404,7 +403,7 @@ pub trait CryptoProvider: Send + Sync {
 
     /// Verify an Ed25519 signature.  `public_key` is 32 bytes, `signature`
     /// is 64 bytes.  Returns `true` iff the signature is valid.
-    fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8; 64]) -> bool;
+    fn verify(&self, public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -523,14 +522,14 @@ impl CryptoProvider for DefaultCryptoProvider {
         Some(out)
     }
 
-    fn verify(&self, public_key: &[u8], message: &[u8], signature: &[u8; 64]) -> bool {
+    fn verify(&self, public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let vk = match VerifyingKey::from_bytes(public_key) {
             Ok(k) => k,
             Err(_) => return false,
         };
         let sig = Signature::from_bytes(signature);
-        vk.verify(&sig, message).is_ok()
+        vk.verify(message, &sig).is_ok()
     }
 }
 
