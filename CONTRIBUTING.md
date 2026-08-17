@@ -31,6 +31,25 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, etc., with a short
 imperative summary. PR titles are checked by CI.
 
+## Core Admission Rule
+
+A feature enters the language core **only if it cannot be implemented as**:
+
+- a **library** (user-space `.nula` code),
+- a **capability package** (an effect module behind a capability),
+- a **compiler plugin** (a lowering/lint pass outside the frozen pipeline),
+- a **WASM component** (a WIT-composable module), or
+- a **cloud service** (something the platform provides at runtime).
+
+If any of those five vehicles can carry the feature, the feature does not
+belong in the kernel — propose it there instead. Rationale: we keep a
+**tiny kernel and an enormous platform**. Every construct in the core is
+part of the Frozen/Stable surface forever (see GOVERNANCE.md), imposes
+compiler, runtime, and spec maintenance cost on every user, and constrains
+every future optimization. Features shipped as libraries, packages,
+plugins, components, or services can evolve, be deprecated, and be replaced
+without touching the language.
+
 ## Stability tiers
 
 Every public surface is Frozen, Stable, or Experimental (see
