@@ -364,7 +364,7 @@ mod tests {
         assert!(!is_float_raw(0x7FF5_0000_0000_0000)); // NaN, not a tag, still NaN
         assert!(!is_float_raw(0x7FF8_0000_0000_0000)); // hardware quiet NaN == TAG_NIL
         assert!(!is_float_raw(0xFFF9_DEAD_BEEF_0000)); // arbitrary negative NaN
-        // The single reserved canonical NaN pattern IS a float.
+                                                       // The single reserved canonical NaN pattern IS a float.
         assert!(is_float_raw(CANONICAL_NAN_BITS));
     }
 
@@ -405,8 +405,14 @@ mod tests {
         assert!(hw_nan.is_nan());
         assert_eq!(float_bits(hw_nan), CANONICAL_NAN_BITS);
         assert_eq!(float_bits(0.0 * f64::INFINITY), CANONICAL_NAN_BITS);
-        assert_eq!(float_bits(f64::from_bits(0x7FF8_0000_0000_0000)), CANONICAL_NAN_BITS);
-        assert_eq!(float_bits(f64::from_bits(0x7FFC_0000_0000_0042)), CANONICAL_NAN_BITS);
+        assert_eq!(
+            float_bits(f64::from_bits(0x7FF8_0000_0000_0000)),
+            CANONICAL_NAN_BITS
+        );
+        assert_eq!(
+            float_bits(f64::from_bits(0x7FFC_0000_0000_0042)),
+            CANONICAL_NAN_BITS
+        );
     }
 
     #[test]

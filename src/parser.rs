@@ -470,217 +470,217 @@ impl Parser {
         })
     }
 
-/// Desugar `@derive(eq)` on record types into a synthetic structural-equality
-/// function `{name}_eq(a, b) -> Bool`. Walks top-level and nested-module decls
-/// so a derive inside a `module { }` block is expanded too.
-fn expand_derives(decls: Vec<Decl>) -> Vec<Decl> {
-    let mut out = Vec::with_capacity(decls.len());
-    for decl in decls {
-        match decl {
-            Decl::RecordType {
-                name,
-                type_params,
-                fields,
-                derives,
-                public,
-                span,
-            } => {
-                let wants_eq = derives.iter().any(|d| d == "eq");
-                out.push(Decl::RecordType {
-                    name: name.clone(),
-                    type_params: type_params.clone(),
-                    fields: fields.clone(),
+    /// Desugar `@derive(eq)` on record types into a synthetic structural-equality
+    /// function `{name}_eq(a, b) -> Bool`. Walks top-level and nested-module decls
+    /// so a derive inside a `module { }` block is expanded too.
+    fn expand_derives(decls: Vec<Decl>) -> Vec<Decl> {
+        let mut out = Vec::with_capacity(decls.len());
+        for decl in decls {
+            match decl {
+                Decl::RecordType {
+                    name,
+                    type_params,
+                    fields,
                     derives,
                     public,
                     span,
-                });
-                if wants_eq {
-                    out.push(Self::derive_eq_function(&name, &fields, span));
+                } => {
+                    let wants_eq = derives.iter().any(|d| d == "eq");
+                    out.push(Decl::RecordType {
+                        name: name.clone(),
+                        type_params: type_params.clone(),
+                        fields: fields.clone(),
+                        derives,
+                        public,
+                        span,
+                    });
+                    if wants_eq {
+                        out.push(Self::derive_eq_function(&name, &fields, span));
+                    }
                 }
-            }
-            Decl::Module {
-                name,
-                exports,
-                decls: inner,
-                span,
-            } => {
-                out.push(Decl::Module {
+                Decl::Module {
                     name,
                     exports,
-                    decls: Self::expand_derives(inner),
+                    decls: inner,
                     span,
-                });
+                } => {
+                    out.push(Decl::Module {
+                        name,
+                        exports,
+                        decls: Self::expand_derives(inner),
+                        span,
+                    });
+                }
+                other => out.push(other),
             }
-            other => out.push(other),
+        }
+        out
+    }
+
+    /// Synthesize `fn {record_name}_eq(a, b) -> Bool` comparing every field with
+    /// `==`, `&&`-chained. The zero-field case is trivially `true`.
+    fn derive_eq_function(record_name: &str, fields: &[(String, Type)], span: Span) -> Decl {
+        let rec_ty = Type::Record(fields.to_vec());
+        let mut body: Option<Expr> = None;
+        for (field, _) in fields {
+            let cmp = Expr::Binary {
+                op: BinOp::Eq,
+                left: Box::new(Expr::FieldAccess {
+                    expr: Box::new(Expr::Var("a".to_string(), span)),
+                    field: field.clone(),
+                    span,
+                }),
+                right: Box::new(Expr::FieldAccess {
+                    expr: Box::new(Expr::Var("b".to_string(), span)),
+                    field: field.clone(),
+                    span,
+                }),
+                span,
+            };
+            body = Some(match body {
+                None => cmp,
+                Some(acc) => Expr::Binary {
+                    op: BinOp::And,
+                    left: Box::new(acc),
+                    right: Box::new(cmp),
+                    span,
+                },
+            });
+        }
+        let body = body.unwrap_or_else(|| Expr::Literal(Literal::Bool(true), span));
+        Decl::Function {
+            name: format!("{}_eq", record_name.to_lowercase()),
+            type_params: vec![],
+            type_param_constraints: vec![],
+            params: vec![
+                Param::new("a", Some(rec_ty.clone())),
+                Param::new("b", Some(rec_ty)),
+            ],
+            default_values: vec![None, None],
+            using_params: vec![],
+            ret_type: Some(Type::bool()),
+            error_type: None,
+            effect: None,
+            cap: None,
+            requires: vec![],
+            ensures: vec![],
+            body,
+            annotations: vec![],
+            public: false,
+            span,
         }
     }
-    out
-}
 
-/// Synthesize `fn {record_name}_eq(a, b) -> Bool` comparing every field with
-/// `==`, `&&`-chained. The zero-field case is trivially `true`.
-fn derive_eq_function(record_name: &str, fields: &[(String, Type)], span: Span) -> Decl {
-    let rec_ty = Type::Record(fields.to_vec());
-    let mut body: Option<Expr> = None;
-    for (field, _) in fields {
-        let cmp = Expr::Binary {
-            op: BinOp::Eq,
-            left: Box::new(Expr::FieldAccess {
-                expr: Box::new(Expr::Var("a".to_string(), span)),
-                field: field.clone(),
-                span,
-            }),
-            right: Box::new(Expr::FieldAccess {
-                expr: Box::new(Expr::Var("b".to_string(), span)),
-                field: field.clone(),
-                span,
-            }),
-            span,
-        };
-        body = Some(match body {
-            None => cmp,
-            Some(acc) => Expr::Binary {
-                op: BinOp::And,
-                left: Box::new(acc),
-                right: Box::new(cmp),
-                span,
-            },
-        });
+    /// Desugar `requires` / `ensures` contract clauses into runtime checks:
+    /// `requires` become entry guards, `ensures` become a `let result = <body>`
+    /// wrapper that checks each postcondition against `result`. Violations raise a
+    /// runtime panic (`OpCode::Panic`) with a stable category message.
+    fn expand_contracts(decls: Vec<Decl>) -> Vec<Decl> {
+        decls
+            .into_iter()
+            .map(|decl| match decl {
+                Decl::Function {
+                    name,
+                    type_params,
+                    type_param_constraints,
+                    params,
+                    default_values,
+                    using_params,
+                    ret_type,
+                    error_type,
+                    effect,
+                    cap,
+                    requires,
+                    ensures,
+                    body,
+                    annotations,
+                    public,
+                    span,
+                } => Decl::Function {
+                    name,
+                    type_params,
+                    type_param_constraints,
+                    params,
+                    default_values,
+                    using_params,
+                    ret_type,
+                    error_type,
+                    effect,
+                    cap,
+                    requires: requires.clone(),
+                    ensures: ensures.clone(),
+                    body: Self::wrap_contracts(body, &requires, &ensures, span),
+                    annotations,
+                    public,
+                    span,
+                },
+                Decl::Module {
+                    name,
+                    exports,
+                    decls: inner,
+                    span,
+                } => Decl::Module {
+                    name,
+                    exports,
+                    decls: Self::expand_contracts(inner),
+                    span,
+                },
+                other => other,
+            })
+            .collect()
     }
-    let body = body.unwrap_or_else(|| Expr::Literal(Literal::Bool(true), span));
-    Decl::Function {
-        name: format!("{}_eq", record_name.to_lowercase()),
-        type_params: vec![],
-        type_param_constraints: vec![],
-        params: vec![
-            Param::new("a", Some(rec_ty.clone())),
-            Param::new("b", Some(rec_ty)),
-        ],
-        default_values: vec![None, None],
-        using_params: vec![],
-        ret_type: Some(Type::bool()),
-        error_type: None,
-        effect: None,
-        cap: None,
-        requires: vec![],
-        ensures: vec![],
-        body,
-        annotations: vec![],
-        public: false,
-        span,
-    }
-}
 
-/// Desugar `requires` / `ensures` contract clauses into runtime checks:
-/// `requires` become entry guards, `ensures` become a `let result = <body>`
-/// wrapper that checks each postcondition against `result`. Violations raise a
-/// runtime panic (`OpCode::Panic`) with a stable category message.
-fn expand_contracts(decls: Vec<Decl>) -> Vec<Decl> {
-    decls
-        .into_iter()
-        .map(|decl| match decl {
-            Decl::Function {
-                name,
-                type_params,
-                type_param_constraints,
-                params,
-                default_values,
-                using_params,
-                ret_type,
-                error_type,
-                effect,
-                cap,
-                requires,
-                ensures,
-                body,
-                annotations,
-                public,
+    /// Wrap a function body with its contract checks.
+    fn wrap_contracts(body: Expr, requires: &[Expr], ensures: &[Expr], span: Span) -> Expr {
+        // Postconditions: `let result = body in if (e1 && e2) then result else panic`.
+        let mut checked = body;
+        if !ensures.is_empty() {
+            let cond = Self::and_chain(ensures, span);
+            checked = Expr::Let {
+                name: "result".to_string(),
+                ty: None,
+                value: Box::new(checked),
+                body: Box::new(Expr::If {
+                    cond: Box::new(cond),
+                    then_branch: Box::new(Expr::Var("result".to_string(), span)),
+                    else_branch: Some(Box::new(Expr::Panic(
+                        "postcondition_violation".to_string(),
+                        span,
+                    ))),
+                    span,
+                }),
+                mutable: false,
+                let_in: false,
                 span,
-            } => Decl::Function {
-                name,
-                type_params,
-                type_param_constraints,
-                params,
-                default_values,
-                using_params,
-                ret_type,
-                error_type,
-                effect,
-                cap,
-                requires: requires.clone(),
-                ensures: ensures.clone(),
-                body: Self::wrap_contracts(body, &requires, &ensures, span),
-                annotations,
-                public,
-                span,
-            },
-            Decl::Module {
-                name,
-                exports,
-                decls: inner,
-                span,
-            } => Decl::Module {
-                name,
-                exports,
-                decls: Self::expand_contracts(inner),
-                span,
-            },
-            other => other,
-        })
-        .collect()
-}
-
-/// Wrap a function body with its contract checks.
-fn wrap_contracts(body: Expr, requires: &[Expr], ensures: &[Expr], span: Span) -> Expr {
-    // Postconditions: `let result = body in if (e1 && e2) then result else panic`.
-    let mut checked = body;
-    if !ensures.is_empty() {
-        let cond = Self::and_chain(ensures, span);
-        checked = Expr::Let {
-            name: "result".to_string(),
-            ty: None,
-            value: Box::new(checked),
-            body: Box::new(Expr::If {
+            };
+        }
+        // Preconditions: `if (r1 && r2) then checked else panic`.
+        if !requires.is_empty() {
+            let cond = Self::and_chain(requires, span);
+            checked = Expr::If {
                 cond: Box::new(cond),
-                then_branch: Box::new(Expr::Var("result".to_string(), span)),
+                then_branch: Box::new(checked),
                 else_branch: Some(Box::new(Expr::Panic(
-                    "postcondition_violation".to_string(),
+                    "precondition_violation".to_string(),
                     span,
                 ))),
                 span,
-            }),
-            mutable: false,
-            let_in: false,
-            span,
-        };
+            };
+        }
+        checked
     }
-    // Preconditions: `if (r1 && r2) then checked else panic`.
-    if !requires.is_empty() {
-        let cond = Self::and_chain(requires, span);
-        checked = Expr::If {
-            cond: Box::new(cond),
-            then_branch: Box::new(checked),
-            else_branch: Some(Box::new(Expr::Panic(
-                "precondition_violation".to_string(),
-                span,
-            ))),
-            span,
-        };
-    }
-    checked
-}
 
-/// `&&`-chain a non-empty slice of boolean predicates.
-fn and_chain(exprs: &[Expr], span: Span) -> Expr {
-    let mut it = exprs.iter().cloned();
-    let first = it.next().expect("and_chain requires a non-empty slice");
-    it.fold(first, |acc, e| Expr::Binary {
-        op: BinOp::And,
-        left: Box::new(acc),
-        right: Box::new(e),
-        span,
-    })
-}
+    /// `&&`-chain a non-empty slice of boolean predicates.
+    fn and_chain(exprs: &[Expr], span: Span) -> Expr {
+        let mut it = exprs.iter().cloned();
+        let first = it.next().expect("and_chain requires a non-empty slice");
+        it.fold(first, |acc, e| Expr::Binary {
+            op: BinOp::And,
+            left: Box::new(acc),
+            right: Box::new(e),
+            span,
+        })
+    }
 
     /// Consume and return all diagnostics accumulated during error-recovery
     /// parsing. After this call, the diagnostics buffer is empty.

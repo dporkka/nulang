@@ -100,7 +100,9 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
+                &opts.target,
+                &opts.with_capabilities,
+                opts.store_path.as_deref(),
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -337,7 +339,9 @@ fn main() {
                     }
                     i += 1;
                 } else {
-                    eprintln!("Error: --with requires a comma-separated capability list (fs,net,os)");
+                    eprintln!(
+                        "Error: --with requires a comma-separated capability list (fs,net,os)"
+                    );
                     std::process::exit(1);
                 }
             }
@@ -607,7 +611,17 @@ fn main() {
                 lm = cm;
                 eprintln!("\n--- {} ---", p);
                 if let Ok(s) = std::fs::read_to_string(&p) {
-                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None, &opts.target, &opts.with_capabilities, opts.store_path.as_deref()) {
+                    if let Err(e) = run_source(
+                        &s,
+                        Some(&p),
+                        v,
+                        &b,
+                        None,
+                        None,
+                        &opts.target,
+                        &opts.with_capabilities,
+                        opts.store_path.as_deref(),
+                    ) {
                         print_error(&e, uc);
                     }
                 }
@@ -641,7 +655,9 @@ fn main() {
                         &opts.backend,
                         opts.out_file.as_deref(),
                         opts.metrics_port,
-                        &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
+                        &opts.target,
+                        &opts.with_capabilities,
+                        opts.store_path.as_deref(),
                     )
                 },
                 n,
@@ -657,7 +673,9 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
+                &opts.target,
+                &opts.with_capabilities,
+                opts.store_path.as_deref(),
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -672,7 +690,13 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = check_source(&source, Some(&path), opts.verbose, opts.all_errors, &opts.with_capabilities) {
+        if let Err(e) = check_source(
+            &source,
+            Some(&path),
+            opts.verbose,
+            opts.all_errors,
+            &opts.with_capabilities,
+        ) {
             let code = exit_code(&e);
             if opts.all_errors {
                 let all = collect_all_frontend_errors(&source, Some(&path));
@@ -744,7 +768,9 @@ fn main() {
                         backend,
                         out_file,
                         opts.metrics_port,
-                        &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
+                        &opts.target,
+                        &opts.with_capabilities,
+                        opts.store_path.as_deref(),
                     )
                 },
                 n,
@@ -760,7 +786,9 @@ fn main() {
                 &opts.backend,
                 opts.out_file.as_deref(),
                 opts.metrics_port,
-                &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
+                &opts.target,
+                &opts.with_capabilities,
+                opts.store_path.as_deref(),
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -792,7 +820,9 @@ fn main() {
             &opts.backend,
             opts.out_file.as_deref(),
             opts.metrics_port,
-            &opts.target, &opts.with_capabilities, opts.store_path.as_deref(),
+            &opts.target,
+            &opts.with_capabilities,
+            opts.store_path.as_deref(),
         ) {
             print_error(&e, use_color);
             std::process::exit(exit_code(&e));
@@ -2193,8 +2223,8 @@ mod tests {
                 c
             }
         "#;
-        let (ast, type_checker) =
-            run_frontend(source, None, false, &[]).expect("frontend should accept the actor program");
+        let (ast, type_checker) = run_frontend(source, None, false, &[])
+            .expect("frontend should accept the actor program");
         let module = compile_with_new_pipeline(&ast, "test", &type_checker)
             .expect("actor program should compile");
         let (_value, runtime) =

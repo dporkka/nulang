@@ -1764,6 +1764,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                     actor_type: name,
                     init: init_ops,
                     target_node: target_operand,
+                    capabilities: vec![],
                     ty: ty.clone(),
                 },
                 span: *span,

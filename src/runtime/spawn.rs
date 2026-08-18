@@ -19,7 +19,14 @@ pub(crate) fn spawn_actor_with_models(
     persistent: bool,
     workflow: Option<&str>,
 ) -> u64 {
-    spawn_actor_with_id(rt, fresh_actor_id(), init, state_models, persistent, workflow)
+    spawn_actor_with_id(
+        rt,
+        fresh_actor_id(),
+        init,
+        state_models,
+        persistent,
+        workflow,
+    )
 }
 
 /// Spawn an actor with a pre-assigned id. `Runtime::spawn_actor_near` uses

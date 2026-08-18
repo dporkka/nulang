@@ -1682,6 +1682,7 @@ impl WasmBackend {
                 behavior_idx,
                 init,
                 target_node: None,
+                capabilities: _,
             } => {
                 self.compile_spawn(body, *behavior_idx, init, func);
             }
