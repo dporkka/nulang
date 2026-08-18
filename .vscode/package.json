@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "publisher": "nulang",
   "license": "Apache-2.0",
-  "repository": "https://github.com/dporkka/nulang",
+  "repository": "https://github.com/nulang-org/nulang",
   "engines": {
     "vscode": "^1.85.0"
   },

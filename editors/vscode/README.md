@@ -1,6 +1,6 @@
 # Nulang for VS Code
 
-Language support for [Nulang](https://github.com/dporkka/nulang) in Visual Studio Code: syntax highlighting, language essentials (comments, brackets, indentation, folding), and snippets.
+Language support for [Nulang](https://github.com/nulang-org/nulang) in Visual Studio Code: syntax highlighting, language essentials (comments, brackets, indentation, folding), and snippets.
 
 ## Features
 
@@ -36,7 +36,7 @@ Then reload VS Code.
 ## Usage
 
 Open any `.nula` file — the grammar activates automatically. Try the
-[examples](https://github.com/dporkka/nulang/tree/main/examples) in the main
+[examples](https://github.com/nulang-org/nulang/tree/main/examples) in the main
 repository.
 
 ## Scope

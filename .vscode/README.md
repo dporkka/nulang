@@ -40,7 +40,7 @@ Search for "Nulang" in the VS Code Extensions view (coming soon).
 ## Requirements
 
 - **Nulang compiler** installed and on your PATH (or set `NULANG_PATH` env var)
-- Build from source: `git clone https://github.com/dporkka/nulang && cd nulang && cargo build --release`
+- Build from source: `git clone https://github.com/nulang-org/nulang && cd nulang && cargo build --release`
 
 ## Configuration
 
