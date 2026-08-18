@@ -4020,11 +4020,7 @@ mod tests {
 
         // Grant everything: passes.
         let mut full = EffectChecker::new();
-        full.set_resource_grants(&[
-            "fs".to_string(),
-            "net".to_string(),
-            "os".to_string(),
-        ]);
+        full.set_resource_grants(&["fs".to_string(), "net".to_string(), "os".to_string()]);
         assert!(
             full.check_module(&ast.decls).is_ok(),
             "all resource categories granted must pass"

@@ -111,12 +111,7 @@ pub trait JitBackend {
     /// un-compilable region (e.g. an unsupported opcode inside the loop)
     /// returns `false`; the caller then deopts by staying in the interpreter.
     /// Default: no OSR support.
-    fn osr_compile_loop(
-        &mut self,
-        module_idx: usize,
-        pc: usize,
-        module: &CodeModule,
-    ) -> bool {
+    fn osr_compile_loop(&mut self, module_idx: usize, pc: usize, module: &CodeModule) -> bool {
         let _ = (module_idx, pc, module);
         false
     }

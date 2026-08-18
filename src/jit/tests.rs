@@ -1195,10 +1195,10 @@ fn test_absent_metadata_uses_scalar_path() {
     clobbered.emit(Instruction::new1(OpCode::Const2, 8)); // 4
                                                           // Clobber AFTER all constant setup so no register fact survives the
                                                           // meet at the loop head: forward state is all-Unknown here.
-    // Spawn's result register is op3: target r9, which the loop body
-    // overwrites before any read, so the clobber cannot poison arithmetic.
+                                                          // Spawn's result register is op3: target r9, which the loop body
+                                                          // overwrites before any read, so the clobber cannot poison arithmetic.
     clobbered.emit(Instruction::new3(OpCode::Spawn, 0, 0, 9)); // 5: clobbers analysis state
-                                                            // Loop body (pc 6..=12): same shape as make_int_loop_module.
+                                                               // Loop body (pc 6..=12): same shape as make_int_loop_module.
     clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));
     clobbered.emit(Instruction::new3(OpCode::IAdd, 1, 7, 1));
     clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 7, 0));

@@ -40,8 +40,7 @@ fn compile_run_with_runtime(source: &str, runtime: Rc<RefCell<Runtime>>) -> Valu
         .expect("bench: typecheck failed");
     let hir = crate::hir_lower::lower_module(&ast, &type_checker.inferred_decl_types);
     let mut mir = crate::mir_lower::lower_module(&hir).expect("bench: MIR lower failed");
-    let module =
-        crate::mir_codegen::compile_mir(&mut mir, "bench").expect("bench: codegen failed");
+    let module = crate::mir_codegen::compile_mir(&mut mir, "bench").expect("bench: codegen failed");
     let mut vm = VM::new();
     vm.load_module(module);
     vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(runtime)));
@@ -145,7 +144,8 @@ fn bench_ping_pong() {
 
     // Timed phase: kick off N round trips.
     let start = Instant::now();
-    rt.borrow_mut().send_message(pinger, "kick", &[Value::int(N)]);
+    rt.borrow_mut()
+        .send_message(pinger, "kick", &[Value::int(N)]);
     rt.borrow_mut().run_scheduler();
     let elapsed = start.elapsed();
 

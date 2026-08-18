@@ -2,8 +2,8 @@
 
 use crate::bytecode::Constant;
 use crate::value_layout::{
-    int48_in_range, is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK,
-    TAG_CLOSURE, TAG_INT, TAG_MASK, TAG_PTR, TAG_STRING,
+    int48_in_range, is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK, TAG_CLOSURE,
+    TAG_INT, TAG_MASK, TAG_PTR, TAG_STRING,
 };
 use crate::vm::Value;
 use std::cell::{Cell, UnsafeCell};
@@ -991,9 +991,7 @@ pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
                 match result.checked_mul(base) {
                     Some(r) if int48_in_range(r) => result = r,
                     _ => {
-                        return record_arith_error(crate::vm::int_overflow_error(
-                            "pow", base, exp,
-                        ))
+                        return record_arith_error(crate::vm::int_overflow_error("pow", base, exp))
                     }
                 }
             }
@@ -1002,9 +1000,7 @@ pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
                 match base.checked_mul(base) {
                     Some(r) if int48_in_range(r) => base = r,
                     _ => {
-                        return record_arith_error(crate::vm::int_overflow_error(
-                            "pow", base, exp,
-                        ))
+                        return record_arith_error(crate::vm::int_overflow_error("pow", base, exp))
                     }
                 }
             }
