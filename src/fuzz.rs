@@ -475,7 +475,7 @@ fn fuzz_one(rng: &mut XorShift64, corpus: &[&str]) -> Result<(), (String, String
 /// A mutant that compiles to bytecode, ready for differential execution.
 #[allow(dead_code)]
 pub(crate) struct CompiledMutant {
-    code_module: crate::bytecode::CodeModule,
+    pub(crate) code_module: crate::bytecode::CodeModule,
     mir_module: crate::mir::Module,
 }
 
