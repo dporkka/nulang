@@ -95,7 +95,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build nulang (release)
-        run: cargo build --release
+        run: cargo build --release --bin nulang
 
       - name: Smoke test (eval)
         run: ./target/release/nulang --eval 'perform IO.print("hello")'

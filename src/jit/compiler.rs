@@ -710,7 +710,7 @@ pub fn compile_bytecode_region(
                     &helpers,
                     regs_ptr,
                     instr.op1,
-                    instr.op3,
+                    instr.op2,
                     RuntimeHelper::ArrLen,
                 );
             }
@@ -781,7 +781,6 @@ pub fn compile_bytecode_region(
     builder.ins().return_(&[]);
 
     builder.finalize();
-
     let func_id = module
         .declare_function(func_name, Linkage::Local, &ctx.func.signature.clone())
         .map_err(|e| CompileError::DeclareFailed(format!("{}", e)))?;
