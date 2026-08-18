@@ -2,7 +2,7 @@
 
 use crate::bytecode::Constant;
 use crate::value_layout::{
-    int48_in_range, is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK,
+    is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK,
     TAG_CLOSURE, TAG_INT, TAG_MASK, TAG_PTR, TAG_STRING,
 };
 use crate::vm::Value;
@@ -961,10 +961,13 @@ pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
     alloc_string_value(result)
 }
 
-/// Power operation: float pow when both operands are floats; checked int pow
-/// when both are ints (48-bit overflow is a runtime error, recorded for the
-/// AOT driver); a negative int exponent returns nil; anything else is a type
-/// error. Matches the interpreter's `step_ipow`.
+/// Power operation: float pow when both operands are floats; int pow using
+/// binary exponentiation with `wrapping_mul` when both are ints — bit-for-bit
+/// the interpreter's `step_ipow`, so the 48-bit payload wraps on overflow
+/// (matching `IMul`/`IAdd` behaviour) rather than erroring. A negative int
+/// exponent returns nil (mirrors `IDiv` div-by-zero); 0 ** 0 returns 1
+/// (standard convention). Non-numeric operands coerce to 0, exactly like the
+/// interpreter's `as_int().unwrap_or(0)`.
 #[no_mangle]
 pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
@@ -974,44 +977,27 @@ pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
     }
     let va = Value::from_raw(a);
     let vb = Value::from_raw(b);
-    if va.is_int() && vb.is_int() {
-        let base = va.as_int().unwrap();
-        let exp = vb.as_int().unwrap();
-        if exp < 0 {
-            return Value::nil().as_raw();
-        }
-        // Binary exponentiation, checked against the 48-bit payload range on
-        // every multiply — bit-for-bit the interpreter's algorithm so the
-        // reported operands in the overflow error match.
-        let mut result: i64 = 1;
-        let mut base = base;
-        let mut exp = exp;
-        while exp > 0 {
-            if exp & 1 != 0 {
-                match result.checked_mul(base) {
-                    Some(r) if int48_in_range(r) => result = r,
-                    _ => {
-                        return record_arith_error(crate::vm::int_overflow_error(
-                            "pow", base, exp,
-                        ))
-                    }
-                }
-            }
-            exp >>= 1;
-            if exp > 0 {
-                match base.checked_mul(base) {
-                    Some(r) if int48_in_range(r) => base = r,
-                    _ => {
-                        return record_arith_error(crate::vm::int_overflow_error(
-                            "pow", base, exp,
-                        ))
-                    }
-                }
-            }
-        }
-        return Value::int(result).as_raw();
+    let base = va.as_int().unwrap_or(0);
+    let exp = vb.as_int().unwrap_or(0);
+    if exp < 0 {
+        return Value::nil().as_raw();
     }
-    record_arith_error(crate::vm::arith_type_error("pow", va, vb))
+    // Binary exponentiation with wrapping_mul — mirrors `step_ipow` exactly
+    // so overflow wraps (truncated to the 48-bit payload by `Value::int`)
+    // instead of recording an arithmetic error.
+    let mut result: i64 = 1;
+    let mut base = base;
+    let mut exp = exp;
+    while exp > 0 {
+        if exp & 1 != 0 {
+            result = result.wrapping_mul(base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    Value::int(result).as_raw()
 }
 
 /// # Safety
