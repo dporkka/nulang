@@ -10138,6 +10138,7 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[cfg(feature = "tcp")]
     #[test]
     fn test_http_serve_roundtrip() {
         use std::io::{Read, Write};
@@ -10186,6 +10187,7 @@ match { a: 2, b: 9 } with {
     /// a server failed. The standalone callbacks now host the server
     /// directly (StandaloneVmCallbacks::perform_builtin_effect_in_module),
     /// mirroring the runtime-backed path.
+    #[cfg(feature = "tcp")]
     #[test]
     fn test_http_serve_standalone() {
         use std::io::{Read, Write};

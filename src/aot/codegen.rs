@@ -4832,6 +4832,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_aot_runtime_native_perform_async() {
         // `perform Pipeline.new()` in an AOT-compiled behavior must compile

@@ -2119,7 +2119,7 @@ mod tests {
 
     // -- 12. DistributedRuntime trait compiles -------------------------------
 
-#[cfg(feature = "tcp")]
+    #[cfg(feature = "tcp")]
     #[test]
     fn test_distributed_trait_exists() {
         // This test just verifies that the trait and wrapper type compile.
@@ -2241,7 +2241,7 @@ mod tests {
 
     // -- 17. End-to-end: remote send dispatches the named behavior ---------
 
-#[cfg(feature = "tcp")]
+    #[cfg(feature = "tcp")]
     #[test]
     fn test_remote_send_dispatches_named_behavior() {
         use std::time::{Duration, Instant};
@@ -2497,7 +2497,7 @@ mod tests {
         assert!(!intern_wire_strings(&mut rt, bare, &mut payload3, &table));
     }
 
-#[cfg(feature = "tcp")]
+    #[cfg(feature = "tcp")]
     /// End-to-end regression: a string payload sent from node A must arrive
     /// on node B with its CONTENT intact — interned into the receiving
     /// actor's module pool — even though the receiver's pool holds a

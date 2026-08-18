@@ -7640,6 +7640,7 @@ mod vm_tests {
 
     /// Http.get and Http.post must be handled as built-in effects in the
     /// standalone VM; they must not produce "Unhandled effect" errors.
+    #[cfg(feature = "ureq")]
     #[test]
     fn test_standalone_http_get_builtin() {
         let mut module = CodeModule::new("test_http_get");
@@ -7684,6 +7685,7 @@ mod vm_tests {
     }
 
     /// Http.post must also dispatch in the standalone VM without error.
+    #[cfg(feature = "ureq")]
     #[test]
     fn test_standalone_http_post_builtin() {
         let mut module = CodeModule::new("test_http_post");
