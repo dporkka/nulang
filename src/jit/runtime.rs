@@ -2,8 +2,8 @@
 
 use crate::bytecode::Constant;
 use crate::value_layout::{
-    int48_in_range, is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK, TAG_CLOSURE,
-    TAG_INT, TAG_MASK, TAG_PTR, TAG_STRING,
+    is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK, TAG_CLOSURE, TAG_INT,
+    TAG_MASK, TAG_PTR, TAG_STRING,
 };
 use crate::vm::Value;
 use std::cell::{Cell, UnsafeCell};
@@ -961,10 +961,10 @@ pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
     alloc_string_value(result)
 }
 
-/// Power operation: float pow when both operands are floats; checked int pow
-/// when both are ints (48-bit overflow is a runtime error, recorded for the
-/// AOT driver); a negative int exponent returns nil; anything else is a type
-/// error. Matches the interpreter's `step_ipow`.
+/// Power operation: float pow when both operands are floats; int pow when both
+/// are ints. Integer exponentiation uses wrapping multiplication (matching the
+/// interpreter's `step_ipow`); a negative int exponent returns nil; anything
+/// else is a type error.
 #[no_mangle]
 pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
@@ -980,29 +980,18 @@ pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
         if exp < 0 {
             return Value::nil().as_raw();
         }
-        // Binary exponentiation, checked against the 48-bit payload range on
-        // every multiply — bit-for-bit the interpreter's algorithm so the
-        // reported operands in the overflow error match.
+        // Binary exponentiation with wrapping_mul, bit-for-bit the
+        // interpreter's algorithm.
         let mut result: i64 = 1;
         let mut base = base;
         let mut exp = exp;
         while exp > 0 {
             if exp & 1 != 0 {
-                match result.checked_mul(base) {
-                    Some(r) if int48_in_range(r) => result = r,
-                    _ => {
-                        return record_arith_error(crate::vm::int_overflow_error("pow", base, exp))
-                    }
-                }
+                result = result.wrapping_mul(base);
             }
             exp >>= 1;
             if exp > 0 {
-                match base.checked_mul(base) {
-                    Some(r) if int48_in_range(r) => base = r,
-                    _ => {
-                        return record_arith_error(crate::vm::int_overflow_error("pow", base, exp))
-                    }
-                }
+                base = base.wrapping_mul(base);
             }
         }
         return Value::int(result).as_raw();
