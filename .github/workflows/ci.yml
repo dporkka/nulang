@@ -82,6 +82,12 @@ jobs:
     name: Nula Package Test
     runs-on: ubuntu-latest
     needs: release
+    env:
+      # The repo sets `target-dir = "/tmp/cargo-target"` in `.cargo/config.toml`,
+      # but the smoke-test steps below reference `./target/release/nulang`.
+      # Override the target directory locally so the binary lands where the
+      # scripts expect it.
+      CARGO_TARGET_DIR: ./target
     steps:
       - uses: actions/checkout@v7
 
