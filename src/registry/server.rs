@@ -336,7 +336,6 @@ fn authorized(headers: &[(String, String)], auth_token: &Option<String>) -> bool
     }
 }
 
-
 #[cfg(not(feature = "tcp"))]
 #[allow(dead_code)] // fields kept for API parity; never read without `tcp`
 pub struct RegistryServer {
@@ -347,7 +346,10 @@ pub struct RegistryServer {
 #[cfg(not(feature = "tcp"))]
 impl RegistryServer {
     pub fn new(data_dir: PathBuf, auth_token: Option<String>) -> Self {
-        RegistryServer { data_dir, auth_token }
+        RegistryServer {
+            data_dir,
+            auth_token,
+        }
     }
 
     /// Stub: the `tcp` feature is disabled, so the server cannot start.

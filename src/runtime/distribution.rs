@@ -434,20 +434,17 @@ pub(crate) fn handle_node_removed(rt: &mut Runtime, node: NodeId) {
             continue;
         }
         if let Some(replica) = rt.shadow_replicas.remove(&entry.actor_id) {
-            let ok = rt.receive_migrated_actor(
-                entry.actor_id,
-                replica.nbc_bytes,
-                replica.snapshot_json,
-            );
+            let ok =
+                rt.receive_migrated_actor(entry.actor_id, replica.nbc_bytes, replica.snapshot_json);
             if ok {
                 // Bump the activation epoch and re-announce so a
                 // resurrected old node self-demotes its stale copy (§5).
-                let new_epoch =
-                    rt.distributed
-                        .cluster
-                        .as_mut()
-                        .map(|c| c.bump_directory_epoch(entry.actor_id, local))
-                        .unwrap_or(entry.epoch.saturating_add(1));
+                let new_epoch = rt
+                    .distributed
+                    .cluster
+                    .as_mut()
+                    .map(|c| c.bump_directory_epoch(entry.actor_id, local))
+                    .unwrap_or(entry.epoch.saturating_add(1));
                 rt.respawn_opted.insert(entry.actor_id, new_epoch);
                 // Forward in-flight messages sent to the old location to
                 // the re-spawned actor (same TTL mechanism as migration).

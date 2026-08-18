@@ -648,17 +648,15 @@ impl RewindSession {
     }
 
     fn open_store(&self) -> Option<crate::runtime::JsonFileStore> {
-        self.store_dir
-            .as_deref()
-            .and_then(rewind::open_store_at)
+        self.store_dir.as_deref().and_then(rewind::open_store_at)
     }
 
     /// Rewind entity `actor_id` to message `target_seq` and remember the
     /// position so `stepBack` / `nulangStepForward` are relative to it.
     fn rewind_to(&mut self, actor_id: u64, target_seq: u64) -> Result<Json, String> {
-        let store = self
-            .open_store()
-            .ok_or_else(|| "rewind requires a durable store ($NULANG_STORE_PATH or .nulang/store/)".to_string())?;
+        let store = self.open_store().ok_or_else(|| {
+            "rewind requires a durable store ($NULANG_STORE_PATH or .nulang/store/)".to_string()
+        })?;
         let state = rewind::rewind_entity(&store, actor_id, target_seq);
         self.positions.insert(actor_id, state.sequence);
         Ok(state.to_json())
@@ -666,9 +664,9 @@ impl RewindSession {
 
     /// Step back one message from the current position (default: latest).
     fn step_back(&mut self, actor_id: u64) -> Result<Json, String> {
-        let store = self
-            .open_store()
-            .ok_or_else(|| "rewind requires a durable store ($NULANG_STORE_PATH or .nulang/store/)".to_string())?;
+        let store = self.open_store().ok_or_else(|| {
+            "rewind requires a durable store ($NULANG_STORE_PATH or .nulang/store/)".to_string()
+        })?;
         let current = self
             .positions
             .get(&actor_id)
@@ -682,9 +680,9 @@ impl RewindSession {
     /// Step forward one message from the current rewound position: replays
     /// the recorded events for the next sequence number.
     fn step_forward(&mut self, actor_id: u64) -> Result<Json, String> {
-        let store = self
-            .open_store()
-            .ok_or_else(|| "rewind requires a durable store ($NULANG_STORE_PATH or .nulang/store/)".to_string())?;
+        let store = self.open_store().ok_or_else(|| {
+            "rewind requires a durable store ($NULANG_STORE_PATH or .nulang/store/)".to_string()
+        })?;
         let current = self
             .positions
             .get(&actor_id)
@@ -1495,11 +1493,8 @@ pub(crate) mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "nulang-dap-store-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nulang-dap-store-{}-{}", std::process::id(), n));
         let mut store = JsonFileStore::new(&dir).unwrap();
         let mut snap = ActorSnapshot::default();
         snap.actor_id = 7;
@@ -1581,10 +1576,10 @@ pub(crate) mod tests {
 
         let resp = |seq: i64, cmd: &str| -> &Json {
             msgs.iter()
-                .find(|m| {
-                    m["command"] == cmd && m["type"] == "response" && m["request_seq"] == seq
+                .find(|m| m["command"] == cmd && m["type"] == "response" && m["request_seq"] == seq)
+                .unwrap_or_else(|| {
+                    panic!("expected {} response for seq {}, got {:#?}", cmd, seq, msgs)
                 })
-                .unwrap_or_else(|| panic!("expected {} response for seq {}, got {:#?}", cmd, seq, msgs))
         };
         let rc = resp(2, "reverseContinue");
         assert_eq!(rc["success"], true, "got {:#?}", rc);

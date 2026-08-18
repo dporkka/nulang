@@ -4878,11 +4878,7 @@ impl Runtime {
             actor.set_state_field(field, value);
         }
 
-        Some(if op == "read" {
-            value
-        } else {
-            Value::unit()
-        })
+        Some(if op == "read" { value } else { Value::unit() })
     }
 
     /// Resolve an actor type by name to the `(module, behavior_idx)` pair
@@ -5147,10 +5143,7 @@ impl Runtime {
     /// Stub used when the `tcp` feature is disabled: real TCP distribution
     /// is unavailable, so this always fails.
     #[cfg(not(feature = "tcp"))]
-    pub fn enable_distribution(
-        &mut self,
-        bind_addr: std::net::SocketAddr,
-    ) -> std::io::Result<()> {
+    pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
         distribution::enable_distribution(self, bind_addr)
     }
 
@@ -5338,8 +5331,11 @@ impl Runtime {
             .actors
             .get(&actor_id)
             .and_then(|a| a.bytecode_module.clone())
-            .or_else(|| self.recovery_modules.get(&actor_id).map(|(m, _, _)| m.clone()))
-        {
+            .or_else(|| {
+                self.recovery_modules
+                    .get(&actor_id)
+                    .map(|(m, _, _)| m.clone())
+            }) {
             Some(m) => m,
             None => return,
         };
@@ -5441,11 +5437,7 @@ impl Runtime {
 /// re-spawn time (each survivor computes whether it is the shadow), so the
 /// node that holds the replica is the node that re-spawns — no leader
 /// election, exactly one re-spawn per actor.
-pub(crate) fn shadow_for(
-    cluster: &ClusterState,
-    home: NodeId,
-    _actor_id: u64,
-) -> Option<NodeId> {
+pub(crate) fn shadow_for(cluster: &ClusterState, home: NodeId, _actor_id: u64) -> Option<NodeId> {
     cluster
         .all_members()
         .iter()

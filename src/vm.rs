@@ -593,20 +593,16 @@ fn map_entry_slot(i: usize) -> usize {
 
 /// Grow the map to `new_cap` entries, rehashing all live entries into a new
 /// object (retaining key/value refs). Returns the new pointer.
-fn map_grow(
-    callbacks: &mut dyn ActorVmCallbacks,
-    m: *mut u8,
-    new_cap: usize,
-) -> Option<Value> {
+fn map_grow(callbacks: &mut dyn ActorVmCallbacks, m: *mut u8, new_cap: usize) -> Option<Value> {
     let old_cap = map_capacity(m);
     let slots = MAP_HDR_SLOTS + new_cap * 3;
     let new_ptr = callbacks.alloc(slots * std::mem::size_of::<Value>(), HeapTypeTag::Map)?;
     unsafe {
         *(new_ptr as *mut Value) = Value::int(new_cap as i64);
         *((new_ptr as *mut Value).add(1)) = Value::int(0); // used, refilled below
-        // The bump allocator does not zero memory: initialize every entry
-        // slot to the empty marker so the GC slot-release path never sees
-        // garbage Value patterns.
+                                                           // The bump allocator does not zero memory: initialize every entry
+                                                           // slot to the empty marker so the GC slot-release path never sees
+                                                           // garbage Value patterns.
         for slot in (2..slots).map(|i| (new_ptr as *mut Value).add(i)) {
             *slot = Value::int(MAP_EMPTY);
         }
@@ -787,7 +783,9 @@ pub(crate) fn hashmap_op(
             for i in 0..cap {
                 let idx = (start + i) % cap;
                 let base = unsafe { (m as *mut Value).add(map_entry_slot(idx)) };
-                let hc = unsafe { *(base as *const Value) }.as_int().unwrap_or(MAP_EMPTY);
+                let hc = unsafe { *(base as *const Value) }
+                    .as_int()
+                    .unwrap_or(MAP_EMPTY);
                 if hc == MAP_EMPTY {
                     break;
                 }
@@ -811,7 +809,9 @@ pub(crate) fn hashmap_op(
             for i in 0..cap {
                 let idx = (start + i) % cap;
                 let base = unsafe { (m as *mut Value).add(map_entry_slot(idx)) };
-                let hc = unsafe { *(base as *const Value) }.as_int().unwrap_or(MAP_EMPTY);
+                let hc = unsafe { *(base as *const Value) }
+                    .as_int()
+                    .unwrap_or(MAP_EMPTY);
                 if hc == MAP_EMPTY {
                     break;
                 }
@@ -844,7 +844,6 @@ pub(crate) fn hashmap_op(
         _ => None,
     }
 }
-
 
 impl ActorVmCallbacks for StandaloneVmCallbacks {
     fn alloc(&mut self, size: usize, type_tag: HeapTypeTag) -> Option<*mut u8> {

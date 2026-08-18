@@ -496,7 +496,9 @@ pub(crate) fn compile_for_diff_verbose(source: &str) -> Result<CompiledMutant, S
     let mut lexer = Lexer::new(source);
     let tokens = lexer.lex().map_err(|e| format!("lex: {:?}", e))?;
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().map_err(|e| format!("parse: {:?}", e))?;
+    let ast = parser
+        .parse_module()
+        .map_err(|e| format!("parse: {:?}", e))?;
     let mut type_checker = TypeChecker::new();
     type_checker
         .check_module(&ast)

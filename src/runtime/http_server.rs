@@ -340,7 +340,6 @@ impl HttpServerState {
     }
 }
 
-
 #[cfg(not(feature = "tcp"))]
 pub struct HttpServerState {
     /// Listen port (stub: always 0; `bind` fails without the `tcp` feature).

@@ -10988,7 +10988,10 @@ match { a: 2, b: 9 } with {
 
     #[test]
     fn test_strbuilder_basic() {
-        assert_int("let b = perform StrBuilder.new() in perform StrBuilder.len(b)", 0);
+        assert_int(
+            "let b = perform StrBuilder.new() in perform StrBuilder.len(b)",
+            0,
+        );
         assert_int(
             "let b = perform StrBuilder.new() in \
              let b2 = perform StrBuilder.push(b, \"hi\") in perform StrBuilder.len(b2)",
@@ -11045,10 +11048,7 @@ match { a: 2, b: 9 } with {
 
     #[test]
     fn test_map_builtin_basic() {
-        assert_int(
-            "let m = perform Map.new() in perform Map.size(m)",
-            0,
-        );
+        assert_int("let m = perform Map.new() in perform Map.size(m)", 0);
         assert_int(
             "let m = perform Map.new() in \
              let m2 = perform Map.insert(m, \"a\", 1) in perform Map.size(m2)",
@@ -11124,8 +11124,6 @@ match { a: 2, b: 9 } with {
         "#;
         assert_int(source, 30 * 100 + 60);
     }
-
-
 
     #[test]
     fn test_tuple_field_access_basic() {

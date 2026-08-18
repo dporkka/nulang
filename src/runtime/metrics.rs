@@ -197,7 +197,6 @@ impl MetricsSnapshot {
     }
 }
 
-
 #[cfg(not(feature = "tcp"))]
 pub struct MetricsServer {
     // Dummy: the `tcp` feature is disabled, so no server can start.
