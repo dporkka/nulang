@@ -1349,7 +1349,12 @@ impl TypeChecker {
                     let _ = mgu(&req_ty, &Type::bool(), *span)?;
                 }
                 let mut ensures_ctx = new_ctx.clone();
-                ensures_ctx.bind("result".to_string(), body_ty.clone(), Capability::Ref, false);
+                ensures_ctx.bind(
+                    "result".to_string(),
+                    body_ty.clone(),
+                    Capability::Ref,
+                    false,
+                );
                 for ens in ensures {
                     let (_s, ens_ty) = self.infer_expr(&ensures_ctx, ens)?;
                     let _ = mgu(&ens_ty, &Type::bool(), *span)?;
@@ -1709,6 +1714,17 @@ impl TypeChecker {
 
             // Self reference
             Expr::SelfRef(_) => Ok((vec![], Type::Var(TypeVar::fresh()))),
+
+            // Virtual actor reference: Grain("Type", key).
+            // The key expression is checked; the whole expression has actor type.
+            Expr::GrainRef { key, .. } => {
+                let (subst, _key_ty) = self.infer_expr(ctx, key)?;
+                let actor_ty = Type::Actor {
+                    state: Box::new(Type::Var(TypeVar::fresh())),
+                    behavior: Box::new(Type::Var(TypeVar::fresh())),
+                };
+                Ok((subst, actor_ty))
+            }
 
             // Perform effect
             Expr::Perform {
@@ -5126,9 +5142,15 @@ mod tests {
     fn test_hide_and_seal_scope_directives() {
         // `hide` blocks the named identifiers from resolution.
         let ok = check_src("let secret = 1 in hide secret { 42 }");
-        assert!(ok.is_ok(), "hide must allow a body that avoids the hidden name");
+        assert!(
+            ok.is_ok(),
+            "hide must allow a body that avoids the hidden name"
+        );
         let bad = check_src("let secret = 1 in hide secret { secret }");
-        assert!(bad.is_err(), "referencing a hidden name must be an unbound-variable error");
+        assert!(
+            bad.is_err(),
+            "referencing a hidden name must be an unbound-variable error"
+        );
 
         // `seal except` whitelists the named identifiers, hiding the rest.
         let ok = check_src("let a = 1 in let b = 2 in seal except a { a }");

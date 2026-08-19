@@ -475,7 +475,7 @@ fn fuzz_one(rng: &mut XorShift64, corpus: &[&str]) -> Result<(), (String, String
 /// A mutant that compiles to bytecode, ready for differential execution.
 #[allow(dead_code)]
 pub(crate) struct CompiledMutant {
-    code_module: crate::bytecode::CodeModule,
+    pub(crate) code_module: crate::bytecode::CodeModule,
     mir_module: crate::mir::Module,
 }
 
@@ -496,7 +496,9 @@ pub(crate) fn compile_for_diff_verbose(source: &str) -> Result<CompiledMutant, S
     let mut lexer = Lexer::new(source);
     let tokens = lexer.lex().map_err(|e| format!("lex: {:?}", e))?;
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().map_err(|e| format!("parse: {:?}", e))?;
+    let ast = parser
+        .parse_module()
+        .map_err(|e| format!("parse: {:?}", e))?;
     let mut type_checker = TypeChecker::new();
     type_checker
         .check_module(&ast)

@@ -220,6 +220,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             state_fields,
             behaviors,
             init,
+            virtual_,
             events,
             apply_handlers,
             version,
@@ -258,6 +259,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             is_workflow: false,
             is_organization: *is_organization,
             is_agent: false,
+            virtual_: *virtual_,
             tools: Vec::new(),
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,
@@ -866,6 +868,7 @@ fn desugar_agent(
         is_workflow: false,
         is_organization: false,
         is_agent: true,
+        virtual_: false,
         tools: resolved_tools,
         semantic_memory_dimensions,
         procedural_memory_namespace,
@@ -1034,6 +1037,7 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
         is_workflow: true,
         is_organization: false,
         is_agent: false,
+        virtual_: false,
         tools: Vec::new(),
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
@@ -1764,6 +1768,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                     actor_type: name,
                     init: init_ops,
                     target_node: target_operand,
+                    capabilities: vec![],
                     ty: ty.clone(),
                 },
                 span: *span,
@@ -1822,6 +1827,23 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 span: *span,
             });
             hir::Operand::Var(temp, ty)
+        }
+        Expr::GrainRef {
+            grain_type,
+            key,
+            span,
+        } => {
+            // Syntactic sugar: Grain("Type", key) -> perform Grain.ref("Type", key).
+            let perform = Expr::Perform {
+                effect: "Grain".to_string(),
+                op: "ref".to_string(),
+                args: vec![
+                    Expr::Literal(ast::Literal::String(grain_type.clone()), *span),
+                    key.as_ref().clone(),
+                ],
+                span: *span,
+            };
+            lower_expr(&perform, body)
         }
         Expr::Perform {
             effect,

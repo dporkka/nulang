@@ -135,6 +135,9 @@ pub struct ActorDef {
     /// memory-behavior names and implement them directly instead of running
     /// their placeholder bytecode bodies.
     pub is_agent: bool,
+    /// True if declared as `virtual entity` (RFC 0016 virtual actor
+    /// auto-hydration).
+    pub virtual_: bool,
     pub tools: Vec<crate::tool_schema::ToolSchema>,
     pub semantic_memory_dimensions: Option<usize>,
     pub procedural_memory_namespace: Option<String>,
@@ -324,6 +327,8 @@ pub enum RValue {
         init: Vec<(String, Operand)>,
         /// Remote spawn target (`spawn@node_expr Foo(...)`); `None` = local.
         target_node: Option<Operand>,
+        /// Spawn-time capability grant tokens (e.g. `Net::TcpOut(h:p)`).
+        capabilities: Vec<String>,
         ty: Type,
     },
     Send {
@@ -642,6 +647,7 @@ mod tests {
             is_workflow: false,
             is_organization: false,
             is_agent: false,
+            virtual_: false,
             tools: vec![],
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,

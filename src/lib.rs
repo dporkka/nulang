@@ -7,6 +7,8 @@
 pub mod aot;
 pub mod ast;
 pub mod backends;
+#[cfg(test)]
+pub mod benchmarks;
 pub mod bytecode;
 #[cfg(feature = "wasmfx-backend")]
 pub mod cir;
@@ -53,8 +55,6 @@ pub mod repl;
 pub mod resolver;
 pub mod runtime;
 pub mod stdlib;
-#[cfg(test)]
-pub mod benchmarks;
 #[cfg(test)]
 pub mod stress_tests;
 pub mod tool_schema;

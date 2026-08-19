@@ -470,6 +470,10 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let actor_id = rt.current_actor;
             return rt.perform_actor_builtin(actor_id, op_name, constants, regs);
         }
+        if effect_name == "Grain" {
+            let mut rt = self.runtime.borrow_mut();
+            return rt.perform_grain_builtin(op_name, constants, regs);
+        }
         if effect_name == "IO" {
             if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
                 let msg = crate::vm::resolve_value_string(constants, *first);
@@ -1058,6 +1062,10 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     constants,
                     regs,
                 );
+            }
+
+            if effect_name == "Grain" {
+                return (*self.runtime).perform_grain_builtin(op_name, constants, regs);
             }
 
             if effect_name == "Crdt" {
