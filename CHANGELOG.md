@@ -78,6 +78,27 @@ two major versions.*
   stay on the interpreter by static analysis (`may_suspend` +
   recursion-cycle gates). Foundation: `find_compilable_region_with_calls`,
   `compute_may_suspend`, `compute_recursive` in `src/jit/`.
+### Added since 1.0.0-frozen — 2026-08-19
+
+- **RFC 0016 — Virtual Actor Auto-Hydration and Immutable Shared Object Store**
+  (Experimental). Orleans-style virtual actors plus a Ray-style immutable
+  object store for large `val` payloads:
+  - `virtual entity Name(key: Type) { ... }` declares a grain type; messages
+    to `Grain("Name", key)` hydrate the actor on demand
+    (`src/parser.rs`, `src/ast.rs`, `src/typechecker.rs`,
+    `src/runtime/grain.rs`, `src/runtime/mod.rs`).
+  - `Runtime::resolve_or_hydrate_grain` loads snapshots, replays journals, and
+    enqueues the grain; `Runtime::dehydrate_idle_grains` persists and
+    hibernates idle grains; `Runtime::evict_hibernated_grains` reclaims
+    memory while keeping grains addressable.
+  - Built-in `Grain.ref`, `Grain.prewarm`, `Grain.pin`, `Grain.unpin` effects
+    (`src/runtime/mod.rs`, `src/runtime/callbacks.rs`).
+  - Cross-shard grain routing (`stable_id % shard_count`) with identity carried
+    in `CrossShardMsg::DeliverMessage` so owner shards hydrate on first
+    delivery (`src/runtime/mod.rs`, `src/runtime/distributed.rs`).
+  - Per-shard immutable object store (`src/runtime/object_store.rs`) with
+    `TAG_OBJECT` value representation and wire-protocol support for `ObjectRef`
+    handles (`src/value_layout.rs`, `src/runtime/network.rs`).
 
 ### Added since 1.0.0-frozen — 2026-08-15
 

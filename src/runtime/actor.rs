@@ -2,8 +2,9 @@
 
 use super::gc::OrcaGc;
 use super::*;
+use crate::runtime::object_store::ObjectId;
 use crate::vm::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Actor state machine: Created → Running → Waiting → Suspended → Terminated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,10 +278,16 @@ pub struct Actor {
     pub hibernation_state: Option<HibernationState>,
     /// Time (in milliseconds) since last activity. Used for hibernation timeout.
     pub idle_ms: u64,
+    /// If true, the scheduler-driven dehydration scanner never hibernates this
+    /// actor. Used to keep a grain resident while it is actively needed.
+    pub pinned: bool,
     /// Fields modified since the last checkpoint (incremental persistence).
     /// Cleared after each successful snapshot. Empty on a freshly spawned
     /// actor (all fields are serialized on the first checkpoint).
     pub dirty_fields: HashSet<String>,
+    /// Object-store ids held by this actor.  Populated when a message carrying
+    /// an object ref is delivered.  Dropped on actor exit.
+    pub held_objects: HashSet<ObjectId>,
 }
 
 /// State of an actor's in-flight timed selective receive.
@@ -373,6 +380,8 @@ impl Actor {
             fallback_config: Vec::new(),
             hibernation_state: None,
             idle_ms: 0,
+            pinned: false,
+            held_objects: HashSet::new(),
         }
     }
 
@@ -407,8 +416,15 @@ impl Actor {
     }
 
     /// Wake this actor from hibernation: deserialize and restore VM state.
+    ///
+    /// If the hibernation was recorded without an active continuation (e.g. an
+    /// idle grain that had no in-flight behavior), waking simply clears the
+    /// hibernation marker so the next message starts a fresh behavior.
     pub fn wake_from_hibernation(&mut self, vm: &mut crate::vm::VM) -> Result<(), String> {
         let hibernation = self.hibernation_state.take().ok_or("Not hibernated")?;
+        if hibernation.continuation_bytes.is_empty() {
+            return Ok(());
+        }
         let (cont, handlers) = crate::runtime::heap_serialize::deserialize_continuation(
             &hibernation.continuation_bytes,
             vm,
@@ -434,6 +450,37 @@ impl Actor {
     /// Reset idle timer on activity.
     pub fn reset_idle(&mut self) {
         self.idle_ms = 0;
+    }
+
+    /// Pin the actor so the scheduler-driven dehydration scanner never
+    /// hibernates it.
+    pub fn pin(&mut self) {
+        self.pinned = true;
+    }
+
+    /// Unpin the actor, allowing dehydration again.
+    pub fn unpin(&mut self) {
+        self.pinned = false;
+    }
+
+    /// True if the actor currently has in-flight execution that must not be
+    /// interrupted by dehydration (a suspended behavior, an armed receive-wait,
+    /// a JIT-yield suspension, or an in-flight LLM call).
+    pub fn is_mid_execution(&self) -> bool {
+        if self.suspended_execution.is_some()
+            || self.receive_wait.is_some()
+            || self.jit_yield_pending
+        {
+            return true;
+        }
+        #[cfg(feature = "ai-runtime")]
+        {
+            self.llm_inflight
+        }
+        #[cfg(not(feature = "ai-runtime"))]
+        {
+            false
+        }
     }
 
     /// Return the cycle-detector sentinel header for this actor.

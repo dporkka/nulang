@@ -964,8 +964,8 @@ mod tests {
     }
 
     /// CI smoke test: 50 fixed seeds, interpreter vs forced-JIT vs AOT all
-    /// agree. Runs as part of the default `cargo test` suite; the heavier
-    /// campaigns run via scripts/difffuzz.sh.
+    /// agree. Runs as part of the default `cargo test` suite (both debug and
+    /// release); the heavier campaigns run via scripts/difffuzz.sh.
     #[test]
     fn differential_smoke_50_seeds() {
         let stats = run_campaign(0xD1FF_0000, 50, None, None, false);

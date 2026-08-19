@@ -1715,6 +1715,17 @@ impl TypeChecker {
             // Self reference
             Expr::SelfRef(_) => Ok((vec![], Type::Var(TypeVar::fresh()))),
 
+            // Virtual actor reference: Grain("Type", key).
+            // The key expression is checked; the whole expression has actor type.
+            Expr::GrainRef { key, .. } => {
+                let (subst, _key_ty) = self.infer_expr(ctx, key)?;
+                let actor_ty = Type::Actor {
+                    state: Box::new(Type::Var(TypeVar::fresh())),
+                    behavior: Box::new(Type::Var(TypeVar::fresh())),
+                };
+                Ok((subst, actor_ty))
+            }
+
             // Perform effect
             Expr::Perform {
                 effect,

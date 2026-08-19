@@ -21,13 +21,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/dporkka/nulang.git",
+    "url": "https://github.com/nulang-org/nulang.git",
     "directory": "editors/vscode"
   },
   "bugs": {
-    "url": "https://github.com/dporkka/nulang/issues"
+    "url": "https://github.com/nulang-org/nulang/issues"
   },
-  "homepage": "https://github.com/dporkka/nulang",
+  "homepage": "https://github.com/nulang-org/nulang",
   "contributes": {
     "languages": [
       {
