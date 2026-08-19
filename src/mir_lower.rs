@@ -142,6 +142,7 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 is_workflow: a.is_workflow,
                 is_agent: a.is_agent,
                 is_organization: a.is_organization,
+                is_virtual: a.virtual_,
                 tools: a.tools.clone(),
                 semantic_memory_dimensions: a.semantic_memory_dimensions,
                 procedural_memory_namespace: a.procedural_memory_namespace.clone(),

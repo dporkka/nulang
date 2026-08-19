@@ -187,6 +187,7 @@ pub(crate) fn spawn_from_module(
     behavior_idx: usize,
     init: Vec<(String, Value)>,
 ) -> Value {
+    rt.register_module_grains(module);
     let meta = module
         .actor_metadata
         .iter()

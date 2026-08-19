@@ -1840,8 +1840,12 @@ fn run_with_runtime(
                 install_file_store(shard, dir)?;
             }
         }
+        for shard in &mut shards {
+            shard.register_module_grains(&m);
+        }
         let remaining = shards.split_off(1);
-        let shard_0 = shards.pop().unwrap();
+        let mut shard_0 = shards.pop().unwrap();
+        shard_0.register_module_grains(&m);
 
         let runtime = std::rc::Rc::new(std::cell::RefCell::new(shard_0));
         let mut vm = VM::new();
@@ -1888,6 +1892,7 @@ fn run_with_runtime(
         if let Some(dir) = store_dir {
             install_file_store(&mut runtime.borrow_mut(), dir)?;
         }
+        runtime.borrow_mut().register_module_grains(&m);
         let mut vm = VM::new();
         vm.load_module(m);
         vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(

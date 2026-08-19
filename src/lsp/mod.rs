@@ -1953,6 +1953,9 @@ impl NulangLanguageServer {
                     Self::extract_expr_types(a, source, map);
                 }
             }
+            Expr::GrainRef { key, .. } => {
+                Self::extract_expr_types(key, source, map);
+            }
             Expr::Handle { body, handlers, .. } => {
                 Self::extract_expr_types(body, source, map);
                 for h in handlers {

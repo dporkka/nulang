@@ -543,6 +543,11 @@ pub enum Packet {
         /// runtime interns each entry into the target actor's module pool
         /// (`distributed::intern_wire_strings`).
         string_table: Vec<String>,
+        /// Immutable byte payloads for every `Value::object(id)` in `payload`.
+        /// On the wire an object-id value indexes **this table**.  The receiving
+        /// runtime inserts each entry into its local `ObjectStore` and rewrites
+        /// the payload to use the local object id before delivery.
+        object_table: Vec<(u64, Vec<u8>)>,
         sender_actor: u64,
         sender_node: NodeId,
         priority: MessagePriority,
@@ -853,6 +858,7 @@ impl Packet {
                 content_hash,
                 payload,
                 string_table,
+                object_table,
                 sender_actor,
                 sender_node,
                 priority,
@@ -874,6 +880,14 @@ impl Packet {
                 buf.extend_from_slice(&(string_table.len() as u32).to_be_bytes());
                 for s in string_table {
                     write_string(buf, s);
+                }
+                // Object payloads travel after the string table; the object-id
+                // values above index this table.
+                buf.extend_from_slice(&(object_table.len() as u32).to_be_bytes());
+                for (id, bytes) in object_table {
+                    buf.extend_from_slice(&id.to_be_bytes());
+                    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(bytes);
                 }
                 // trace_id: 1-byte flag + optional content (string).
                 match trace_id {
@@ -1073,6 +1087,22 @@ impl Packet {
             string_table.push(s);
             offset = offset.checked_add(consumed)?;
         }
+        // Object table: immutable byte payloads for the payload's object-id values.
+        let object_count = read_u32(payload, offset)? as usize;
+        offset = offset.checked_add(4)?;
+        let mut object_table = Vec::with_capacity(object_count.min(1024));
+        for _ in 0..object_count {
+            let id = read_u64(payload, offset)?;
+            offset = offset.checked_add(8)?;
+            let bytes_len = read_u32(payload, offset)? as usize;
+            offset = offset.checked_add(4)?;
+            if offset + bytes_len > payload.len() {
+                return None;
+            }
+            let bytes = payload[offset..offset + bytes_len].to_vec();
+            offset = offset.checked_add(bytes_len)?;
+            object_table.push((id, bytes));
+        }
         // trace_id: 1-byte flag + optional string content.
         let trace_id = if offset < payload.len() && payload[offset] == 1 {
             let _ = offset.checked_add(1)?;
@@ -1089,6 +1119,7 @@ impl Packet {
             content_hash,
             payload: values,
             string_table,
+            object_table,
             sender_actor,
             sender_node,
             priority,
@@ -1382,6 +1413,7 @@ const VAL_NIL: u8 = 5;
 /// 1–9 bytes of unsigned LEB128 encoding a zigzag-mapped i64.
 /// Not yet used on the wire — reserved for version-bumped connections.
 const VAL_INT_VARINT: u8 = 6;
+const VAL_OBJECT: u8 = 7;
 
 // ---------------------------------------------------------------------------
 // Varint (unsigned LEB128) encoding — for future compact wire format
@@ -1443,6 +1475,11 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
         // constant pool — see `Packet::ActorMessage::string_table`.
         buf.push(VAL_STRING);
         buf.extend_from_slice(&id.to_be_bytes());
+    } else if let Some(id) = v.as_object_id() {
+        // The id indexes the enclosing packet's object table, not any local
+        // object store — see `Packet::ActorMessage::object_table`.
+        buf.push(VAL_OBJECT);
+        buf.extend_from_slice(&id.to_be_bytes());
     } else if v.is_unit() {
         buf.push(VAL_UNIT);
     } else if v.is_nil() {
@@ -1460,7 +1497,9 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
 /// safe only when `strings_ok` — i.e. the enclosing packet carries a string
 /// table with the content (actor messages do; spawn requests do not).
 fn value_is_wire_safe(v: &Value, strings_ok: bool) -> bool {
-    !(v.is_ptr() || v.is_actor_ref() || v.is_closure()) && (strings_ok || !v.is_string())
+    !(v.is_ptr() || v.is_actor_ref() || v.is_closure())
+        && (strings_ok || !v.is_string())
+        && (strings_ok || !v.is_object())
 }
 
 /// True if every payload [`Value`] carried by `packet` is wire-safe.
@@ -1476,11 +1515,14 @@ fn packet_payload_wire_safe(packet: &Packet) -> bool {
         Packet::ActorMessage {
             payload,
             string_table,
+            object_table,
             ..
         } => payload.iter().all(|v| {
             value_is_wire_safe(v, true)
                 && v.as_string_id()
                     .map_or(true, |id| (id as usize) < string_table.len())
+                && v.as_object_id()
+                    .map_or(true, |id| (id as usize) < object_table.len())
         }),
         Packet::SpawnRequest { initial_state, .. } => initial_state
             .iter()
@@ -1510,6 +1552,10 @@ fn read_value(bytes: &[u8], offset: usize) -> Option<(Value, usize)> {
         VAL_STRING => {
             let id = read_u32(bytes, offset + 1)?;
             Some((Value::string(id), 1 + 4))
+        }
+        VAL_OBJECT => {
+            let id = read_u64(bytes, offset + 1)?;
+            Some((Value::object(id), 1 + 8))
         }
         VAL_UNIT => Some((Value::unit(), 1)),
         VAL_NIL => Some((Value::nil(), 1)),
@@ -2523,6 +2569,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::int(123), Value::string(456)],
             string_table: vec![],
+            object_table: vec![],
             sender_actor: 99,
             sender_node: NodeId(0xDEAD_BEEF_CAFE_BABE),
             priority: MessagePriority::Normal,
@@ -2547,6 +2594,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::string(0), Value::string(1), Value::string(0)],
             string_table: vec!["hello".to_string(), "wörld ✓".to_string()],
+            object_table: vec![],
             sender_actor: 3,
             sender_node: NodeId(0x1111_2222_3333_4444),
             priority: MessagePriority::Normal,
@@ -2561,6 +2609,35 @@ mod tests {
         assert_eq!(decoded, packet);
     }
 
+    // ------------------------------------------------------------------
+    // 2c. ActorMessage object table roundtrip
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_packet_actor_message_object_table_roundtrip() {
+        let packet = Packet::ActorMessage {
+            target_actor: 8,
+            behavior_name: "handle_bytes".to_string(),
+            content_hash: None,
+            payload: vec![Value::object(0), Value::object(1), Value::object(0)],
+            string_table: vec![],
+            object_table: vec![
+                (0, vec![1, 2, 3]),
+                (1, vec![4, 5, 6, 7]),
+            ],
+            sender_actor: 4,
+            sender_node: NodeId(0x2222_3333_4444_5555),
+            priority: MessagePriority::Normal,
+            trace_id: None,
+        };
+
+        let bytes = packet.to_bytes(88);
+        let (seq, decoded) =
+            Packet::from_bytes(&bytes).expect("actor message object table deserialization failed");
+
+        assert_eq!(seq, 88);
+        assert_eq!(decoded, packet);
+    }
+
     #[test]
     fn test_packet_actor_message_rejects_truncated_string_table() {
         let packet = Packet::ActorMessage {
@@ -2569,6 +2646,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::string(0)],
             string_table: vec!["hello".to_string()],
+            object_table: vec![],
             sender_actor: 3,
             sender_node: NodeId(1),
             priority: MessagePriority::Normal,
@@ -2991,6 +3069,7 @@ mod tests {
             content_hash: None,
             payload,
             string_table,
+            object_table: vec![],
             sender_actor: 0,
             sender_node: NodeId(5),
             priority: MessagePriority::Normal,
@@ -3075,6 +3154,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::string(42)],
             string_table: vec![],
+            object_table: vec![],
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
@@ -3125,6 +3205,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::string(0), Value::int(7), Value::string(1)],
             string_table: vec!["hello".into(), "world".into()],
+            object_table: vec![],
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
@@ -3179,6 +3260,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::int(123), Value::bool(true), Value::unit()],
             string_table: vec![],
+            object_table: vec![],
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,

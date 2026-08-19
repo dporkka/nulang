@@ -310,6 +310,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             }
         }
         Expr::SelfRef(_) => {}
+        Expr::GrainRef { key, .. } => {
+            free_vars(key, bound, acc);
+        }
         Expr::Perform { args, .. } => {
             for arg in args {
                 free_vars(arg, bound, acc);
@@ -799,6 +802,10 @@ impl EffectChecker {
 
             // Self reference: pure (just a variable-like read).
             Expr::SelfRef(_) => Ok(EffectRow::empty()),
+
+            // Virtual actor reference: pure at the effect-row level; the
+            // underlying runtime dispatch is a built-in, not a user effect.
+            Expr::GrainRef { key, .. } => self.infer_effects(ctx, key),
 
             // Perform effect: adds the named effect to the row.
             Expr::Perform {
@@ -1933,6 +1940,12 @@ impl CapabilityAnalyzer {
             // Self reference within an actor.
             Expr::SelfRef(_) => Ok(Capability::Ref),
 
+            // Virtual actor reference: returns an actor ref (reference capability).
+            Expr::GrainRef { key, .. } => {
+                let _ = self.infer_cap_tracked(ctx, key, consumed)?;
+                Ok(Capability::Ref)
+            }
+
             // Perform effect: capability depends on what the operation returns.
             // Without a type environment, we join the capabilities of arguments.
             Expr::Perform { args, .. } => {
@@ -2202,6 +2215,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::Ask { span, .. } => *span,
         Expr::Receive { span, .. } => *span,
         Expr::SelfRef(s) => *s,
+        Expr::GrainRef { span, .. } => *span,
         Expr::Emit { span, .. } => *span,
         Expr::Perform { span, .. } => *span,
         Expr::Handle { span, .. } => *span,
