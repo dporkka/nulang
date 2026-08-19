@@ -752,6 +752,13 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
             }
             out.push(')');
         }
+        Expr::GrainRef {
+            grain_type, key, ..
+        } => {
+            out.push_str(&format!("Grain(\"{}\", ", grain_type));
+            fmt_expr(out, key, indent, had_unhandled);
+            out.push(')');
+        }
         Expr::Pipe { left, right, .. } => {
             fmt_expr(out, left, indent, had_unhandled);
             out.push_str(" |> ");

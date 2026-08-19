@@ -1227,8 +1227,8 @@ pub struct Value {
 }
 
 use crate::value_layout::{
-    is_float_raw, sext48, PAYLOAD_MASK, TAG_ACTOR, TAG_BOOL, TAG_CLOSURE, TAG_INT, TAG_MASK,
-    TAG_NIL, TAG_PTR, TAG_STRING, TAG_UNIT,
+    is_float_raw, sext48, tag_object, PAYLOAD_MASK, TAG_ACTOR, TAG_BOOL, TAG_CLOSURE, TAG_INT,
+    TAG_MASK, TAG_NIL, TAG_OBJECT, TAG_PTR, TAG_STRING, TAG_UNIT,
 };
 
 impl Value {
@@ -1274,6 +1274,13 @@ impl Value {
     pub fn closure(id: u64) -> Self {
         Value {
             raw: TAG_CLOSURE | (id & PAYLOAD_MASK),
+        }
+    }
+
+    /// Create an object-store reference.
+    pub fn object(id: u64) -> Self {
+        Value {
+            raw: tag_object(id),
         }
     }
 
@@ -1364,6 +1371,17 @@ impl Value {
     pub fn is_closure(&self) -> bool {
         (self.raw & TAG_MASK) == TAG_CLOSURE
     }
+    pub fn is_object(&self) -> bool {
+        (self.raw & TAG_MASK) == TAG_OBJECT
+    }
+
+    pub fn as_object_id(&self) -> Option<u64> {
+        if self.is_object() {
+            Some(self.raw & PAYLOAD_MASK)
+        } else {
+            None
+        }
+    }
 
     pub fn as_string_id(&self) -> Option<u32> {
         if self.is_string() {
@@ -1409,6 +1427,8 @@ impl Value {
             b.to_string()
         } else if self.is_actor_ref() {
             format!("#Actor:{}", self.as_actor_id().unwrap())
+        } else if let Some(oid) = self.as_object_id() {
+            format!("#Object:{}", oid)
         } else {
             format!("#Value({:x})", self.raw)
         }

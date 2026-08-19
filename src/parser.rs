@@ -702,7 +702,8 @@ impl Parser {
             TokenKind::Actor
             | TokenKind::Persistent
             | TokenKind::Entity
-            | TokenKind::Organization => {
+            | TokenKind::Organization
+            | TokenKind::Virtual => {
                 let backend = annotations.iter().find_map(|a| match a {
                     crate::ast::FunctionAnnotation::Backend { kind } => Some(*kind),
                     _ => None,
@@ -968,10 +969,17 @@ impl Parser {
 
     fn parse_actor(&mut self, backend: Option<crate::ast::ActorBackendKind>) -> NuResult<Decl> {
         let span = self.current_span();
+        let virtual_ = self.consume_if(&TokenKind::Virtual);
         let persistent = self.consume_if(&TokenKind::Persistent);
         let is_entity = self.consume_if(&TokenKind::Entity);
         let is_org = self.consume_if(&TokenKind::Organization);
         let persistent = persistent || is_entity || is_org;
+        if virtual_ && !is_entity {
+            return Err(NuError::parse_error(
+                "'virtual' can only modify 'entity' declarations".to_string(),
+                self.current_span(),
+            ));
+        }
         if !is_entity && !is_org {
             self.expect(TokenKind::Actor)?;
         }
@@ -984,6 +992,14 @@ impl Parser {
         // so existing behavior is unchanged; `entity` is the durable-first form.
         let name = self.expect_ident("actor name")?;
         let type_params = self.parse_type_params()?;
+        let key_params = if virtual_ {
+            self.expect(TokenKind::LParen)?;
+            let params = self.parse_params()?;
+            self.expect(TokenKind::RParen)?;
+            params
+        } else {
+            vec![]
+        };
         let implements = match self.peek_kind() {
             TokenKind::Ident(s) if s == "implements" => {
                 self.advance();
@@ -1108,6 +1124,8 @@ impl Parser {
             apply_handlers,
             migrations,
             is_organization: is_org,
+            virtual_,
+            key_params,
             implements,
             span,
         })
@@ -2696,6 +2714,38 @@ impl Parser {
 
             // Special cases: function call, field access, array index, send
             if self.match_token(&TokenKind::LParen) {
+                // Intercept `Grain("Type", key)` before treating it as a call.
+                if let Expr::Var(ref name, _) = left {
+                    if name == "Grain" {
+                        self.advance(); // consume '('
+                        let args = self.parse_arg_list()?;
+                        if args.len() != 2 {
+                            return Err(NuError::parse_error(
+                                format!(
+                                    "Grain(...) expects exactly 2 arguments, got {}",
+                                    args.len()
+                                ),
+                                self.current_span(),
+                            ));
+                        }
+                        let grain_type = match &args[0] {
+                            Expr::Literal(Literal::String(s), _) => s.clone(),
+                            _ => {
+                                return Err(NuError::parse_error(
+                                    "Grain(...) first argument must be a string literal"
+                                        .to_string(),
+                                    self.current_span(),
+                                ))
+                            }
+                        };
+                        left = Expr::GrainRef {
+                            grain_type,
+                            key: Box::new(args[1].clone()),
+                            span: self.current_span(),
+                        };
+                        continue;
+                    }
+                }
                 // Function call: left(args)
                 self.advance(); // consume '('
                 let args = self.parse_arg_list()?;
@@ -4042,9 +4092,9 @@ impl Parser {
         self.advance(); // consume 'perform'
         let effect = self.expect_ident("effect name")?;
         self.expect(TokenKind::Dot)?;
-        // `ask`, `link`, `monitor` and `exit` are reserved keywords, so they
-        // lex as keyword tokens rather than identifiers; accept them as
-        // operation names (`perform Actor.link(t)`).
+        // `ask`, `link`, `monitor`, `exit` and `ref` are reserved keywords,
+        // so they lex as keyword tokens rather than identifiers; accept them
+        // as operation names (`perform Actor.link(t)`, `perform Grain.ref(...)`).
         let op = match self.peek_kind() {
             TokenKind::Ask => {
                 self.advance();
@@ -4061,6 +4111,10 @@ impl Parser {
             TokenKind::Exit => {
                 self.advance();
                 "exit".to_string()
+            }
+            TokenKind::Ref => {
+                self.advance();
+                "ref".to_string()
             }
             _ => self.expect_ident("operation name")?,
         };
@@ -4099,6 +4153,7 @@ impl Parser {
             TokenKind::Persistent,
             TokenKind::Entity,
             TokenKind::Organization,
+            TokenKind::Virtual,
             TokenKind::StateMachine,
             TokenKind::Agent,
             TokenKind::Workflow,
@@ -6468,6 +6523,79 @@ mod tests {
             }
             _ => panic!("Expected actor declaration"),
         }
+    }
+
+    #[test]
+    fn test_parse_virtual_entity() {
+        let source = r#"virtual entity User(key: String) {
+            state durable name: String = ""
+            behavior Greet(who: String) { perform IO.print("hi") }
+        }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name,
+                persistent,
+                virtual_,
+                key_params,
+                ..
+            } => {
+                assert_eq!(name, "User");
+                assert!(*persistent, "virtual entity should be persistent");
+                assert!(*virtual_, "entity should be marked virtual");
+                assert_eq!(key_params.len(), 1);
+                assert_eq!(key_params[0].name, "key");
+                assert_eq!(key_params[0].ty, Some(Type::string()));
+            }
+            _ => panic!("Expected virtual entity declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_grain_ref() {
+        let expr = parse_expr(r#"Grain("User", "u1")"#).unwrap();
+        match expr {
+            Expr::GrainRef {
+                grain_type, key, ..
+            } => {
+                assert_eq!(grain_type, "User");
+                match key.as_ref() {
+                    Expr::Literal(Literal::String(s), _) => assert_eq!(s, "u1"),
+                    other => panic!("expected string literal key, got {:?}", other),
+                }
+            }
+            other => panic!("expected Expr::GrainRef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_grain_ref_int_key() {
+        let expr = parse_expr(r#"Grain("Counter", 42)"#).unwrap();
+        match expr {
+            Expr::GrainRef { grain_type, .. } => {
+                assert_eq!(grain_type, "Counter");
+            }
+            other => panic!("expected Expr::GrainRef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_grain_ref_requires_string_type() {
+        let result = parse_expr(r#"Grain(Counter, "u1")"#);
+        assert!(result.is_err(), "Grain type must be a string literal");
+    }
+
+    #[test]
+    fn test_parse_virtual_requires_entity() {
+        let source = r#"virtual actor Counter { state count = 0 behavior get() { self.count } }"#;
+        let result = parse(source);
+        assert!(result.is_err(), "virtual must be followed by entity");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("virtual"),
+            "error should mention virtual: {}",
+            err
+        );
     }
 
     #[test]

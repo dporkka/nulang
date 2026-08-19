@@ -554,6 +554,10 @@ pub struct ActorMeta {
     /// True if from organization (RFC 0009).
     #[serde(default)]
     pub is_organization: bool,
+    /// True if declared as `virtual entity` (RFC 0016 virtual actor
+    /// auto-hydration).
+    #[serde(default)]
+    pub is_virtual: bool,
     /// Tool schemas exposed to this agent actor.
     pub tools: Vec<ToolSchema>,
     /// Semantic-memory vector dimensions, if configured for this agent.
@@ -594,6 +598,7 @@ impl ActorMeta {
             is_workflow: false,
             is_agent: false,
             is_organization: false,
+            is_virtual: false,
             tools: Vec::new(),
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,

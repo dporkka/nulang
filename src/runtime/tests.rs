@@ -4,9 +4,10 @@
 //! Full history in local commit 1c2cde9.
 
 use super::*;
+use crate::bytecode::{ActorMeta, CodeModule, Constant};
 use crate::runtime::gc::OrcaGc;
 use crate::runtime::heap::{ActorHeap, TypeTag};
-use crate::vm::Frame;
+use crate::vm::{Frame, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -820,6 +821,7 @@ fn dyn_worker_module(default_count: i64) -> crate::bytecode::CodeModule {
         is_workflow: false,
         is_agent: false,
         is_organization: false,
+        is_virtual: false,
         tools: vec![],
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
@@ -2076,6 +2078,7 @@ fn test_vm_spawn_creates_persistent_actor() {
         is_workflow: false,
         is_agent: false,
         is_organization: false,
+        is_virtual: false,
         tools: vec![],
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
@@ -2139,6 +2142,7 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         is_workflow: false,
         is_agent: false,
         is_organization: false,
+        is_virtual: false,
         tools: vec![],
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
@@ -3738,6 +3742,7 @@ fn test_actor_migration_between_two_nodes() {
         is_workflow: false,
         is_agent: false,
         is_organization: false,
+        is_virtual: false,
         tools: vec![],
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
@@ -5226,6 +5231,7 @@ fn test_message_retry_after_bytecode_fetch() {
         content_hash: Some(correct_hash),
         payload: vec![Value::int(42)],
         string_table: vec![],
+        object_table: vec![],
         sender_actor: 0,
         sender_node: node_b,
         priority: crate::runtime::mailbox::MessagePriority::Normal,
@@ -6424,4 +6430,336 @@ fn test_dst_gc_during_send_seed_sweep() {
             rt.actors.get(&receiver).unwrap().heap.live_count()
         );
     }
+}
+
+// ========================================================================
+// Object Store Tests
+// ========================================================================
+
+#[test]
+fn test_object_store_put_get() {
+    let mut rt = Runtime::new();
+    let bytes: Box<[u8]> = vec![1, 2, 3, 4, 5].into_boxed_slice();
+    let id = rt.object_store.put(bytes);
+    let entry = rt.object_store.get(id).unwrap();
+    assert_eq!(entry.as_bytes(), &[1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_object_ref_send_same_shard_records_hold() {
+    let mut rt = Runtime::new();
+    let receiver = rt.spawn_actor(Box::new(|| vec![]));
+    let bytes: Box<[u8]> = vec![9, 8, 7].into_boxed_slice();
+    let obj_id = rt.object_store.put(bytes);
+
+    rt.send_message_by_id(receiver, 0, &[Value::object(obj_id)]);
+    rt.step_actor(receiver);
+
+    let actor = rt.actors.get(&receiver).unwrap();
+    assert!(
+        actor.held_objects.contains(&obj_id),
+        "receiver should hold the object ref after delivery"
+    );
+    // Refcount: original put (1) + delivery hold (1) = 2
+    assert_eq!(rt.object_store.get(obj_id).unwrap().ref_count(), 2);
+}
+
+#[test]
+fn test_object_ref_released_on_actor_exit() {
+    let mut rt = Runtime::new();
+    let receiver = rt.spawn_actor(Box::new(|| vec![]));
+    let bytes: Box<[u8]> = vec![9, 8, 7].into_boxed_slice();
+    let obj_id = rt.object_store.put(bytes);
+
+    rt.send_message_by_id(receiver, 0, &[Value::object(obj_id)]);
+    rt.step_actor(receiver);
+    assert!(rt.object_store.get(obj_id).is_some());
+
+    // Drop the unowned creator ref so that only the receiver's hold remains.
+    rt.object_store.drop_ref(obj_id);
+
+    rt.exit_actor(receiver, ExitReason::Normal);
+    assert!(
+        rt.object_store.get(obj_id).is_none(),
+        "object should be freed when the last actor exits"
+    );
+}
+
+#[test]
+fn test_object_ref_cross_shard_copies_bytes() {
+    let mut shards = Runtime::new_sharded(2);
+
+    // Spawn actors until we have one on each shard with opposite parity.
+    // Actor assignment is actor_id % shard_count, but the global id counter
+    // may be in an arbitrary state when this test runs.
+    let mut a = shards[0].spawn_actor(Box::new(|| vec![]));
+    while a % 2 != 0 {
+        a = shards[0].spawn_actor(Box::new(|| vec![]));
+    }
+    let mut b = shards[1].spawn_actor(Box::new(|| vec![]));
+    while b % 2 != 1 {
+        b = shards[1].spawn_actor(Box::new(|| vec![]));
+    }
+
+    // a is in shard 0 with an even id, so routing a -> b crosses to shard 1.
+    let source_shard = (a % 2) as usize;
+    let target_shard = (b % 2) as usize;
+    assert_eq!(source_shard, 0);
+    assert_eq!(target_shard, 1);
+
+    // Put object in the source shard's store and send from a to b.
+    let bytes: Box<[u8]> = vec![11, 22, 33].into_boxed_slice();
+    let obj_id = shards[source_shard].object_store.put(bytes);
+    shards[source_shard].current_actor = Some(a);
+    shards[source_shard].send_message_by_id(b, 0, &[Value::object(obj_id)]);
+
+    // Pump the target shard to receive the cross-shard message.
+    shards[target_shard].drain_cross_shard_messages();
+
+    assert_eq!(
+        shards[target_shard].actors.get(&b).unwrap().mailbox.len(),
+        1
+    );
+
+    // The received object id is local to the target store (ids are per-store
+    // and may coincide by chance, so verify via bytes, not id equality).
+    let received_msg = shards[target_shard]
+        .actors
+        .get_mut(&b)
+        .unwrap()
+        .mailbox
+        .pop()
+        .unwrap();
+    let local_id = received_msg.payload[0].as_object_id().unwrap();
+    assert_eq!(
+        shards[target_shard]
+            .object_store
+            .get(local_id)
+            .unwrap()
+            .as_bytes(),
+        &[11, 22, 33]
+    );
+}
+
+// ========================================================================
+// Built-in Grain effects
+// ========================================================================
+
+fn register_test_grain(rt: &mut Runtime, name: &str) {
+    let mut module = CodeModule::new(name);
+    let mut meta = ActorMeta::new(name);
+    meta.is_virtual = true;
+    module.add_actor_meta(meta);
+    let grain_type = GrainType {
+        module,
+        default_models: vec![],
+        bytecode_offsets: vec![],
+        compensation_offsets: vec![],
+        dehydrate_policy: DehydratePolicy::default(),
+    };
+    rt.grain_registry.register(name, grain_type);
+}
+
+#[test]
+fn test_grain_ref_builtin_string_key() {
+    let mut rt = Runtime::new();
+    register_test_grain(&mut rt, "Counter");
+    let constants = vec![
+        Constant::String("Counter".to_string()),
+        Constant::String("alpha".to_string()),
+    ];
+    let regs = vec![Value::string(0), Value::string(1)];
+    let result = rt.perform_grain_builtin(Some("ref"), &constants, &regs);
+    let expected = Value::actor_ref(grain_actor_id(&GrainId::new("Counter", "alpha")));
+    assert_eq!(result, Some(expected));
+}
+
+#[test]
+fn test_grain_ref_builtin_int_key() {
+    let mut rt = Runtime::new();
+    let constants = vec![Constant::String("User".to_string())];
+    let regs = vec![Value::string(0), Value::int(42)];
+    let result = rt.perform_grain_builtin(Some("ref"), &constants, &regs);
+    let expected = Value::actor_ref(grain_actor_id(&GrainId::new("User", "42")));
+    assert_eq!(result, Some(expected));
+}
+
+#[test]
+fn test_grain_ref_builtin_unknown_key_returns_nil() {
+    let mut rt = Runtime::new();
+    let constants = vec![Constant::String("User".to_string())];
+    let regs = vec![Value::string(0), Value::bool(true)];
+    let result = rt.perform_grain_builtin(Some("ref"), &constants, &regs);
+    assert_eq!(result, Some(Value::nil()));
+}
+
+#[test]
+fn test_grain_prewarm_builtin_hydrates_grain() {
+    let mut rt = Runtime::new();
+    register_test_grain(&mut rt, "Counter");
+    let constants = vec![Constant::String("Counter".to_string())];
+    let regs = vec![Value::string(0), Value::string(0)];
+
+    let grain_id = GrainId::new("Counter", "Counter");
+    let stable_id = grain_actor_id(&grain_id);
+    assert!(!rt.actors.contains_key(&stable_id));
+
+    let result = rt.perform_grain_builtin(Some("prewarm"), &constants, &regs);
+    assert_eq!(result, Some(Value::unit()));
+    assert!(
+        rt.actors.contains_key(&stable_id),
+        "prewarm should hydrate the grain"
+    );
+}
+
+#[test]
+fn test_grain_prewarm_builtin_unknown_type_returns_nil() {
+    let mut rt = Runtime::new();
+    let constants = vec![Constant::String("Unknown".to_string())];
+    let regs = vec![Value::string(0), Value::string(0)];
+    let result = rt.perform_grain_builtin(Some("prewarm"), &constants, &regs);
+    assert_eq!(result, Some(Value::nil()));
+}
+
+#[test]
+fn test_grain_pin_unpin_builtin() {
+    let mut rt = Runtime::new();
+    register_test_grain(&mut rt, "Counter");
+    let constants = vec![Constant::String("Counter".to_string())];
+    let regs = vec![Value::string(0), Value::int(7)];
+
+    let grain_id = GrainId::new("Counter", "7");
+    let stable_id = grain_actor_id(&grain_id);
+
+    assert_eq!(
+        rt.perform_grain_builtin(Some("pin"), &constants, &regs),
+        Some(Value::unit())
+    );
+    assert!(
+        rt.actors.get(&stable_id).unwrap().pinned,
+        "pin should set pinned flag"
+    );
+
+    assert_eq!(
+        rt.perform_grain_builtin(Some("unpin"), &constants, &regs),
+        Some(Value::unit())
+    );
+    assert!(
+        !rt.actors.get(&stable_id).unwrap().pinned,
+        "unpin should clear pinned flag"
+    );
+}
+
+/// Build a simple virtual `Counter` grain module with one behavior
+/// `Counter.inc` that increments durable `count` and returns the new value.
+fn counter_grain_module() -> crate::bytecode::CodeModule {
+    use crate::bytecode::{
+        ActorMeta, BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode,
+    };
+
+    let mut module = CodeModule::new("grain_counter");
+    let field_idx = module.add_constant(Constant::String("count".to_string()));
+    let one_idx = module.add_constant(Constant::Int(1));
+    module.add_behavior(BehaviorTableEntry {
+        name: "Counter.inc".to_string(),
+        param_count: 0,
+        code_offset: 0,
+        local_count: 4,
+        effect_mask: 0,
+        compensate_offset: None,
+        content_hash: None,
+        source_location: None,
+        parallel_branches: None,
+    });
+    module.emit(Instruction::new3(
+        OpCode::StateGet,
+        ((field_idx >> 8) & 0xFF) as u8,
+        (field_idx & 0xFF) as u8,
+        1,
+    ));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((one_idx >> 8) & 0xFF) as u8,
+        (one_idx & 0xFF) as u8,
+        2,
+    ));
+    module.emit(Instruction::new3(OpCode::IAdd, 1, 2, 3));
+    module.emit(Instruction::new3(OpCode::StateSet, 0, 0, 3));
+    module.emit(Instruction::new1(OpCode::RetVal, 3));
+    module.add_actor_meta(ActorMeta {
+        name: "Counter".to_string(),
+        persistent: true,
+        state_models: vec![("count".to_string(), crate::ast::StateModel::Durable)],
+        state_defaults: vec![("count".to_string(), Constant::Int(0))],
+        behavior_indices: vec![0],
+        type_hash: None,
+        version: 1,
+        migrations: String::new(),
+        is_workflow: false,
+        is_agent: false,
+        is_organization: false,
+        is_virtual: true,
+        tools: vec![],
+        semantic_memory_dimensions: None,
+        procedural_memory_namespace: None,
+        backend: crate::ast::ActorBackendKind::Native,
+        fallback_config: String::new(),
+        retry_config: String::new(),
+    });
+    module
+}
+
+/// A grain message sent from shard 0 to a grain owned by shard 1 is routed
+/// across shards and hydrates the grain on the owning shard.
+#[test]
+fn test_send_to_grain_cross_shard_routes_and_hydrates() {
+    let module = counter_grain_module();
+    let mut shards = Runtime::new_sharded(2);
+
+    // Register the grain type on every shard so the receiving shard can
+    // hydrate the grain when the cross-shard message arrives.
+    for shard in &mut shards {
+        shard.register_module_grains(&module);
+    }
+
+    // Find a key whose stable actor id maps to shard 1 (odd id).
+    let mut key = "0".to_string();
+    let mut grain_id = GrainId::new("Counter", &key);
+    let mut stable_id = grain_actor_id(&grain_id);
+    let mut attempts = 0;
+    while (stable_id % 2) != 1 && attempts < 1000 {
+        key = format!("k{}", attempts);
+        grain_id = GrainId::new("Counter", &key);
+        stable_id = grain_actor_id(&grain_id);
+        attempts += 1;
+    }
+    assert_eq!(stable_id % 2, 1, "should find a key mapping to shard 1");
+
+    // Send from shard 0 to the grain. The grain is not resident anywhere yet.
+    shards[0].send_to_grain(grain_id.clone(), "inc", vec![], 0);
+
+    // The grain should not hydrate on shard 0; it should be routed to shard 1.
+    assert!(
+        !shards[0].actors.contains_key(&stable_id),
+        "grain should not hydrate on the sending shard"
+    );
+    assert!(
+        !shards[1].actors.contains_key(&stable_id),
+        "grain should not yet be hydrated on the receiving shard"
+    );
+
+    // Drain cross-shard messages on shard 1 and process the enqueued message.
+    shards[1].drain_cross_shard_messages();
+    shards[1].run_scheduler();
+
+    assert!(
+        shards[1].actors.contains_key(&stable_id),
+        "grain should hydrate on shard 1"
+    );
+    let actor = shards[1].actors.get(&stable_id).unwrap();
+    assert_eq!(
+        actor.get_state_field("count").and_then(|v| v.as_int()),
+        Some(1),
+        "inc message should be processed on shard 1"
+    );
 }

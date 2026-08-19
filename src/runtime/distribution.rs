@@ -26,6 +26,7 @@ pub(crate) struct PendingSpawnMessage {
     pub behavior_name: String,
     pub payload: Vec<Value>,
     pub string_table: Vec<String>,
+    pub object_table: Vec<(u64, Vec<u8>)>,
     pub sender: u64,
     pub trace_id: Option<String>,
 }
@@ -57,6 +58,22 @@ pub(crate) fn queue_spawn_message(
             return;
         }
     };
+    let (payload, object_table) = match distributed::resolve_wire_objects(rt, &payload) {
+        Some(resolved) => resolved,
+        None => {
+            warn!(
+                "nulang-net: dropping message to spawn placeholder {}: object ref not found in local store",
+                request_id
+            );
+            let sender = rt.current_actor.unwrap_or(0);
+            crate::runtime::distributed::notify_delivery_failed(
+                rt,
+                sender,
+                "object ref unresolvable",
+            );
+            return;
+        }
+    };
     let sender = rt.current_actor.unwrap_or(0);
     let trace_id = rt.current_trace.as_ref().map(|t| t.to_traceparent());
     rt.pending_spawn_messages
@@ -66,6 +83,7 @@ pub(crate) fn queue_spawn_message(
             behavior_name: behavior.to_string(),
             payload,
             string_table,
+            object_table,
             sender,
             trace_id,
         });
