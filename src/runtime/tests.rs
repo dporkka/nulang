@@ -6432,7 +6432,6 @@ fn test_dst_gc_during_send_seed_sweep() {
     }
 }
 
-
 // ========================================================================
 // Object Store Tests
 // ========================================================================
@@ -6607,7 +6606,10 @@ fn test_grain_prewarm_builtin_hydrates_grain() {
 
     let result = rt.perform_grain_builtin(Some("prewarm"), &constants, &regs);
     assert_eq!(result, Some(Value::unit()));
-    assert!(rt.actors.contains_key(&stable_id), "prewarm should hydrate the grain");
+    assert!(
+        rt.actors.contains_key(&stable_id),
+        "prewarm should hydrate the grain"
+    );
 }
 
 #[test]
@@ -6633,13 +6635,19 @@ fn test_grain_pin_unpin_builtin() {
         rt.perform_grain_builtin(Some("pin"), &constants, &regs),
         Some(Value::unit())
     );
-    assert!(rt.actors.get(&stable_id).unwrap().pinned, "pin should set pinned flag");
+    assert!(
+        rt.actors.get(&stable_id).unwrap().pinned,
+        "pin should set pinned flag"
+    );
 
     assert_eq!(
         rt.perform_grain_builtin(Some("unpin"), &constants, &regs),
         Some(Value::unit())
     );
-    assert!(!rt.actors.get(&stable_id).unwrap().pinned, "unpin should clear pinned flag");
+    assert!(
+        !rt.actors.get(&stable_id).unwrap().pinned,
+        "unpin should clear pinned flag"
+    );
 }
 
 /// Build a simple virtual `Counter` grain module with one behavior

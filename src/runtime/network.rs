@@ -2620,10 +2620,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::object(0), Value::object(1), Value::object(0)],
             string_table: vec![],
-            object_table: vec![
-                (0, vec![1, 2, 3]),
-                (1, vec![4, 5, 6, 7]),
-            ],
+            object_table: vec![(0, vec![1, 2, 3]), (1, vec![4, 5, 6, 7])],
             sender_actor: 4,
             sender_node: NodeId(0x2222_3333_4444_5555),
             priority: MessagePriority::Normal,

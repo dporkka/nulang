@@ -68,10 +68,10 @@ pub use crdt_manager::*;
 pub use crdt_reg::{LWWRegister, MVRegister, RGAElement, RGA};
 pub use distributed::*;
 pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
+pub use grain::*;
 pub use heap::*;
 pub use http_server::HttpServerState;
 pub use mailbox::*;
-pub use grain::*;
 pub use network::NetworkTransport;
 pub use network::*;
 pub use object_store::*;
@@ -795,7 +795,8 @@ impl Runtime {
                 .iter()
                 .map(|(name, model)| (name.clone(), map_ast_state_model(*model)))
                 .collect();
-            let bytecode_offsets = crate::runtime::spawn::bytecode_offsets_for(module, meta.is_workflow);
+            let bytecode_offsets =
+                crate::runtime::spawn::bytecode_offsets_for(module, meta.is_workflow);
             let compensation_offsets: Vec<Option<usize>> = meta
                 .behavior_indices
                 .iter()
@@ -1250,8 +1251,8 @@ impl Runtime {
         // grain cross-shard messages handles first-time hydration; the local
         // index handles re-hydration after eviction.
         if !self.actors.contains_key(&target_id) {
-            let grain_id_to_hydrate = grain_id
-                .or_else(|| self.grain_actor_ids.get(&target_id).cloned());
+            let grain_id_to_hydrate =
+                grain_id.or_else(|| self.grain_actor_ids.get(&target_id).cloned());
             if let Some(grain_id) = grain_id_to_hydrate {
                 if let Err(e) = self.resolve_or_hydrate_grain(grain_id) {
                     warn!(
@@ -2955,7 +2956,10 @@ impl Runtime {
                         true
                     }
                     Err(e) => {
-                        warn!("nulang-grain: failed to hibernate actor {}: {}", actor_id, e);
+                        warn!(
+                            "nulang-grain: failed to hibernate actor {}: {}",
+                            actor_id, e
+                        );
                         false
                     }
                 }
@@ -5023,8 +5027,7 @@ impl Runtime {
             .insert(grain_id.clone(), stable_actor_id);
         self.actor_grain_id
             .insert(stable_actor_id, grain_id.clone());
-        self.grain_actor_ids
-            .insert(stable_actor_id, grain_id);
+        self.grain_actor_ids.insert(stable_actor_id, grain_id);
 
         // Replay message journal entries that arrived after the snapshot.
         if let Some(ref snap) = snapshot {
@@ -5420,7 +5423,11 @@ impl Runtime {
             Some("prewarm") => match self.resolve_or_hydrate_grain(grain_id.clone()) {
                 Ok(_) => Some(Value::unit()),
                 Err(e) => {
-                    warn!("nulang-grain: prewarm failed for {}: {}", grain_id.actor_name(), e);
+                    warn!(
+                        "nulang-grain: prewarm failed for {}: {}",
+                        grain_id.actor_name(),
+                        e
+                    );
                     Some(Value::nil())
                 }
             },
@@ -5432,7 +5439,11 @@ impl Runtime {
                     Some(Value::unit())
                 }
                 Err(e) => {
-                    warn!("nulang-grain: pin failed for {}: {}", grain_id.actor_name(), e);
+                    warn!(
+                        "nulang-grain: pin failed for {}: {}",
+                        grain_id.actor_name(),
+                        e
+                    );
                     Some(Value::nil())
                 }
             },
@@ -5444,7 +5455,11 @@ impl Runtime {
                     Some(Value::unit())
                 }
                 Err(e) => {
-                    warn!("nulang-grain: unpin failed for {}: {}", grain_id.actor_name(), e);
+                    warn!(
+                        "nulang-grain: unpin failed for {}: {}",
+                        grain_id.actor_name(),
+                        e
+                    );
                     Some(Value::nil())
                 }
             },

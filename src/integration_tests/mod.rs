@@ -2663,14 +2663,21 @@ match { a: 2, b: 9 } with {
 
         let grain_id = GrainId::new("Counter", "alpha");
         let stable_id = grain_actor_id(&grain_id);
-        assert!(!rt.borrow().actors.contains_key(&stable_id), "grain should not be resident before first send");
+        assert!(
+            !rt.borrow().actors.contains_key(&stable_id),
+            "grain should not be resident before first send"
+        );
 
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
 
         let rt_ref = rt.borrow();
         let actor = rt_ref.actors.get(&stable_id).expect("grain should hydrate");
-        assert_eq!(actor.get_state_field("count").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2693,11 +2700,18 @@ match { a: 2, b: 9 } with {
         let rt1 = Rc::new(RefCell::new(Runtime::new()));
         rt1.borrow_mut().persistence = Box::new(store.clone());
         rt1.borrow_mut().register_module_grains(&module);
-        rt1.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
-        rt1.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt1.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt1.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt1.borrow_mut().run_scheduler();
         assert_eq!(
-            rt1.borrow().actors.get(&stable_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&stable_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(2)
         );
 
@@ -2706,10 +2720,16 @@ match { a: 2, b: 9 } with {
         rt2.borrow_mut().persistence = Box::new(store.clone());
         rt2.borrow_mut().register_module_grains(&module);
         assert!(!rt2.borrow().actors.contains_key(&stable_id));
-        rt2.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt2.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt2.borrow_mut().run_scheduler();
         assert_eq!(
-            rt2.borrow().actors.get(&stable_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&stable_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(3),
             "grain state must survive runtime restart"
         );
@@ -2734,15 +2754,24 @@ match { a: 2, b: 9 } with {
             .grain_registry
             .get_mut("Counter")
             .unwrap()
-            .dehydrate_policy = DehydratePolicy { idle_ms: 0, allow_dehydrate: true };
+            .dehydrate_policy = DehydratePolicy {
+            idle_ms: 0,
+            allow_dehydrate: true,
+        };
 
         let grain_id = GrainId::new("Counter", "gamma");
         let stable_id = grain_actor_id(&grain_id);
 
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
         assert_eq!(
-            rt.borrow().actors.get(&stable_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt.borrow()
+                .actors
+                .get(&stable_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(1)
         );
 
@@ -2760,13 +2789,17 @@ match { a: 2, b: 9 } with {
         }
 
         // Sending to a hibernated grain wakes it and processes the message.
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
         {
             let rt_ref = rt.borrow();
             let actor = rt_ref.actors.get(&stable_id).unwrap();
             assert!(!actor.is_hibernated(), "grain should wake from hibernation");
-            assert_eq!(actor.get_state_field("count").and_then(|v| v.as_int()), Some(2));
+            assert_eq!(
+                actor.get_state_field("count").and_then(|v| v.as_int()),
+                Some(2)
+            );
         }
     }
 
@@ -2788,12 +2821,16 @@ match { a: 2, b: 9 } with {
             .grain_registry
             .get_mut("Counter")
             .unwrap()
-            .dehydrate_policy = DehydratePolicy { idle_ms: 0, allow_dehydrate: true };
+            .dehydrate_policy = DehydratePolicy {
+            idle_ms: 0,
+            allow_dehydrate: true,
+        };
 
         let grain_id = GrainId::new("Counter", "delta");
         let stable_id = grain_actor_id(&grain_id);
 
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
         rt.borrow_mut().actors.get_mut(&stable_id).unwrap().pin();
 
@@ -2826,15 +2863,24 @@ match { a: 2, b: 9 } with {
             .grain_registry
             .get_mut("Counter")
             .unwrap()
-            .dehydrate_policy = DehydratePolicy { idle_ms: 0, allow_dehydrate: true };
+            .dehydrate_policy = DehydratePolicy {
+            idle_ms: 0,
+            allow_dehydrate: true,
+        };
 
         let grain_id = GrainId::new("Counter", "epsilon");
         let stable_id = grain_actor_id(&grain_id);
 
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
         assert_eq!(
-            rt.borrow().actors.get(&stable_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt.borrow()
+                .actors
+                .get(&stable_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(1)
         );
 
@@ -2842,8 +2888,14 @@ match { a: 2, b: 9 } with {
         rt.borrow_mut().dehydrate_idle_grains();
         {
             let rt_ref = rt.borrow();
-            let actor = rt_ref.actors.get(&stable_id).expect("grain still resident before eviction");
-            assert!(actor.is_hibernated(), "grain should be hibernated before eviction");
+            let actor = rt_ref
+                .actors
+                .get(&stable_id)
+                .expect("grain still resident before eviction");
+            assert!(
+                actor.is_hibernated(),
+                "grain should be hibernated before eviction"
+            );
         }
 
         let evicted = rt.borrow_mut().evict_hibernated_grains(None);
@@ -2866,12 +2918,19 @@ match { a: 2, b: 9 } with {
         }
 
         // Sending again re-hydrates from the persisted snapshot and processes the message.
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
         {
             let rt_ref = rt.borrow();
-            let actor = rt_ref.actors.get(&stable_id).expect("grain should re-hydrate");
-            assert!(!actor.is_hibernated(), "grain should be active after re-hydration");
+            let actor = rt_ref
+                .actors
+                .get(&stable_id)
+                .expect("grain should re-hydrate");
+            assert!(
+                !actor.is_hibernated(),
+                "grain should be active after re-hydration"
+            );
             assert_eq!(
                 actor.get_state_field("count").and_then(|v| v.as_int()),
                 Some(2),
@@ -2899,12 +2958,16 @@ match { a: 2, b: 9 } with {
             .grain_registry
             .get_mut("Counter")
             .unwrap()
-            .dehydrate_policy = DehydratePolicy { idle_ms: 0, allow_dehydrate: true };
+            .dehydrate_policy = DehydratePolicy {
+            idle_ms: 0,
+            allow_dehydrate: true,
+        };
 
         let grain_id = GrainId::new("Counter", "zeta");
         let stable_id = grain_actor_id(&grain_id);
 
-        rt.borrow_mut().send_to_grain(grain_id.clone(), "inc", vec![], 0);
+        rt.borrow_mut()
+            .send_to_grain(grain_id.clone(), "inc", vec![], 0);
         rt.borrow_mut().run_scheduler();
         let behavior_id = rt.borrow().behavior_id_for(stable_id, "inc").unwrap();
 
@@ -2913,10 +2976,16 @@ match { a: 2, b: 9 } with {
         assert!(!rt.borrow().actors.contains_key(&stable_id));
 
         // send_message_by_id should detect the evicted grain and re-hydrate.
-        rt.borrow_mut().send_message_by_id(stable_id, behavior_id, &[]);
+        rt.borrow_mut()
+            .send_message_by_id(stable_id, behavior_id, &[]);
         rt.borrow_mut().run_scheduler();
         assert_eq!(
-            rt.borrow().actors.get(&stable_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt.borrow()
+                .actors
+                .get(&stable_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(2)
         );
     }
@@ -2938,7 +3007,10 @@ match { a: 2, b: 9 } with {
             .grain_registry
             .get_mut("Counter")
             .unwrap()
-            .dehydrate_policy = DehydratePolicy { idle_ms: 0, allow_dehydrate: true };
+            .dehydrate_policy = DehydratePolicy {
+            idle_ms: 0,
+            allow_dehydrate: true,
+        };
 
         let g1 = GrainId::new("Counter", "one");
         let g2 = GrainId::new("Counter", "two");
@@ -2962,8 +3034,14 @@ match { a: 2, b: 9 } with {
         // max_evict=1 should evict only g2 (g1 is pinned).
         let evicted = rt.borrow_mut().evict_hibernated_grains(Some(1));
         assert_eq!(evicted, 1);
-        assert!(rt.borrow().actors.contains_key(&s1), "pinned grain must remain resident");
-        assert!(!rt.borrow().actors.contains_key(&s2), "unpinned grain should be evicted");
+        assert!(
+            rt.borrow().actors.contains_key(&s1),
+            "pinned grain must remain resident"
+        );
+        assert!(
+            !rt.borrow().actors.contains_key(&s2),
+            "unpinned grain should be evicted"
+        );
     }
 
     #[test]
@@ -3003,7 +3081,10 @@ match { a: 2, b: 9 } with {
         let stable_id = grain_actor_id(&GrainId::new("Counter", "k1"));
         let rt_ref = rt.borrow();
         let actor = rt_ref.actors.get(&stable_id).expect("grain should hydrate");
-        assert_eq!(actor.get_state_field("count").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -3088,10 +3169,7 @@ match { a: 2, b: 9 } with {
 
         rt.borrow_mut().run_scheduler();
         let rt_ref = rt.borrow();
-        let actor = rt_ref
-            .actors
-            .get(&stable_id)
-            .expect("grain should hydrate");
+        let actor = rt_ref.actors.get(&stable_id).expect("grain should hydrate");
         assert_eq!(
             actor.get_state_field("count").and_then(|v| v.as_int()),
             Some(2),

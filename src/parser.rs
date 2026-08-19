@@ -2721,7 +2721,10 @@ impl Parser {
                         let args = self.parse_arg_list()?;
                         if args.len() != 2 {
                             return Err(NuError::parse_error(
-                                format!("Grain(...) expects exactly 2 arguments, got {}", args.len()),
+                                format!(
+                                    "Grain(...) expects exactly 2 arguments, got {}",
+                                    args.len()
+                                ),
                                 self.current_span(),
                             ));
                         }
@@ -2729,7 +2732,8 @@ impl Parser {
                             Expr::Literal(Literal::String(s), _) => s.clone(),
                             _ => {
                                 return Err(NuError::parse_error(
-                                    "Grain(...) first argument must be a string literal".to_string(),
+                                    "Grain(...) first argument must be a string literal"
+                                        .to_string(),
                                     self.current_span(),
                                 ))
                             }
@@ -6552,9 +6556,7 @@ mod tests {
         let expr = parse_expr(r#"Grain("User", "u1")"#).unwrap();
         match expr {
             Expr::GrainRef {
-                grain_type,
-                key,
-                ..
+                grain_type, key, ..
             } => {
                 assert_eq!(grain_type, "User");
                 match key.as_ref() {

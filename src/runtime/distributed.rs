@@ -523,7 +523,14 @@ impl AddressResolver {
     pub fn parse_packet(
         &mut self,
         packet: Packet,
-    ) -> Option<(u64, String, Message, Vec<String>, Vec<(u64, Vec<u8>)>, Option<[u8; 32]>)> {
+    ) -> Option<(
+        u64,
+        String,
+        Message,
+        Vec<String>,
+        Vec<(u64, Vec<u8>)>,
+        Option<[u8; 32]>,
+    )> {
         match packet {
             Packet::ActorMessage {
                 target_actor,
@@ -548,7 +555,14 @@ impl AddressResolver {
                     priority,
                     trace_id,
                 };
-                Some((target_actor, behavior_name, msg, string_table, object_table, content_hash))
+                Some((
+                    target_actor,
+                    behavior_name,
+                    msg,
+                    string_table,
+                    object_table,
+                    content_hash,
+                ))
             }
             // Non-actor-message packets are not parsed here.
             _ => None,
@@ -1192,7 +1206,13 @@ pub fn process_network_packets(
                             // Retry any messages that were waiting for this bytecode
                             let pending = runtime.pending_fetched_messages.remove(&content_hash);
                             if let Some(messages) = pending {
-                                for (target_actor, behavior_name, mut msg, string_table, object_table) in messages
+                                for (
+                                    target_actor,
+                                    behavior_name,
+                                    mut msg,
+                                    string_table,
+                                    object_table,
+                                ) in messages
                                 {
                                     // Hot-reload the newly cached module into the target actor
                                     let cached = match runtime.behavior_cache.get(&content_hash) {
@@ -1245,7 +1265,11 @@ pub fn process_network_packets(
                                         );
                                         continue;
                                     }
-                                    if !intern_wire_objects(runtime, &mut payload_vec, &object_table) {
+                                    if !intern_wire_objects(
+                                        runtime,
+                                        &mut payload_vec,
+                                        &object_table,
+                                    ) {
                                         notify_delivery_failed(
                                             runtime,
                                             msg.sender,
@@ -1406,8 +1430,14 @@ pub fn process_network_packets(
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             _ => {
-                if let Some((target_actor, behavior_name, mut msg, string_table, object_table, content_hash)) =
-                    resolver.parse_packet(incoming.packet)
+                if let Some((
+                    target_actor,
+                    behavior_name,
+                    mut msg,
+                    string_table,
+                    object_table,
+                    content_hash,
+                )) = resolver.parse_packet(incoming.packet)
                 {
                     // Record the wire sender (bare id → node) so the
                     // recipient can reply BY VALUE (RFC-0007): a later
@@ -2146,7 +2176,7 @@ mod tests {
             MessagePriority::Normal,
             vec!["hello".to_string()],
             vec![], // object_table
-            None, // content_hash
+            None,   // content_hash
             Some(trace.to_string()),
         );
         match packet {
@@ -2199,7 +2229,8 @@ mod tests {
         let result = resolver.parse_packet(packet);
         assert!(result.is_some());
 
-        let (target, behavior_name, msg, string_table, _object_table, content_hash) = result.unwrap();
+        let (target, behavior_name, msg, string_table, _object_table, content_hash) =
+            result.unwrap();
         assert_eq!(target, 77);
         assert_eq!(behavior_name, "inc");
         assert_eq!(content_hash, None);
