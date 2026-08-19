@@ -5,11 +5,16 @@
 //! on a background thread.  The scheduler thread periodically calls
 //! [`Runtime::publish_metrics`] to push the latest snapshot into a shared
 //! buffer; the server thread serves whichever snapshot it last received.
+#[cfg(feature = "tcp")]
 use std::net::TcpListener;
 
+#[cfg(feature = "tcp")]
 use std::io::Write;
+#[cfg(feature = "tcp")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "tcp")]
 use std::thread::{self, JoinHandle};
+#[cfg(feature = "tcp")]
 use std::time::Duration;
 
 use super::MetricsSnapshot;
@@ -19,12 +24,14 @@ use super::MetricsSnapshot;
 /// Returns a handle and a shared buffer.  The caller should periodically
 /// call `publish(snapshot)` to push the latest snapshot; the server
 /// thread serves the most recently published snapshot.
+#[cfg(feature = "tcp")]
 pub struct MetricsServer {
     #[allow(dead_code)]
     handle: JoinHandle<()>,
     buffer: Arc<Mutex<String>>,
 }
 
+#[cfg(feature = "tcp")]
 impl MetricsServer {
     /// Bind and start serving on `0.0.0.0:<port>`.
     pub fn start(port: u16) -> std::io::Result<Self> {
@@ -188,4 +195,22 @@ impl MetricsSnapshot {
 
         out
     }
+}
+
+#[cfg(not(feature = "tcp"))]
+pub struct MetricsServer {
+    // Dummy: the `tcp` feature is disabled, so no server can start.
+}
+
+#[cfg(not(feature = "tcp"))]
+impl MetricsServer {
+    pub fn start(_port: u16) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "metrics server disabled (feature 'tcp' not enabled)",
+        ))
+    }
+
+    /// Publish a new snapshot (no-op: no server is running).
+    pub fn publish(&self, _text: String) {}
 }

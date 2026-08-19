@@ -4,17 +4,24 @@
 //! Handlers are non-capturing `fn(String) -> String` — no closures with env.
 //! Status is always 200; Content-Type is always text/plain.
 
+#[cfg(feature = "tcp")]
 use std::io::{Read, Write};
+#[cfg(feature = "tcp")]
 use std::net::{TcpListener, TcpStream};
+#[cfg(feature = "tcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "tcp")]
 use std::sync::Arc;
+#[cfg(feature = "tcp")]
 use std::time::Duration;
 
 use crate::bytecode::CodeModule;
+#[cfg(feature = "tcp")]
 use crate::vm::VM;
 
 /// HTTP method — must match the Nulang-level variant type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "tcp")]
 pub enum HttpMethod {
     Get,
     Post,
@@ -25,6 +32,7 @@ pub enum HttpMethod {
     Options,
 }
 
+#[cfg(feature = "tcp")]
 impl HttpMethod {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -41,6 +49,7 @@ impl HttpMethod {
 }
 
 #[allow(dead_code)] // Phase 2: method/path/headers will be passed to handlers
+#[cfg(feature = "tcp")]
 pub struct HttpRequest {
     pub method: HttpMethod,
     pub path: String,
@@ -48,6 +57,7 @@ pub struct HttpRequest {
     pub body: Vec<u8>,
 }
 
+#[cfg(feature = "tcp")]
 pub struct HttpResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -56,6 +66,7 @@ pub struct HttpResponse {
 
 /// Manages the background HTTP listener thread.
 /// Stored on Runtime; `HttpServerState::bind()` spawns the thread.
+#[cfg(feature = "tcp")]
 pub struct HttpServerState {
     /// Listen port (the actual port, after bind — useful when port 0 is used).
     pub port: u16,
@@ -69,6 +80,7 @@ pub struct HttpServerState {
     listener_thread: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "tcp")]
 impl std::fmt::Debug for HttpServerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // JoinHandle is not Debug; print the fields that are.
@@ -80,6 +92,7 @@ impl std::fmt::Debug for HttpServerState {
     }
 }
 
+#[cfg(feature = "tcp")]
 impl Drop for HttpServerState {
     fn drop(&mut self) {
         self.shutdown_flag.store(true, Ordering::Relaxed);
@@ -89,6 +102,7 @@ impl Drop for HttpServerState {
     }
 }
 
+#[cfg(feature = "tcp")]
 impl HttpServerState {
     const MAX_BODY_SIZE: usize = 1_048_576; // 1 MB
 
@@ -323,5 +337,25 @@ impl HttpServerState {
                 body: b"Internal server error".to_vec(),
             },
         }
+    }
+}
+
+#[cfg(not(feature = "tcp"))]
+pub struct HttpServerState {
+    /// Listen port (stub: always 0; `bind` fails without the `tcp` feature).
+    pub port: u16,
+}
+
+#[cfg(not(feature = "tcp"))]
+impl HttpServerState {
+    pub fn bind(
+        _port: u16,
+        _handler_module: CodeModule,
+        _handler_func_idx: usize,
+    ) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "HTTP server disabled (feature 'tcp' not enabled)",
+        ))
     }
 }
