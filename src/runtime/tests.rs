@@ -121,11 +121,7 @@ fn test_metrics_snapshot_topology_and_crdt() {
 
     // CRDT replica with a change that hasn't been synced.
     rt.crdt_manager = Some(crate::runtime::crdt_manager::CrdtManager::new(42));
-    let (_, mut counter) = rt
-        .crdt_manager
-        .as_mut()
-        .unwrap()
-        .create_gcounter();
+    let (_, mut counter) = rt.crdt_manager.as_mut().unwrap().create_gcounter();
     counter.increment();
 
     let snap = rt.metrics_snapshot();
@@ -159,13 +155,28 @@ fn test_render_topology_nested_supervisors() {
     let top_id = rt.create_supervisor("top", RestartStrategy::OneForAll);
     let mid_id = rt.create_supervisor("mid", RestartStrategy::OneForOne);
     let leaf_id = rt.spawn_actor(Box::new(|| vec![]));
-    rt.supervise_child(top_id, ChildSpec::new("m", RestartPolicy::Permanent), mid_id);
-    rt.supervise_child(mid_id, ChildSpec::new("l", RestartPolicy::Transient), leaf_id);
+    rt.supervise_child(
+        top_id,
+        ChildSpec::new("m", RestartPolicy::Permanent),
+        mid_id,
+    );
+    rt.supervise_child(
+        mid_id,
+        ChildSpec::new("l", RestartPolicy::Transient),
+        leaf_id,
+    );
 
     let text = rt.render_topology();
-    let top_pos = text.find("supervisor top [OneForAll]").expect("top rendered");
-    let mid_pos = text.find("supervisor mid [OneForOne]").expect("mid rendered");
-    assert!(text.contains(&format!("actor {leaf_id} (l)")), "leaf rendered: {text}");
+    let top_pos = text
+        .find("supervisor top [OneForAll]")
+        .expect("top rendered");
+    let mid_pos = text
+        .find("supervisor mid [OneForOne]")
+        .expect("mid rendered");
+    assert!(
+        text.contains(&format!("actor {leaf_id} (l)")),
+        "leaf rendered: {text}"
+    );
     assert!(mid_pos > top_pos, "mid must nest under top:\n{text}");
 }
 

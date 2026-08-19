@@ -190,7 +190,10 @@ impl MetricsSnapshot {
         // Supervision topology: total supervisors + per-supervisor child count.
         out.push_str("# HELP nulang_supervisors_total Number of supervisors\n");
         out.push_str("# TYPE nulang_supervisors_total gauge\n");
-        out.push_str(&format!("nulang_supervisors_total {}\n", self.supervisors.len()));
+        out.push_str(&format!(
+            "nulang_supervisors_total {}\n",
+            self.supervisors.len()
+        ));
         out.push_str("# HELP nulang_supervisor_children Supervisor child actor count\n");
         out.push_str("# TYPE nulang_supervisor_children gauge\n");
         for sup in &self.supervisors {
@@ -207,10 +210,11 @@ impl MetricsSnapshot {
         out.push_str(&format!("nulang_crdt_entries {}\n", self.crdt.entries));
         out.push_str("# HELP nulang_crdt_ops_synced Total CRDT ops shipped\n");
         out.push_str("# TYPE nulang_crdt_ops_synced counter\n");
-        out.push_str(&format!("nulang_crdt_ops_synced {}\n", self.crdt.ops_synced));
-        out.push_str(
-            "# HELP nulang_crdt_unsynced_deltas CRDT entries with unsynced changes\n",
-        );
+        out.push_str(&format!(
+            "nulang_crdt_ops_synced {}\n",
+            self.crdt.ops_synced
+        ));
+        out.push_str("# HELP nulang_crdt_unsynced_deltas CRDT entries with unsynced changes\n");
         out.push_str("# TYPE nulang_crdt_unsynced_deltas gauge\n");
         out.push_str(&format!(
             "nulang_crdt_unsynced_deltas {}\n",
@@ -224,11 +228,8 @@ impl MetricsSnapshot {
     /// supervision tree (supervisors nested by parent link, supervised
     /// actors as leaves). Used for a terminal topology view.
     pub fn render_topology_text(&self) -> String {
-        let sup_by_id: HashMap<u64, &super::SupervisorMetric> = self
-            .supervisors
-            .iter()
-            .map(|s| (s.id, s))
-            .collect();
+        let sup_by_id: HashMap<u64, &super::SupervisorMetric> =
+            self.supervisors.iter().map(|s| (s.id, s)).collect();
 
         let mut out = String::new();
         out.push_str(&format!(
@@ -273,10 +274,15 @@ impl MetricsSnapshot {
         out: &mut String,
     ) {
         let indent = "  ".repeat(depth);
-        out.push_str(&format!("{}supervisor {} [{}]\n", indent, sup.name, sup.strategy));
+        out.push_str(&format!(
+            "{}supervisor {} [{}]\n",
+            indent, sup.name, sup.strategy
+        ));
         for child in &sup.children {
             match sup_by_id.get(&child.actor_id) {
-                Some(child_sup) => Self::render_supervisor_node(child_sup, depth + 1, sup_by_id, out),
+                Some(child_sup) => {
+                    Self::render_supervisor_node(child_sup, depth + 1, sup_by_id, out)
+                }
                 None => {
                     out.push_str(&format!(
                         "{}  actor {} ({})\n",
