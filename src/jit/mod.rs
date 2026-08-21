@@ -99,6 +99,9 @@ pub struct JitSession {
     /// is ample: a region crosses HOT_THRESHOLD (1000) and compiles long
     /// before a counter could wrap.
     hot_counts: Vec<Vec<u32>>,
+    /// Cache of the last compiled PC we probed, to avoid repeated HashMap lookups
+    /// for sequential execution in hot loops.
+    last_compiled_probe: Option<(usize, usize)>,
     /// Regions compiled through the type-directed (guard-stripped) path in
     /// `typed_compiler`, i.e. where inferred register types were available.
     typed_regions: FxHashSet<(usize, usize)>,
@@ -148,6 +151,7 @@ impl JitSession {
             module,
             compiled: FxHashMap::default(),
             hot_counts: Vec::new(),
+            last_compiled_probe: None,
             typed_regions: FxHashSet::default(),
             builder_context: FunctionBuilderContext::new(),
             tier2_counters: FxHashMap::default(),
@@ -591,13 +595,19 @@ impl crate::backends::JitBackend for JitSession {
     }
 
     fn probe_and_maybe_hot(&mut self, module_idx: usize, pc: usize) -> bool {
-        // Single inlined probe — the per-step interpreter cost when the JIT
-        // is enabled. `is_compiled` and `record_and_check_hot` bodies are
-        // inlined here (not called through `dyn`) so the common cold case is
-        // a couple of bounds checks + a flat-array increment, no hash.
-        if !self.compiled.is_empty() && self.compiled.contains_key(&(module_idx, pc)) {
+        // Fast path: check if this is the last compiled PC we saw
+        // This avoids HashMap lookups for sequential execution in hot loops
+        if self.last_compiled_probe == Some((module_idx, pc)) {
             return true;
         }
+        
+        // Check compiled map
+        if !self.compiled.is_empty() && self.compiled.contains_key(&(module_idx, pc)) {
+            self.last_compiled_probe = Some((module_idx, pc));
+            return true;
+        }
+        
+        // Increment counter (cheap operation)
         if module_idx >= self.hot_counts.len() {
             self.hot_counts.resize(module_idx + 1, Vec::new());
         }
@@ -608,6 +618,8 @@ impl crate::backends::JitBackend for JitSession {
         }
         let count = &mut row[pc];
         *count += 1;
+        
+        // Return true if just became hot (will trigger compilation)
         u64::from(*count) >= HOT_THRESHOLD
     }
 

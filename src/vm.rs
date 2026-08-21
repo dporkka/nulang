@@ -3476,9 +3476,7 @@ impl VM {
             })?;
         let mut new_frame = Frame::new(Some(frame_idx), module_idx);
         new_frame.pc = code_offset;
-        for i in 0..(argc as usize).min(256) {
-            new_frame.regs[i] = self.frames[frame_idx].regs[i];
-        }
+        new_frame.regs[..argc as usize].copy_from_slice(&self.frames[frame_idx].regs[..argc as usize]);
         new_frame.return_dst = dst;
         new_frame.closure_env = closure_env;
         self.frames.push(new_frame);
@@ -3813,16 +3811,19 @@ impl VM {
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
         // Default 10M steps — long-running actors (servers, processors) may need more.
+        // Check every 64 steps to reduce branch overhead (safety limit, not precise).
         self.step_count += 1;
-        let limit = Self::step_limit();
-        if self.step_count > limit {
-            return Err(NuError::VMError {
-                msg: format!(
-                    "Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.",
-                    self.step_count
-                ),
-                span: Span::default(),
-            });
+        if self.step_count & 63 == 0 {
+            let limit = Self::step_limit();
+            if self.step_count > limit {
+                return Err(NuError::VMError {
+                    msg: format!(
+                        "Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.",
+                        self.step_count
+                    ),
+                    span: Span::default(),
+                });
+            }
         }
 
         let frame_idx = self.current_frame_idx.ok_or_else(|| NuError::VMError {
@@ -3840,7 +3841,7 @@ impl VM {
             return Ok(());
         }
 
-        // Fetch instruction
+        // Fetch instruction - cache frame and module references to avoid repeated indexing
         let module_idx = self.frames[frame_idx].module_idx;
         let pc = self.frames[frame_idx].pc;
         let instr = {
@@ -3965,7 +3966,16 @@ impl VM {
                     })?;
                 let mut new_frame = Frame::new(Some(frame_idx), module_idx);
                 new_frame.pc = code_offset;
-                new_frame.regs = self.frames[frame_idx].regs;
+                // Bounded copy: only copy registers the callee will read.
+                // local_count covers LOCAL_BASE + all callee locals, which
+                // includes the staging zone (r0..r11) where call args live.
+                let local_count = self.modules[module_idx]
+                    .function_local_counts
+                    .get(func_idx)
+                    .copied()
+                    .unwrap_or(256);
+                let copy_n = local_count.min(256);
+                new_frame.regs[..copy_n].copy_from_slice(&self.frames[frame_idx].regs[..copy_n]);
                 new_frame.return_dst = dst;
                 new_frame.closure_env = closure_env;
                 self.frames.push(new_frame);

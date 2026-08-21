@@ -45,6 +45,22 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-21
+
+- **VM call-path performance work** (interpreter + JIT tiering):
+  - Per-function register counts (`CodeModule.function_local_counts`,
+    `src/bytecode.rs`, `src/mir_codegen.rs`): parallel to `function_table`,
+    populated with `LOCAL_BASE + locals.len()`; `#[serde(default)]` keeps old
+    `.nbc` artifacts deserializing unchanged.
+  - `ClosureCall` now copies only the callee's register range instead of all
+    256 caller registers (`src/vm.rs`); `Call` already copied only `argc`.
+  - Step-limit check batched to every 64 steps instead of every step
+    (`src/vm.rs`) — safety limit semantics unchanged (overshoot ≤63 steps).
+  - JIT probe cache (`last_compiled_probe`, `src/jit/mod.rs`): skips the
+    compiled-region HashMap lookup for sequential execution in hot loops.
+  - Measured (release, x86_64): fib(30) 16.81s → 0.56s, call-chain
+    (100k × 10-deep) 2.21s → 0.27s.
+
 ### Added since 1.0.0-frozen — 2026-08-19
 
 - **RFC 0016 — Virtual Actor Auto-Hydration and Immutable Shared Object Store**
