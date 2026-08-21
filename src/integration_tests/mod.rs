@@ -11635,9 +11635,8 @@ match { a: 2, b: 9 } with {
         ast.decls = pd;
 
         // 4. Resolve imports (stdlib::json, stdlib::datetime, etc.)
-        let base_dir = path.parent().unwrap_or(Path::new("."));
         let mut visited = HashSet::new();
-        crate::resolver::resolve_imports(&mut ast, base_dir, &mut visited)?;
+        crate::resolver::resolve_imports(&mut ast, path, &mut visited)?;
 
         // 5. Type check
         let mut type_checker = TypeChecker::new();

@@ -240,6 +240,18 @@ pub enum Effect {
     Env,
     Process,
     System,
+    /// Web framework: produce HTML output (server-side rendering / static emit).
+    Render,
+    /// Web framework: read the current HTTP request.
+    Request,
+    /// Web framework: write the HTTP response.
+    Respond,
+    /// Web framework: SSE / WebSocket push (subsumes Net at runtime).
+    Realtime,
+    /// Web framework: browser-only DOM / signal operations.
+    Client,
+    /// Web framework: built-in host operations (route, html, redirect, ...).
+    Web,
     UserDefined(String),
 }
 
@@ -269,7 +281,45 @@ impl std::fmt::Display for Effect {
             Effect::Env => write!(f, "Env"),
             Effect::Process => write!(f, "Process"),
             Effect::System => write!(f, "System"),
+            Effect::Render => write!(f, "Render"),
+            Effect::Request => write!(f, "Request"),
+            Effect::Respond => write!(f, "Respond"),
+            Effect::Realtime => write!(f, "Realtime"),
+            Effect::Client => write!(f, "Client"),
+            Effect::Web => write!(f, "Web"),
             Effect::UserDefined(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+/// Compile-time placement hint for web-framework functions.
+/// Stored on HIR/MIR function metadata; default inference is based on the
+/// function's effect row and purity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Placement {
+    /// Static site generation: no request effects, pure render.
+    Static,
+    /// Server-side request handler.
+    Server,
+    /// Edge compute (CDN worker).
+    Edge,
+    /// Browser-only client code.
+    Client,
+    /// Actor-based backend.
+    Actor,
+    /// Workflow (durable step function).
+    Workflow,
+}
+
+impl std::fmt::Display for Placement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Placement::Static => write!(f, "static"),
+            Placement::Server => write!(f, "server"),
+            Placement::Edge => write!(f, "edge"),
+            Placement::Client => write!(f, "client"),
+            Placement::Actor => write!(f, "actor"),
+            Placement::Workflow => write!(f, "workflow"),
         }
     }
 }

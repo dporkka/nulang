@@ -2908,6 +2908,7 @@ mod tests {
                 ret: crate::types::Type::unit(),
                 effect: crate::types::EffectRow::empty(),
                 cap: crate::types::Capability::Ref,
+                placement: None,
                 body: {
                     let mut b = crate::hir::Body::new();
                     b.push(crate::hir::Stmt::Let {
@@ -2951,6 +2952,7 @@ mod tests {
             ret: crate::types::Type::int(),
             effect: crate::types::EffectRow::empty(),
             cap: crate::types::Capability::Ref,
+            placement: None,
             body: {
                 let mut b = crate::hir::Body::new();
                 b.set_terminator(crate::hir::Terminator::Yield(crate::hir::Operand::Var(
@@ -2981,6 +2983,7 @@ mod tests {
             ret: crate::types::Type::int(),
             effect: crate::types::EffectRow::empty(),
             cap: crate::types::Capability::Ref,
+            placement: None,
             body: {
                 let mut b = crate::hir::Body::new();
                 b.set_terminator(crate::hir::Terminator::Yield(crate::hir::Operand::Var(
