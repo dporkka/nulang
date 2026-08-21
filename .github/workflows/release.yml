@@ -97,7 +97,15 @@ jobs:
         run: cargo test --release
 
       - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/nulang
+        run: |
+          # The host strip cannot process a cross-compiled aarch64 ELF;
+          # use the cross binutils strip (from gcc-aarch64-linux-gnu).
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            STRIP=aarch64-linux-gnu-strip
+          else
+            STRIP=strip
+          fi
+          $STRIP target/${{ matrix.target }}/release/nulang
 
       - name: Package binary
         run: |
