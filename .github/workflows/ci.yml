@@ -52,7 +52,7 @@ jobs:
           files: lcov.info
 
       - name: Gate (forbidden patterns + zero warnings)
-        run: python3 verify_implementation.py
+        run: python3 scripts/verify_implementation.py
 
   # -----------------------------------------------------------------------
   # Release build — catches optimization-only errors
