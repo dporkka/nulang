@@ -27,6 +27,9 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: nulang-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: nulang-windows-x86_64
     permissions:
       contents: write
     steps:
@@ -72,6 +75,13 @@ jobs:
           echo "OPENSSL_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
 
+      - name: Install Windows system dependencies
+        if: runner.os == 'Windows'
+        # Pin pyo3 to the interpreter on PATH (hostedtoolcache Python).
+        # No OpenSSL needed: native-tls uses SChannel on Windows.
+        run: |
+          echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -97,6 +107,9 @@ jobs:
         run: cargo test --release
 
       - name: Strip binary
+        # No strip on Windows: the MSVC toolchain has no equivalent
+        # single-step strip, and the binary is already release-sized.
+        if: runner.os != 'Windows'
         run: |
           # The host strip cannot process a cross-compiled aarch64 ELF;
           # use the cross binutils strip (from gcc-aarch64-linux-gnu).
@@ -108,9 +121,13 @@ jobs:
           $STRIP target/${{ matrix.target }}/release/nulang
 
       - name: Package binary
+        # bash shell: the default pwsh on Windows runners cannot run the
+        # POSIX commands below (Git Bash ships with the runner image).
+        shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/nulang dist/${{ matrix.artifact }}
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN=nulang.exe; else BIN=nulang; fi
+          cp target/${{ matrix.target }}/release/$BIN dist/${{ matrix.artifact }}
           tar czf dist/${{ matrix.artifact }}.tar.gz -C dist ${{ matrix.artifact }}
           sha256sum dist/${{ matrix.artifact }}.tar.gz > dist/${{ matrix.artifact }}.tar.gz.sha256
 
