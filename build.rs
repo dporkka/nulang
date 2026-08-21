@@ -11,6 +11,14 @@ fn main() {
         return;
     }
 
+    // Cross-compilation: the host libpython is the wrong architecture and
+    // must not be linked into the target binary. pyo3's cross config
+    // (PYO3_CROSS_LIB_DIR / sysconfigdata) handles target linking instead.
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if !target_arch.is_empty() && target_arch != std::env::consts::ARCH {
+        return;
+    }
+
     // On some Linux distributions (e.g. Fedora) the libpython3.X.so symlink
     // installed by the -devel package is missing while libpython3.X.so.1.0 is
     // present. PyO3 emits -lpython3.X and the linker fails because it cannot
