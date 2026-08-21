@@ -2926,7 +2926,6 @@ mod tests {
                     b
                 },
                 public: false,
-                placement: None,
                 span: Span::default(),
             })],
         };
@@ -2972,7 +2971,6 @@ mod tests {
                 b
             },
             public: false,
-            placement: None,
             span: Span::default(),
         };
         let main_fn = crate::hir::FunctionDef {
@@ -3005,7 +3003,6 @@ mod tests {
                 b
             },
             public: false,
-            placement: None,
             span: Span::default(),
         };
         let hir = crate::hir::Module {
