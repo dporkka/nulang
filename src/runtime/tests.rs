@@ -4387,8 +4387,11 @@ fn advance_all(nodes: &mut [&mut Runtime], step: Duration) {
         rt.process_network();
     }
     // Let the real loopback TCP threads deliver packets written this
-    // round before the next round reads them.
-    sleep(Duration::from_millis(2));
+    // round before the next round reads them. 10 ms (was 2 ms): under
+    // heavy CI load the reader threads can be delayed past the virtual
+    // heartbeat deadline, making heartbeats appear lost and breaking
+    // convergence (observed flake: 5-node split-brain test).
+    sleep(Duration::from_millis(10));
 }
 
 /// The status of `node` in `rt`'s cluster view, if known.
@@ -4732,7 +4735,11 @@ fn test_five_node_cluster_split_brain_detects_and_heals() {
     }
     let step = Duration::from_millis(100);
     let mut converged = false;
-    for _ in 0..300 {
+    // 600 iterations (60 s virtual): convergence normally takes ~10 s
+    // virtual (5 s repair cycle + reciprocal heartbeat confirmation),
+    // but under heavy CI load the real TCP delivery can lag the virtual
+    // clock, so give the budget 2x headroom (observed flake).
+    for _ in 0..600 {
         advance_all(&mut nodes.iter_mut().collect::<Vec<_>>(), step);
         if active_views_converged(&nodes.iter().collect::<Vec<_>>(), &ids) {
             converged = true;
