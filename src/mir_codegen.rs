@@ -270,7 +270,9 @@ impl MirCodegen {
         // Reserve one function-table slot per MIR function; MIR function
         // indices are function-table indices.
         self.module.function_table.resize(mir.functions.len(), 0);
-        self.module.function_local_counts.resize(mir.functions.len(), 0);
+        self.module
+            .function_local_counts
+            .resize(mir.functions.len(), 0);
 
         let mut main_idx = None;
         let mut user_main_idx = None;
@@ -2924,6 +2926,7 @@ mod tests {
                     b
                 },
                 public: false,
+                placement: None,
                 span: Span::default(),
             })],
         };
@@ -2969,6 +2972,7 @@ mod tests {
                 b
             },
             public: false,
+            placement: None,
             span: Span::default(),
         };
         let main_fn = crate::hir::FunctionDef {
@@ -3001,6 +3005,7 @@ mod tests {
                 b
             },
             public: false,
+            placement: None,
             span: Span::default(),
         };
         let hir = crate::hir::Module {
