@@ -50,6 +50,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # dtolnay/rust-toolchain can silently skip the cross-target std when
+      # updating a preinstalled toolchain (observed on macOS runners: host
+      # components only, then "can't find crate for core"). Add the target
+      # explicitly so cross-compilation always has rust-std.
+      - name: Ensure cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
