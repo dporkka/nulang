@@ -869,6 +869,24 @@ fn nulang_exe(args: &[&str]) -> NuResult<()> {
                     .filter(|candidate| candidate.is_file())
             })
         })
+        .or_else(|| {
+            // Coverage runs (`cargo llvm-cov`) use a separate target dir
+            // that has no standalone binary next to the test harness.
+            // Resolve the repo's configured target dir via cargo metadata
+            // (same approach as conformance/run.py) and use its debug bin.
+            let out = std::process::Command::new("cargo")
+                .args(["metadata", "--format-version", "1", "--no-deps"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let meta: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+            let td = meta.get("target_directory")?.as_str()?;
+            let candidate = std::path::Path::new(td).join("debug").join("nulang");
+            candidate.is_file().then_some(candidate)
+        })
         .or_else(|| current_exe.clone())
         .ok_or_else(|| NuError::PackageError {
             msg: "cannot locate nulang executable".to_string(),
