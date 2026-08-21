@@ -47,6 +47,12 @@ two major versions.*
 
 ### Added since 1.0.0-frozen — 2026-08-21
 
+- **Windows x86_64 release binary** (tooling): the release workflow now
+  builds `nulang-windows-x86_64.tar.gz` on `windows-latest`
+  (`x86_64-pc-windows-msvc`). `build.rs` gates its libpython symlink
+  workaround to `cfg(unix)` (the API does not exist on Windows; pyo3
+  links the Python import lib directly there). No OpenSSL needed on
+  Windows — `native-tls` uses SChannel.
 - **VM call-path performance work** (interpreter + JIT tiering):
   - Per-function register counts (`CodeModule.function_local_counts`,
     `src/bytecode.rs`, `src/mir_codegen.rs`): parallel to `function_table`,
