@@ -45,14 +45,21 @@ jobs:
           # into the previous field and break the source.
           printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: %s %s-updates %s-backports %s-security\nComponents: main restricted universe multiverse\nArchitectures: arm64\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' "$CODENAME" "$CODENAME" "$CODENAME" "$CODENAME" | sudo tee /etc/apt/sources.list.d/arm64.sources
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libssl-dev:arm64 python3.12-dev:arm64 pkg-config
+          # libpython3-dev:arm64 only (no python3.12-dev): the python3
+          # metapackage chain triggers an apt resolver conflict on the
+          # runner image (shim-signed/grub bootloader deps). pyo3-ffi
+          # uses pre-generated bindings, so only libpython3.12.so is
+          # needed for linking; the version comes from
+          # PYO3_CROSS_PYTHON_VERSION.
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libssl-dev:arm64 libpython3-dev:arm64 pkg-config
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-          # /usr/lib/python3.12/ holds the target's _sysconfigdata*.py
-          # (pyo3 filters to the aarch64 one); libpython3.12.so is found
-          # via the cross gcc's multiarch default search path.
-          echo "PYO3_CROSS_LIB_DIR=/usr/lib/python3.12/" >> $GITHUB_ENV
+          echo "PYO3_CROSS_PYTHON_VERSION=3.12" >> $GITHUB_ENV
+          # Defensive: ensure the cross linker finds libpython3.12.so in
+          # the multiarch dir even if the cross gcc's default search
+          # omits it.
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-L/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
 
       - name: Install macOS system dependencies
         if: runner.os == 'macOS'
