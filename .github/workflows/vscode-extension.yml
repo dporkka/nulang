@@ -3,6 +3,7 @@ name: VS Code Extension
 on:
   push:
     branches: [main]
+    tags: ['ext-v*']
     paths:
       - 'editors/vscode/**'
       - '.github/workflows/vscode-extension.yml'
@@ -11,8 +12,6 @@ on:
       - 'editors/vscode/**'
       - '.github/workflows/vscode-extension.yml'
   workflow_dispatch:
-  push:
-    tags: ['ext-v*']
 
 env:
   CARGO_TERM_COLOR: always
