@@ -54,6 +54,13 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Tooling',
+          collapsed: true,
+          items: [
+            { label: 'Language Server & Tooling', link: 'tooling/language-server/' },
+          ],
+        },
+        {
           label: 'Language Syntax',
           collapsed: true,
           items: [
