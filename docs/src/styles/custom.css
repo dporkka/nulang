@@ -3,20 +3,20 @@
 
 /* ── nulang.cloud design tokens ── */
 :root {
-  --nu-blue: #4b7bff;
-  --nu-blue-light: #1d4ed8;
+  --nu-blue: #1d4ed8;
+  --nu-blue-light: #1e40af;
   --nu-blue-glow: rgba(75, 123, 255, 0.35);
   --nu-accent: #f38020;
   --nu-accent-high: #c2410c;
   --nu-accent-hover: #9a3412;
-  --nu-bg: #0a0a0b;
-  --nu-surface: #141416;
-  --nu-surface-elevated: #1a1a1d;
-  --nu-border: #2a2a2e;
-  --nu-border-subtle: #1e1e22;
-  --nu-text: #ededef;
-  --nu-text-secondary: #9898a0;
-  --nu-text-tertiary: #7e828c;
+  --nu-bg: #fafaf8;
+  --nu-surface: #ffffff;
+  --nu-surface-elevated: #fafaf8;
+  --nu-border: #e5e3df;
+  --nu-border-subtle: #f2f0ec;
+  --nu-text: #0a0a0a;
+  --nu-text-secondary: #5c6068;
+  --nu-text-tertiary: #6f737b;
 }
 
 :root[data-theme="light"] {
@@ -456,13 +456,10 @@
 
 /* ── Footer ── */
 .site-footer {
-  border-top: 1px solid var(--nu-border);
   padding: 2.5rem 0 1.5rem;
   margin-top: 4rem;
   text-align: center;
-  background:
-    radial-gradient(ellipse 60% 40% at 50% 0%, rgba(75, 123, 255, 0.06), transparent 70%),
-    var(--nu-surface);
+  background: var(--nu-surface);
 }
 
 .footer-links {
@@ -482,7 +479,7 @@
 
 .footer-links a {
   font-size: 0.875rem;
-  color: var(--nu-text-secondary);
+  color: var(--nu-text);
   text-decoration: none;
   transition: color 0.15s ease;
   display: inline-flex;
@@ -502,7 +499,7 @@
 }
 
 .footer-copy a {
-  color: var(--nu-text-secondary);
+  color: var(--nu-text);
   text-decoration: none;
   transition: color 0.15s ease;
 }
