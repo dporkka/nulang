@@ -62,6 +62,13 @@ pub struct PackageSection {
     pub registry: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    /// Resource capabilities the package needs (e.g. `["net"]` for the
+    /// `Http` effect). Forwarded to the compiler as `--with <cap>` by
+    /// `nula build`, `nula test`, and `nula run`, so packages performing
+    /// gated effects (Net, ...) can declare their requirements instead of
+    /// failing the default-deny capability check.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 fn default_entry() -> String {

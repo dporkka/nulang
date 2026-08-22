@@ -851,6 +851,27 @@ fn prepare_package() -> NuResult<PathBuf> {
     Ok(entry)
 }
 
+/// `--with <cap>` argument pairs for the current package's declared
+/// `[package] capabilities` (empty when none are declared or the manifest
+/// can't be loaded). Lets packages that perform gated resource effects
+/// (e.g. `Http` → `net`) pass the default-deny capability check by
+/// declaring their requirements in `Nulang.toml`.
+fn capability_args() -> Vec<String> {
+    let root = match package_root() {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    match Manifest::load(&root) {
+        Ok(m) => m
+            .package
+            .capabilities
+            .iter()
+            .flat_map(|c| ["--with".to_string(), c.clone()])
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Run the current `nulang` executable with `args`, inheriting stdio.
 fn nulang_exe(args: &[&str]) -> NuResult<()> {
     // When running inside `cargo test`, the current executable is the test
@@ -1004,9 +1025,17 @@ fn cmd_build() -> NuResult<()> {
 
     eprintln!("Building {}...", name);
     eprintln!("  Type-checking {}...", entry.display());
-    nulang_exe(&["--check", &entry_str])?;
+    let caps = capability_args();
+    let cap_refs: Vec<&str> = caps.iter().map(|s| s.as_str()).collect();
+    nulang_exe(&[&["--check", &entry_str], &cap_refs[..]].concat())?;
     eprintln!("  Compiling {} to .nbc...", name);
-    nulang_exe(&["--emit-nbc", "--out", &nbc_path_str, &entry_str])?;
+    nulang_exe(
+        &[
+            &["--emit-nbc", "--out", &nbc_path_str, &entry_str],
+            &cap_refs[..],
+        ]
+        .concat(),
+    )?;
     println!("Build succeeded.");
     Ok(())
 }
@@ -1046,7 +1075,9 @@ fn cmd_run() -> NuResult<()> {
     eprintln!("Building and running...");
     let entry = prepare_package()?;
     let entry_str = entry.to_string_lossy().into_owned();
-    nulang_exe(&[&entry_str])
+    let caps = capability_args();
+    let cap_refs: Vec<&str> = caps.iter().map(|s| s.as_str()).collect();
+    nulang_exe(&[&[entry_str.as_str()], &cap_refs[..]].concat())
 }
 
 /// `nula run --watch` (or `nula watch`): build, run, and re-run when source
@@ -1660,6 +1691,7 @@ fn run_test_file(file_path: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate nulang: {}", e))?;
     let mut cmd = Command::new(&exe);
     cmd.arg(file_path);
+    cmd.args(capability_args());
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::piped());
     if std::env::var_os("NULANG_STDLIB").is_none() {
