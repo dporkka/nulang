@@ -297,7 +297,10 @@ mod tests {
             NuError::ffi_error("bad ffi".into(), span).stable_code(),
             Some("E0601")
         );
-        assert_eq!(NuError::Suspended(crate::types::VmSuspension::SignalWait).stable_code(), None);
+        assert_eq!(
+            NuError::Suspended(crate::types::VmSuspension::SignalWait).stable_code(),
+            None
+        );
         assert_eq!(
             NuError::Multiple(vec![NuError::vm_error("x".into(), span)]).stable_code(),
             None
@@ -370,7 +373,10 @@ mod tests {
                 allowed_effects: Some("{}".to_string()),
             };
             let rendered = render(&err, false).expect("should render with source");
-            assert!(rendered.starts_with("[E0301] Error:"), "header: {rendered:?}");
+            assert!(
+                rendered.starts_with("[E0301] Error:"),
+                "header: {rendered:?}"
+            );
             assert!(rendered.contains("perform"));
             assert!(rendered.contains("missing effects: IO"));
             assert!(rendered.contains("allowed effects: {}"));
@@ -388,7 +394,10 @@ mod tests {
                 Some(vec!["counter".to_string()]),
             );
             let rendered = render(&err, false).expect("should render with source");
-            assert!(rendered.starts_with("[E0202] Error:"), "header: {rendered:?}");
+            assert!(
+                rendered.starts_with("[E0202] Error:"),
+                "header: {rendered:?}"
+            );
             assert!(rendered.contains("Unbound variable"));
             assert!(rendered.contains("did you mean one of: counter?"));
         });
@@ -421,8 +430,14 @@ mod tests {
                 NuError::parse_error("Unexpected end of file".to_string(), Span::new(at, at + 1)),
             ]);
             let rendered = render(&errs, false).expect("should render with source");
-            assert!(rendered.contains("[E0101] Error:"), "lex code: {rendered:?}");
-            assert!(rendered.contains("[E0102] Error:"), "parse code: {rendered:?}");
+            assert!(
+                rendered.contains("[E0101] Error:"),
+                "lex code: {rendered:?}"
+            );
+            assert!(
+                rendered.contains("[E0102] Error:"),
+                "parse code: {rendered:?}"
+            );
         });
     }
 }

@@ -75,10 +75,7 @@ fn check_json_unbound_variable_reports_e0202() {
     let d = &diags[0];
     assert_eq!(d["code"], "E0202", "unbound variable code");
     assert_eq!(d["severity"], "error");
-    assert!(d["message"]
-        .as_str()
-        .expect("message")
-        .contains("countr"));
+    assert!(d["message"].as_str().expect("message").contains("countr"));
     let span = &d["span"];
     assert!(span.is_object(), "expected a resolved span: {d:?}");
     assert_eq!(span["line"], 1);
@@ -114,7 +111,11 @@ fn check_json_parse_error_reports_e01xx() {
 #[test]
 fn check_json_passing_source_is_ok_with_empty_diagnostics() {
     let dir = temp_dir("pass");
-    let src = write_temp(&dir, "ok.nula", "fn add(a: Int, b: Int) -> Int = a + b\nfn main() = add(1, 2)\n");
+    let src = write_temp(
+        &dir,
+        "ok.nula",
+        "fn add(a: Int, b: Int) -> Int = a + b\nfn main() = add(1, 2)\n",
+    );
 
     let (code, stdout, _stderr) = run_check_json(&src);
     assert_eq!(code, 0, "passing check must exit 0: {stdout:?}");
@@ -208,7 +209,10 @@ fn nula_build_json_type_error_forwards_diagnostics() {
     assert!(!out.status.success(), "build must fail");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let trimmed = stdout.trim();
-    assert!(trimmed.starts_with('{') && trimmed.ends_with('}'), "stdout JSON only: {stdout:?}");
+    assert!(
+        trimmed.starts_with('{') && trimmed.ends_with('}'),
+        "stdout JSON only: {stdout:?}"
+    );
     let v: serde_json::Value = serde_json::from_str(trimmed)
         .unwrap_or_else(|e| panic!("stdout must parse as JSON: {e}\n{stdout:?}"));
     assert_eq!(v["schema_version"], 1);
@@ -238,7 +242,10 @@ fn nula_test_json_reports_per_test_results() {
     assert!(!out.status.success(), "one failing test → nonzero exit");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let trimmed = stdout.trim();
-    assert!(trimmed.starts_with('{') && trimmed.ends_with('}'), "stdout JSON only: {stdout:?}");
+    assert!(
+        trimmed.starts_with('{') && trimmed.ends_with('}'),
+        "stdout JSON only: {stdout:?}"
+    );
     let v: serde_json::Value = serde_json::from_str(trimmed)
         .unwrap_or_else(|e| panic!("stdout must parse as JSON: {e}\n{stdout:?}"));
     assert_eq!(v["schema_version"], 1);
@@ -259,7 +266,10 @@ fn nula_test_json_reports_per_test_results() {
             );
         }
     }
-    let statuses: Vec<&str> = tests.iter().map(|t| t["status"].as_str().unwrap()).collect();
+    let statuses: Vec<&str> = tests
+        .iter()
+        .map(|t| t["status"].as_str().unwrap())
+        .collect();
     assert!(statuses.contains(&"ok"));
     assert!(statuses.contains(&"failed"));
     // No human test output may leak into stdout.
@@ -271,7 +281,11 @@ fn nula_test_json_reports_per_test_results() {
 #[test]
 fn nula_test_json_all_passing_is_ok() {
     let dir = temp_dir("testpass");
-    scaffold_package(&dir, "fn main() = 1\n", &[("test_a.nula", "fn main() = 1\n")]);
+    scaffold_package(
+        &dir,
+        "fn main() = 1\n",
+        &[("test_a.nula", "fn main() = 1\n")],
+    );
 
     let out = run_nula(&dir, &["test", "--json"]);
     assert!(

@@ -45,6 +45,82 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-22
+
+- **`--json` structured diagnostics** (experimental; `src/json_diagnostics.rs`,
+  schema v1). `nulang --check --json`, `nula build --json`, and
+  `nula test --json` emit machine-readable diagnostics (errors, warnings,
+  spans with line/column) on stdout while progress stays on stderr; without
+  the flag, human output is byte-identical. `tests/cli_json.rs` covers the
+  schema.
+
+### Added since 1.0.0-frozen — 2026-08-21
+
+- **Full-stack web framework** (experimental; `src/web`, `src/runtime`,
+  `src/package`, `src/stdlib/web`). Adds language support, compiler pipeline,
+  and runtime for web applications:
+  - `signal name: Type = init` declarations for reactive state
+    (`src/parser.rs`, `src/ast.rs`, `src/web/reactivity.rs`).
+  - JSX/HTML expression parsing (`<tag attr={expr}>...</tag>`), desugared to
+    `el("tag", attrs, children)` with `text("...")` nodes; reserved keywords
+    may be used as tag/attribute names.
+  - `@nulang/*` package namespace and module graph resolution
+    (`src/web/modules.rs`, `src/web/ir.rs`, `src/package/manifest.rs`).
+  - `nula build --web` IR generation with capability, middleware, route
+    placement, and cloud-config extraction (`src/package/commands.rs`).
+  - Server runtime with SSR, HTML host routing, redirects, and reactive signal
+    hydration (`src/runtime/http_server.rs`, `src/runtime/callbacks.rs`).
+  - Adaptive VM optimizer: cached frame/constant references and inlined hot
+    frame opcodes (`Call`, `TailCall`, `Ret`, `RetVal`, `ClosureCall`) in
+    `src/vm.rs`.
+  - Web standard library modules (`src/stdlib/web/{host,html,realtime,types}.nula`),
+    example apps (`examples/{docs-web,hello-web,chat-web}`), shared packages
+    (`packages/nulang-auth`), and 18 conformance tests
+    (`conformance/behavior/web_*`).
+- **Windows x86_64 release binary** (tooling): the release workflow now
+  builds `nulang-windows-x86_64.tar.gz` on `windows-latest`
+  (`x86_64-pc-windows-msvc`). `build.rs` gates its libpython symlink
+  workaround to `cfg(unix)` (the API does not exist on Windows; pyo3
+  links the Python import lib directly there). No OpenSSL needed on
+  Windows — `native-tls` uses SChannel. `src/main.rs` gates the
+  `--bench` stdout/stderr fd redirection (`dup`/`dup2`/`/dev/null`) to
+  `cfg(unix)` with a no-op fallback on Windows.
+- **VM call-path performance work** (interpreter + JIT tiering):
+  - Per-function register counts (`CodeModule.function_local_counts`,
+    `src/bytecode.rs`, `src/mir_codegen.rs`): parallel to `function_table`,
+    populated with `LOCAL_BASE + locals.len()`; `#[serde(default)]` keeps old
+    `.nbc` artifacts deserializing unchanged.
+  - `ClosureCall` now copies only the callee's register range instead of all
+    256 caller registers (`src/vm.rs`); `Call` already copied only `argc`.
+  - Step-limit check batched to every 64 steps instead of every step
+    (`src/vm.rs`) — safety limit semantics unchanged (overshoot ≤63 steps).
+  - JIT probe cache (`last_compiled_probe`, `src/jit/mod.rs`): skips the
+    compiled-region HashMap lookup for sequential execution in hot loops.
+  - Measured (release, x86_64): fib(30) 16.81s → 0.56s, call-chain
+    (100k × 10-deep) 2.21s → 0.27s.
+
+### Added since 1.0.0-frozen — 2026-08-19
+
+- **RFC 0016 — Virtual Actor Auto-Hydration and Immutable Shared Object Store**
+  (Experimental). Orleans-style virtual actors plus a Ray-style immutable
+  object store for large `val` payloads:
+  - `virtual entity Name(key: Type) { ... }` declares a grain type; messages
+    to `Grain("Name", key)` hydrate the actor on demand
+    (`src/parser.rs`, `src/ast.rs`, `src/typechecker.rs`,
+    `src/runtime/grain.rs`, `src/runtime/mod.rs`).
+  - `Runtime::resolve_or_hydrate_grain` loads snapshots, replays journals, and
+    enqueues the grain; `Runtime::dehydrate_idle_grains` persists and
+    hibernates idle grains; `Runtime::evict_hibernated_grains` reclaims
+    memory while keeping grains addressable.
+  - Built-in `Grain.ref`, `Grain.prewarm`, `Grain.pin`, `Grain.unpin` effects
+    (`src/runtime/mod.rs`, `src/runtime/callbacks.rs`).
+  - Cross-shard grain routing (`stable_id % shard_count`) with identity carried
+    in `CrossShardMsg::DeliverMessage` so owner shards hydrate on first
+    delivery (`src/runtime/mod.rs`, `src/runtime/distributed.rs`).
+  - Per-shard immutable object store (`src/runtime/object_store.rs`) with
+    `TAG_OBJECT` value representation and wire-protocol support for `ObjectRef`
+    handles (`src/value_layout.rs`, `src/runtime/network.rs`).
+
 ### Added since 1.0.0-frozen — 2026-08-15
 
 - **Aether borrow-semantics features (P0–P5).** Six borrows from the

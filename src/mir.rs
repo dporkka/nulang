@@ -80,6 +80,8 @@ pub struct Function {
     /// `(block id, index-within-block)`) that carries a source line, in
     /// emission order. `mir_codegen` translates these to bytecode PCs.
     pub line_table: Vec<((BlockId, usize), u32)>,
+    /// Web framework compile-time placement hint (None = infer from effect row).
+    pub placement: Option<crate::types::Placement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -310,6 +312,8 @@ pub enum RValue {
         behavior_idx: usize,
         init: Vec<(String, RValue)>,
         target_node: Option<LocalId>,
+        /// Spawn-time capability grant tokens (e.g. `Net::TcpOut(h:p)`).
+        capabilities: Vec<String>,
     },
     /// `send actor behavior(args...)`. Fire-and-forget; evaluates to 0.
     Send {
@@ -373,6 +377,7 @@ pub struct FunctionBuilder {
     /// next `set_line`.
     current_line: Option<u32>,
     line_table: Vec<((BlockId, usize), u32)>,
+    placement: Option<crate::types::Placement>,
 }
 
 impl FunctionBuilder {
@@ -390,9 +395,14 @@ impl FunctionBuilder {
             next_block: 0,
             current_line: None,
             line_table: Vec::new(),
+            placement: None,
         };
         builder.create_block(); // entry block
         builder
+    }
+
+    pub fn set_placement(&mut self, placement: Option<crate::types::Placement>) {
+        self.placement = placement;
     }
 
     pub fn add_param(&mut self, name: impl Into<String>, ty: Type) -> LocalId {
@@ -538,6 +548,7 @@ impl FunctionBuilder {
             handler_tables: self.handler_tables,
             type_metadata,
             line_table: self.line_table,
+            placement: self.placement,
         }
     }
 }
@@ -664,6 +675,7 @@ mod tests {
             behavior_idx: 0,
             init: vec![],
             target_node: None,
+            capabilities: vec![],
         };
         let _ = RValue::Send {
             actor: LocalId(0),

@@ -4,9 +4,12 @@
     clippy::missing_transmute_annotations
 )]
 
+pub mod agent;
 pub mod aot;
 pub mod ast;
 pub mod backends;
+#[cfg(test)]
+pub mod benchmarks;
 pub mod bytecode;
 #[cfg(feature = "wasmfx-backend")]
 pub mod cir;
@@ -54,8 +57,6 @@ pub mod resolver;
 pub mod runtime;
 pub mod stdlib;
 #[cfg(test)]
-pub mod benchmarks;
-#[cfg(test)]
 pub mod stress_tests;
 pub mod tool_schema;
 pub mod type_ir;
@@ -73,4 +74,5 @@ pub mod wasm_types;
 pub mod wasmfx_backend;
 #[cfg(feature = "wasmfx-backend")]
 pub mod wasmfx_runtime;
+pub mod web;
 pub mod witgen;

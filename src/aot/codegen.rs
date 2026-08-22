@@ -2911,6 +2911,7 @@ fn compile_rvalue(
             behavior_idx,
             init,
             target_node,
+            capabilities: _,
         } => {
             if target_node.is_some() {
                 return Err(AotCompileError::Unsupported(
@@ -4793,6 +4794,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ai-runtime")]
     fn test_aot_runtime_native_perform_async() {
         // `perform Pipeline.new()` in an AOT-compiled behavior must compile
         // and route through the Runtime's `perform_async` path (the same one
