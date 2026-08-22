@@ -545,6 +545,9 @@ pub enum FunctionAnnotation {
     Backend { kind: ActorBackendKind },
     /// `@derive(eq, ...)` requests synthesized trait helpers on a record type.
     Derive(Vec<String>),
+    /// `@placement(static|server|edge|client|actor|workflow)` marks a web
+    /// framework function's compile-time execution target.
+    Placement(crate::types::Placement),
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +824,13 @@ pub enum Decl {
         type_ann: Option<Type>,
         value: Expr,
         mutable: bool,
+        span: Span,
+    },
+    /// Reactive signal declaration: `signal name: Type = init`
+    Signal {
+        name: String,
+        ty: Type,
+        init: Expr,
         span: Span,
     },
     /// Contextual value declaration: `given name: Type = expr`

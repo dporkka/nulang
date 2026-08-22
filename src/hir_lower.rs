@@ -58,6 +58,16 @@ pub fn lower_module(
     FN_USING_PARAMS.with(|c| *c.borrow_mut() = fn_using);
     FN_DICT_PARAMS.with(|c| *c.borrow_mut() = fn_dict_params);
 
+    let signal_inits: FxHashMap<String, Expr> = ast
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Signal { name, init, .. } => Some((name.clone(), init.clone())),
+            _ => None,
+        })
+        .collect();
+    SIGNAL_INITS.with(|c| *c.borrow_mut() = signal_inits);
+
     let class_tables = crate::typechecker::build_class_tables(ast);
     CURRENT_CLASS_TABLES.with(|cell| {
         *cell.borrow_mut() = Some(class_tables);
@@ -164,7 +174,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             effect,
             cap,
             body,
-            annotations: _,
+            annotations,
             public,
             span,
             ..
@@ -189,6 +199,32 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             for (n, t) in &all_params {
                 param_map.insert(n.clone(), t.clone());
             }
+            let explicit_placement = annotations.iter().find_map(|a| match a {
+                crate::ast::FunctionAnnotation::Placement(p) => Some(*p),
+                _ => None,
+            });
+            // Default placement inference from declared effect row (only when the
+            // user explicitly declared effects; inferred rows remain None here).
+            let inferred_placement =
+                explicit_placement.or_else(|| {
+                    let row = effect.as_ref()?;
+                    let effects: Vec<_> = match row {
+                        crate::types::EffectRow::Closed(effs) => effs.clone(),
+                        crate::types::EffectRow::Open(effs, _) => effs.clone(),
+                    };
+                    if effects.iter().any(|e| {
+                        *e == crate::types::Effect::Request || *e == crate::types::Effect::Web
+                    }) {
+                        Some(crate::types::Placement::Server)
+                    } else if effects.iter().all(|e| {
+                        *e == crate::types::Effect::Render || *e == crate::types::Effect::Web
+                    }) && !effects.is_empty()
+                    {
+                        Some(crate::types::Placement::Static)
+                    } else {
+                        None
+                    }
+                });
             hir::Decl::Function(hir::FunctionDef {
                 name: name.clone(),
                 type_params: type_params.clone(),
@@ -210,6 +246,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                     b
                 },
                 public: *public,
+                placement: inferred_placement,
                 span: *span,
             })
         }
@@ -363,6 +400,15 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                 body,
                 span: *span,
             }
+        }
+        Decl::Signal { .. } => {
+            // Signals are compile-time metadata for the reactivity pass and are
+            // inlined at use sites in `lower_expr`. They produce no HIR decl.
+            return hir::Decl::Import {
+                path: String::new(),
+                items: Vec::new(),
+                span: Span::default(),
+            };
         }
         Decl::Workflow {
             name, items, span, ..
@@ -1182,7 +1228,14 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             let ty = literal_type(lit);
             hir::Operand::Literal(lit.clone(), ty)
         }
-        Expr::Var(name, _span) => hir::Operand::Var(name.clone(), Type::unit()),
+        Expr::Var(name, _span) => {
+            // Inline signal values at compile time; the reactive runtime will
+            // wire mutable updates on the client/server side.
+            if let Some(init) = SIGNAL_INITS.with(|c| c.borrow().get(name).cloned()) {
+                return lower_expr(&init, body);
+            }
+            hir::Operand::Var(name.clone(), Type::unit())
+        }
         Expr::SelfRef(_) => hir::Operand::Var("self".to_string(), Type::unit()),
         Expr::CapAnnotate { expr, .. } => lower_expr(expr, body),
         Expr::Lambda {
@@ -2491,6 +2544,7 @@ thread_local! {
     static GIVEN_BINDINGS: RefCell<FxHashMap<String, ast::Expr>> = RefCell::new(FxHashMap::default());
     static FN_USING_PARAMS: RefCell<FxHashMap<String, Vec<String>>> = RefCell::new(FxHashMap::default());
     static FN_DICT_PARAMS: RefCell<FxHashMap<String, Vec<(String, TypeVar, Vec<String>)>>> = RefCell::new(FxHashMap::default());
+    static SIGNAL_INITS: RefCell<FxHashMap<String, ast::Expr>> = RefCell::new(FxHashMap::default());
 }
 
 // Thread-local: current function's type parameter constraints and params.

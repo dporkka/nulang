@@ -93,6 +93,12 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Python" => Effect::Python,
         "Process" => Effect::Process,
         "System" => Effect::System,
+        "Render" => Effect::Render,
+        "Request" => Effect::Request,
+        "Respond" => Effect::Respond,
+        "Realtime" => Effect::Realtime,
+        "Client" => Effect::Client,
+        "Web" => Effect::Web,
         other => Effect::UserDefined(other.to_string()),
     }
 }
@@ -1140,6 +1146,7 @@ impl EffectChecker {
             self.emit_deprecation_warning(decl);
         }
         self.register_function_rows(&flat)?;
+        self.emit_placement_warnings(&flat);
         for decl in &flat {
             self.check_decl(decl)?;
         }
@@ -1172,6 +1179,59 @@ impl EffectChecker {
             }
         }
         Ok(())
+    }
+
+    /// Emit placement warnings for web-framework functions.
+    /// If a function has no explicit @placement but performs web effects,
+    /// infer a placement from its effect row and warn.
+    fn emit_placement_warnings(&mut self, decls: &[&Decl]) {
+        for decl in decls {
+            let (name, annotations, declared_effect, body_span) = match decl {
+                Decl::Function {
+                    name,
+                    annotations,
+                    effect,
+                    span,
+                    ..
+                } => (name, annotations, effect, span),
+                _ => continue,
+            };
+            let has_explicit = annotations
+                .iter()
+                .any(|a| matches!(a, crate::ast::FunctionAnnotation::Placement(_)));
+            if has_explicit {
+                continue;
+            }
+            let row = match declared_effect {
+                Some(r) => r.clone(),
+                None => self
+                    .fn_rows
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(EffectRow::empty),
+            };
+            let effects: Vec<_> = match &row {
+                EffectRow::Closed(effs) => effs.clone(),
+                EffectRow::Open(effs, _) => effs.clone(),
+            };
+            let has_request = effects.iter().any(|e| *e == Effect::Request);
+            let only_render_or_web = effects
+                .iter()
+                .all(|e| *e == Effect::Render || *e == Effect::Web)
+                && !effects.is_empty();
+            if has_request {
+                self.diagnostics.push(format!(
+                    "warning: function '{}' has no @placement; inferred placement: server (because it performs Request)",
+                    name
+                ));
+            } else if only_render_or_web {
+                self.diagnostics.push(format!(
+                    "warning: function '{}' has no @placement; inferred placement: static (because it only performs Render or Web)",
+                    name
+                ));
+            }
+            let _ = body_span; // reserved for future line/column diagnostics
+        }
     }
 
     /// Emit a deprecation warning for a single declaration if it uses language

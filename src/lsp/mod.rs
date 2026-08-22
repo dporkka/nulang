@@ -2370,6 +2370,18 @@ impl<'a> InlayHintEngine<'a> {
                         }
                     }
                 }
+                crate::ast::Decl::Signal { name, span, .. } => {
+                    if let Some(ty) = tc.inferred_decl_types.get(name) {
+                        let line = span.line().saturating_sub(1) as u32;
+                        let col = (span.column() + name.len()) as u32;
+                        annotations.push(TypeAnnotation {
+                            line,
+                            character: col,
+                            label: format!(": {}", type_to_string(ty)),
+                            kind: AnnotationKind::Type,
+                        });
+                    }
+                }
                 crate::ast::Decl::LetBinding {
                     name,
                     type_ann,
