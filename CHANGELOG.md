@@ -73,7 +73,9 @@ two major versions.*
   (`x86_64-pc-windows-msvc`). `build.rs` gates its libpython symlink
   workaround to `cfg(unix)` (the API does not exist on Windows; pyo3
   links the Python import lib directly there). No OpenSSL needed on
-  Windows — `native-tls` uses SChannel.
+  Windows — `native-tls` uses SChannel. `src/main.rs` gates the
+  `--bench` stdout/stderr fd redirection (`dup`/`dup2`/`/dev/null`) to
+  `cfg(unix)` with a no-op fallback on Windows.
 - **VM call-path performance work** (interpreter + JIT tiering):
   - Per-function register counts (`CodeModule.function_local_counts`,
     `src/bytecode.rs`, `src/mir_codegen.rs`): parallel to `function_table`,
