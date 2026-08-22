@@ -139,7 +139,11 @@ pub fn init_tracing(service_name: &str) -> Result<(), String> {
     }
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+    // stderr, never stdout: `--lsp` must keep stdout pure JSON-RPC framing,
+    // and CLI logs must not pollute piped program output.
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_writer(std::io::stderr);
     // Use the configured SDK provider when available; otherwise fall back to
     // a no-op SDK provider so terminal logging still works and spans are
     // dropped (the layer requires a `PreSampledTracer`).
