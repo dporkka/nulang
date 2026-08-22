@@ -53,6 +53,19 @@ two major versions.*
   spans with line/column) on stdout while progress stays on stderr; without
   the flag, human output is byte-identical. `tests/cli_json.rs` covers the
   schema.
+- **Registry seed packages** (experimental; `src/registry`, `src/package`,
+  `packages/`). The `nula` package manager ships a set of seed packages
+  (`packages/*`) that can be published to a registry and used as
+  dependencies:
+  - `nula registry seed` installs/registers the seed packages with the
+    configured registry (`src/registry/seed.rs`).
+  - Bare module imports (`import lib`) resolve against the package's own
+    `src/` directory when not found next to the importing file
+    (`src/resolver.rs`), so `tests/*.nula` can import the package's modules
+    under `nula test`.
+  - `--with` capability grants are honored in the `--emit-nbc` path
+    (`src/main.rs`), matching `--check`/`--eval`.
+  - Seed packages declare no capabilities and run under default-deny.
 
 ### Added since 1.0.0-frozen — 2026-08-21
 

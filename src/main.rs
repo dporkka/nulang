@@ -436,7 +436,6 @@ fn main() {
                             std::process::exit(1);
                         }
                     }
-                    i += 1;
                 } else {
                     eprintln!("Error: --metrics-port requires a port number");
                     std::process::exit(1);
@@ -679,7 +678,12 @@ fn main() {
                 .out_file
                 .clone()
                 .unwrap_or_else(|| "out.nbc".to_string());
-            if let Err(e) = compile_source_to_nbc(&code, &out, opts.rewrite_signals.as_deref()) {
+            if let Err(e) = compile_source_to_nbc(
+                &code,
+                &out,
+                opts.rewrite_signals.as_deref(),
+                &opts.with_capabilities,
+            ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
@@ -834,7 +838,12 @@ fn main() {
                     format!("{path}.nbc")
                 }
             });
-            if let Err(e) = compile_source_to_nbc(&source, &out, opts.rewrite_signals.as_deref()) {
+            if let Err(e) = compile_source_to_nbc(
+                &source,
+                &out,
+                opts.rewrite_signals.as_deref(),
+                &opts.with_capabilities,
+            ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
@@ -1142,7 +1151,6 @@ fn run_node_cmd(args: &[String]) -> NuResult<()> {
     let mut tls_key: Option<String> = None;
     let mut tls_ca: Option<String> = None;
     let mut plaintext = false;
-
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1490,13 +1498,11 @@ fn run_frontend(
     let tokens = lexer.lex()?;
     let mut parser = Parser::new(tokens);
     let mut ast = parser.parse_module()?;
-    let mut pd: Vec<nulang::ast::Decl> = pa
+    let pd: Vec<nulang::ast::Decl> = pa
         .decls
         .into_iter()
         .filter(|d| matches!(d, nulang::ast::Decl::VariantType { .. }))
         .collect();
-    pd.append(&mut ast.decls);
-    ast.decls = pd;
 
     // 2b. Resolve imports — load and merge declarations from imported files.
     let mut stack = std::collections::HashSet::new();
@@ -1505,6 +1511,17 @@ fn run_frontend(
         std::path::Path::new(file_path.unwrap_or(".")),
         &mut stack,
     )?;
+
+    // Prepend the prelude AFTER import resolution. `resolve_imports`
+    // prepends imported declarations in front of `ast.decls`, so injecting
+    // the prelude beforehand would leave imported function bodies ahead of
+    // the `Option`/`Result` variant-type declarations — and the typechecker
+    // binds variant constructors in declaration order, so an imported
+    // function constructing `Ok`/`Some` would fail with
+    // "Unbound variable: 'Ok'".
+    let mut pd = pd;
+    pd.append(&mut ast.decls);
+    ast.decls = pd;
     if verbose {
         println!("=== AST ===");
         println!("{:#?}", ast);
@@ -2134,8 +2151,9 @@ fn compile_source_to_nbc(
     source: &str,
     out_path: &str,
     rewrite_signals: Option<&str>,
+    with_capabilities: &[String],
 ) -> NuResult<()> {
-    let (mut ast, type_checker) = run_frontend(source, None, false, &[])?;
+    let (mut ast, type_checker) = run_frontend(source, None, false, with_capabilities)?;
 
     // Optional web-framework pass: rewrite HTML for signals/actions and emit the
     // generic client-side micro-runtime. This runs after effect checking so
@@ -2153,7 +2171,6 @@ fn compile_source_to_nbc(
             span: Span::default(),
         })?;
     }
-
     let m = compile_with_new_pipeline(&ast, "main", &type_checker)?;
     let source_hash = blake3::hash(source.as_bytes());
     let bytes =
