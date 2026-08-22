@@ -1,0 +1,2 @@
+// Negative case: neg_match_pattern_expr — must be rejected by the parser.
+fn f() { match 1 { case 1 + 2 => 3 } }

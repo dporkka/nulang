@@ -1,0 +1,2 @@
+// Negative case: neg_match_ctor_unterminated — must be rejected by the parser.
+fn f() { match 1 { case Some( => 1 } }

@@ -1,0 +1,2 @@
+// Negative case: neg_if_braces_without_then — must be rejected by the parser.
+fn f() { if true { 1 } }

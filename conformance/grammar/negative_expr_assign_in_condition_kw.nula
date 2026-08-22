@@ -1,0 +1,2 @@
+// Negative case: neg_expr_assign_in_condition_kw — must be rejected by the parser.
+fn f() { if x = 1 { 2 } }

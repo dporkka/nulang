@@ -1,0 +1,2 @@
+// Negative case: neg2_alias_pat_nonvar — must be rejected by the parser (round 2).
+fn f() { match 1 { case _ @ Some(x) => x; case _ => 0 } }

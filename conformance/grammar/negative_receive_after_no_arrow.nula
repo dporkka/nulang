@@ -1,0 +1,2 @@
+// Negative case: neg_receive_after_no_arrow — must be rejected by the parser.
+fn f() { receive { | m() => 1 } after 100 { 0 } }

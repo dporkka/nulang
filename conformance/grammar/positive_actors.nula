@@ -1,0 +1,85 @@
+// Positive cases: actors, behaviors, spawn/send/receive (grammar.ebnf §3).
+
+// case 01: minimal actor with one behavior
+actor Echo {
+    behavior ping() { 1 }
+}
+// case 02: actor with state field and behavior
+actor Counter {
+    state count: Int = 0
+    behavior inc() { count = count + 1 }
+}
+// case 03: pub actor
+pub actor Public {
+    behavior go() { unit }
+}
+// case 04: behavior with parameters
+actor Greeter {
+    behavior hello(name: String) { name }
+}
+// case 05: multiple behaviors in one actor
+actor Multi {
+    behavior a() { 1 }
+    behavior b(x: Int) { x }
+    behavior c(x: Int, y: Int) { x + y }
+}
+// case 06: state with local model
+actor LocalState {
+    state local n: Int = 0
+    behavior get() { n }
+}
+// case 07: state with durable model
+actor DurableState {
+    state durable n: Int = 0
+    behavior get() { n }
+}
+// case 08: state with event_sourced model
+actor EventState {
+    state event_sourced n: Int = 0
+    behavior get() { n }
+}
+// case 09: state with crdt model
+actor CrdtState {
+    state crdt n: Int = 0
+    behavior get() { n }
+}
+// case 10: state without type annotation
+actor Untyped {
+    state n = 0
+    behavior get() { n }
+}
+// case 11: spawn with field init block
+fn a_spawn_init() { spawn Counter { count = 0 } }
+// case 12: spawn with positional args
+fn a_spawn_args() { spawn Counter(1, 2) }
+// case 13: spawn with link modifier
+fn a_spawn_link() { spawn link Counter { count = 0 } }
+// case 14: spawn with monitor modifier
+fn a_spawn_monitor() { spawn monitor Counter { count = 0 } }
+// case 15: spawn with named registration
+fn a_spawn_named() { spawn Counter { count = 0 } as "ctr" }
+// case 16: keyword send with no args
+fn a_send0() { send bob hello() }
+// case 17: keyword send with args
+fn a_send_args() { send bob hello("name", 42) }
+// case 18: postfix send with `!`
+fn a_send_bang() { bob ! hello("name") }
+// case 19: postfix async send with `<-`
+fn a_send_arrow() { bob <- hello("name") }
+// case 20: remote send
+fn a_send_remote() { send remote bob hello() }
+// case 21: receive with a single arm
+fn a_receive() { receive { | msg(name) => 1 } }
+// case 22: receive with multiple arms
+fn a_receive_multi() {
+    receive {
+        | a(x) => x
+        | b() => 0
+    }
+}
+// case 23: receive without leading pipe on first arm
+fn a_receive_nopipe() { receive { msg(name) => 1 } }
+// case 24: receive with after-timeout block
+fn a_receive_after() { receive { | m(x) => x } after 100 => { 0 } }
+// case 25: ask expression with timeout modifier
+fn a_ask() { ask bob hello("q") timeout 100 }

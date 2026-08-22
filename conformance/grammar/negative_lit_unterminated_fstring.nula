@@ -1,0 +1,2 @@
+// Negative case: neg_lit_unterminated_fstring — must be rejected by the parser.
+fn f() { f"abc }

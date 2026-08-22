@@ -1,0 +1,2 @@
+// Negative case: neg_lit_two_char_char — must be rejected by the parser.
+fn f() { 'ab' }

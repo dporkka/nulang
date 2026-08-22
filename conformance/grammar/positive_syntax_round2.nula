@@ -1,0 +1,55 @@
+// Positive cases: literals, catch/try surface, comments, and operator
+// chains, round 2 (parser extensions beyond grammar.ebnf noted inline).
+
+// case 01: binary integer literal (parser extension)
+fn y_binary() { 0b1010 }
+// case 02: octal integer literal (parser extension)
+fn y_octal() { 0o755 }
+// case 03: integer literal with underscore separators (parser extension)
+fn y_underscores() { 1_000_000 }
+// case 04: hex literal with uppercase digits
+fn y_hex_upper() { 0xFF }
+// case 05: bare catch fallback expression (parser extension)
+fn y_catch_bare() { compute() catch 0 }
+// case 06: catch with match-style error arms, no `case` keyword
+// (`case` is NOT accepted in catch arms — see README drift log)
+fn y_catch_arms() { compute() catch { Error(e) => 0; Other => 1 } }
+// case 07: catch arms with leading pipes
+fn y_catch_pipes() { compute() catch { | Error(e) => 0 | Other => 1 } }
+// case 08: catch arm with a guard
+fn y_catch_guard() { compute() catch { | Error(e) if true => 0 } }
+// case 09: postfix try operator inside an expression
+fn y_try_in_expr() { 1 + compute()? }
+// case 10: doc comment on a declaration
+/// Documented function.
+fn y_doc_commented() { 1 }
+// case 11: inner doc comment
+//! Module-level documentation.
+fn y_inner_doc() { 2 }
+// case 12: block comment between `fn` and the function name
+fn /* interrupting */ y_comment_mid_decl() { 3 }
+// case 13: block comment inside a parameter list
+fn y_comment_in_params(a: Int, /* separator */ b: Int) { a + b }
+// case 14: line comment between a binary operator and its operand
+fn y_comment_mid_expr() { 1 + // add two
+    2 }
+// case 15: nested block comments around code
+/* outer /* inner */ still comment */ fn y_nested_comment() { 4 }
+// case 16: trailing comma in a call (parser tolerance)
+fn y_trailing_comma() { compute2(1, 2,) }
+// case 17: match arms separated by commas (parser tolerance)
+fn y_match_commas() { match 1 { case 1 => 1, case _ => 0 } }
+// case 18: long mixed-precedence chain
+fn y_precedence_chain() { 1 + 2 * 3 - 4 / 2 % 3 ** 2 << 1 >> 1 & 7 ^ 3 ||| 8 }
+// case 19: pipe chain mixed with arithmetic
+fn y_pipe_arith() { 1 + 2 |> addone |> addone }
+// case 20: range inside a for loop over a call result
+fn y_for_range_call() { for i in 1..compute2(2, 3) { i } }
+// case 21: for loop over an identifier (parser surface)
+fn y_for_ident() { for x in items { x } }
+// case 22: chained comparisons mixed with logic operators
+fn y_logic_chain() { 1 < 2 && 3 <= 4 || 5 > 6 && !(7 >= 8) }
+// case 23: double negation and not on nested unary
+fn y_unary_chain() { !!- -1 }
+// case 24: deeply chained postfix sends
+fn y_send_chain() { bob ! hi() ; bob <- bye() }

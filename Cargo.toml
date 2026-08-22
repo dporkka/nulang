@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/nulang-ai"]
+members = ["crates/nulang-ai", "crates/nulang-ai-core", "crates/nulang-ai-protocol", "crates/nulang-ai-local", "crates/nulang-ai-director", "crates/nulang-ai-manager", "crates/nulang-ai-worker", "crates/nulang-ai-mcp"]
+# The browser-playground crate re-uses compiler sources via #[path] includes
+# and builds only for wasm32-unknown-unknown; it is intentionally standalone
+# (its own lockfile, minimal pure-Rust dep set) and excluded from workspace
+# builds/tests so `cargo test --workspace` is unaffected.
+exclude = ["crates/nulang-playground"]
 
 [package]
 name = "nulang"
@@ -9,7 +14,7 @@ authors = ["David Porkka"]
 license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
 homepage = "https://nulang.org"
-repository = "https://github.com/dporkka/nulang"
+repository = "https://github.com/nulang-org/nulang"
 documentation = "https://nulang.org"
 keywords = ["actor", "distributed", "programming-language", "ai", "compiler"]
 categories = ["development-tools", "programming-languages"]
@@ -35,7 +40,7 @@ default = ["python", "sqlite", "lsp", "ai-runtime", "tls"]
 python = ["dep:pyo3"]
 sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp", "dep:tokio", "dep:futures", "dep:tower-service"]
-ai-runtime = ["dep:nulang-ai", "dep:reqwest", "dep:tokio"]
+ai-runtime = ["dep:nulang-ai", "dep:nulang-ai-local", "dep:uuid", "dep:reqwest", "dep:tokio"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime", "dep:wat"]
 # WasmFX stack-switching backend: depends on wasm-backend, and additionally
 # enables wasmtime's GC support (required for exception tags, which carry
@@ -44,6 +49,8 @@ wasmfx-backend = ["wasm-backend", "wasmtime/gc-null"]
 http-client = ["dep:reqwest", "dep:tokio"]
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tokio", "dep:tracing-opentelemetry"]
 tls = []
+# Differential fuzzing driver binary (src/bin/nula_difffuzz.rs).
+difffuzz = []
 
 [dependencies]
 # Memory & concurrency
@@ -108,6 +115,8 @@ libsql = { version = "0.10.0-pre.4", optional = true, default-features = false, 
 libloading = "0.8"
 # AI runtime crate (optional; enabled by the `ai-runtime` feature).
 nulang-ai = { path = "crates/nulang-ai", version = "0.1.0", optional = true }
+nulang-ai-local = { path = "crates/nulang-ai-local", version = "0.1.0", optional = true }
+uuid = { version = "1", features = ["serde", "v4"], optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
@@ -132,6 +141,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "nulang"
 path = "src/main.rs"
+
+[[bin]]
+name = "nula_difffuzz"
+path = "src/bin/nula_difffuzz.rs"
+required-features = ["difffuzz"]
 
 [profile.release]
 opt-level = 3

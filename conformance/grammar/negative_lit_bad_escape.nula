@@ -1,0 +1,2 @@
+// Negative case: neg_lit_bad_escape — must be rejected by the parser.
+fn f() { "a\qb" }

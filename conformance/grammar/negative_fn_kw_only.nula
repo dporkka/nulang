@@ -1,0 +1,2 @@
+// Negative case: neg_fn_kw_only — must be rejected by the parser.
+fn

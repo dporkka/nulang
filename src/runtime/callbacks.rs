@@ -21,11 +21,253 @@ use super::cluster::NodeId;
 use super::distributed::{send_distributed, spawn_on_node, ActorAddress};
 use super::http_server::HttpServerState;
 use super::Runtime;
+use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 #[cfg(feature = "ai-runtime")]
 use nulang_ai::{LlmMessage, LlmRequest};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// Shared Web effect host implementation for all runtime callback types.
+/// Mirrors the standalone VM dispatch in `src/vm.rs`.
+pub(crate) fn perform_web_builtin(
+    callbacks: &mut dyn crate::vm::ActorVmCallbacks,
+    op_name: Option<&str>,
+    constants: &[crate::bytecode::Constant],
+    regs: &[crate::vm::Value],
+) -> Option<crate::vm::Value> {
+    fn read_array(
+        _callbacks: &dyn crate::vm::ActorVmCallbacks,
+        value: crate::vm::Value,
+    ) -> Vec<crate::vm::Value> {
+        if let Some(ptr) = value.as_ptr() {
+            unsafe {
+                let header = &*ActorHeap::header_of(ptr);
+                if header.type_tag == HeapTypeTag::Array || header.type_tag == HeapTypeTag::Tuple {
+                    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                    let len = payload_size / std::mem::size_of::<crate::vm::Value>();
+                    if len > 0 {
+                        return std::slice::from_raw_parts(ptr as *const crate::vm::Value, len)
+                            .to_vec();
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
+    fn resolve(constants: &[crate::bytecode::Constant], value: crate::vm::Value) -> String {
+        crate::vm::resolve_value_string(constants, value)
+    }
+    fn html_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('\"', "&quot;")
+            .replace('\'', "&#x27;")
+    }
+
+    fn alloc_tuple(
+        callbacks: &mut dyn crate::vm::ActorVmCallbacks,
+        a: crate::vm::Value,
+        b: crate::vm::Value,
+    ) -> crate::vm::Value {
+        let payload_size = 2 * std::mem::size_of::<crate::vm::Value>();
+        match callbacks.alloc(payload_size, HeapTypeTag::Tuple) {
+            Some(ptr) => {
+                // SAFETY: alloc returned a fresh payload of exactly the
+                // requested size; writing two Values fits exactly.
+                unsafe {
+                    let slots = ptr as *mut crate::vm::Value;
+                    slots.write(a);
+                    slots.add(1).write(b);
+                }
+                crate::vm::Value::ptr(ptr)
+            }
+            None => crate::vm::Value::nil(),
+        }
+    }
+    fn alloc_array(
+        callbacks: &mut dyn crate::vm::ActorVmCallbacks,
+        items: Vec<crate::vm::Value>,
+    ) -> crate::vm::Value {
+        if items.is_empty() {
+            return crate::vm::Value::nil();
+        }
+        let payload_size = items.len() * std::mem::size_of::<crate::vm::Value>();
+        match callbacks.alloc(payload_size, HeapTypeTag::Array) {
+            Some(ptr) => {
+                // SAFETY: alloc returned a fresh payload of exactly the
+                // requested size; writing all Values fits exactly.
+                unsafe {
+                    let slots = ptr as *mut crate::vm::Value;
+                    for (i, item) in items.iter().enumerate() {
+                        slots.add(i).write(*item);
+                    }
+                }
+                crate::vm::Value::ptr(ptr)
+            }
+            None => crate::vm::Value::nil(),
+        }
+    }
+    match op_name {
+        Some("html") => {
+            let tag = resolve(constants, *regs.first()?);
+            let attrs = read_array(callbacks, *regs.get(1)?);
+            let children = read_array(callbacks, *regs.get(2)?);
+            let mut out = String::new();
+            out.push('<');
+            out.push_str(&tag);
+            for attr in &attrs {
+                let slots = read_array(callbacks, *attr);
+                if slots.len() >= 2 {
+                    let name = resolve(constants, slots[0]);
+                    let value = resolve(constants, slots[1]);
+                    out.push(' ');
+                    out.push_str(&name);
+                    out.push_str("=\"");
+                    out.push_str(&value);
+                    out.push('\"');
+                }
+            }
+            out.push('>');
+            for child in &children {
+                out.push_str(&resolve(constants, *child));
+            }
+            out.push_str("</");
+            out.push_str(&tag);
+            out.push('>');
+            Some(callbacks.alloc_string(&out))
+        }
+        Some("text") => {
+            let s = resolve(constants, *regs.first()?);
+            Some(callbacks.alloc_string(&html_escape(&s)))
+        }
+        Some("raw") => {
+            let s = resolve(constants, *regs.first()?);
+            Some(callbacks.alloc_string(&s))
+        }
+        Some("route") => Some(crate::vm::Value::unit()),
+        Some("redirect") => {
+            let url = resolve(constants, *regs.first()?);
+            let out = format!(
+                "<html><head><meta http-equiv=\"refresh\" content=\"0;url={}\"></head></html>",
+                url
+            );
+            Some(callbacks.alloc_string(&out))
+        }
+        Some("serve_static") => {
+            let path = resolve(constants, *regs.first()?);
+            match std::fs::read_to_string(&path) {
+                Ok(content) => Some(callbacks.alloc_string(&content)),
+                Err(_) => Some(crate::vm::Value::nil()),
+            }
+        }
+        Some("param") => {
+            let name = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::current_request_param(&name)
+                .map(|s| callbacks.alloc_string(&s))
+                .or(Some(crate::vm::Value::nil()))
+        }
+        Some("header") => {
+            let name = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::current_request_header(&name)
+                .map(|s| callbacks.alloc_string(&s))
+                .or(Some(crate::vm::Value::nil()))
+        }
+        Some("cookie") => {
+            let name = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::current_request_cookie(&name)
+                .map(|s| callbacks.alloc_string(&s))
+                .or(Some(crate::vm::Value::nil()))
+        }
+        Some("read_body") => crate::runtime::http_server::current_request_body()
+            .map(|b| callbacks.alloc_string(&String::from_utf8_lossy(&b)))
+            .or(Some(crate::vm::Value::nil())),
+        Some("method") => crate::runtime::http_server::current_request_method()
+            .map(|s| callbacks.alloc_string(&s))
+            .or(Some(crate::vm::Value::nil())),
+        Some("form") => {
+            let pairs = crate::runtime::http_server::current_request_body()
+                .map(|b| crate::runtime::http_server::parse_form_urlencoded(&b))
+                .unwrap_or_default();
+            let mut tuples: Vec<crate::vm::Value> = Vec::new();
+            for (k, v) in pairs {
+                let k_val = callbacks.alloc_string(&k);
+                let v_val = callbacks.alloc_string(&v);
+                tuples.push(alloc_tuple(callbacks, k_val, v_val));
+            }
+            Some(alloc_array(callbacks, tuples))
+        }
+        Some("form_value") => {
+            let name = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::form_value(&name)
+                .map(|s| callbacks.alloc_string(&s))
+                .or(Some(crate::vm::Value::nil()))
+        }
+        Some("kv_get") => {
+            let key = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::kv_get(&key)
+                .map(|s| callbacks.alloc_string(&s))
+                .or(Some(crate::vm::Value::nil()))
+        }
+        Some("kv_set") => {
+            let key = resolve(constants, *regs.first()?);
+            let value = resolve(constants, *regs.get(1)?);
+            crate::runtime::http_server::kv_set(&key, &value);
+            Some(crate::vm::Value::unit())
+        }
+        Some("kv_delete") => {
+            let key = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::kv_delete(&key);
+            Some(crate::vm::Value::unit())
+        }
+        Some("kv_all") => {
+            let pairs = crate::runtime::http_server::kv_all();
+            let mut tuples: Vec<crate::vm::Value> = Vec::new();
+            for (k, v) in pairs {
+                let k_val = callbacks.alloc_string(&k);
+                let v_val = callbacks.alloc_string(&v);
+                tuples.push(alloc_tuple(callbacks, k_val, v_val));
+            }
+            Some(alloc_array(callbacks, tuples))
+        }
+        Some("set_cookie") => {
+            let name = resolve(constants, *regs.first()?);
+            let value = resolve(constants, *regs.get(1)?);
+            crate::runtime::http_server::set_cookie(&name, &value);
+            Some(crate::vm::Value::unit())
+        }
+        Some("clear_cookie") => {
+            let name = resolve(constants, *regs.first()?);
+            crate::runtime::http_server::clear_cookie(&name);
+            Some(crate::vm::Value::unit())
+        }
+        _ => None,
+    }
+}
+
+/// Realtime built-in effect operations for the web framework.
+///
+/// Mirrors the standalone VM dispatch in `src/vm.rs`.
+pub(crate) fn perform_realtime_builtin(
+    _callbacks: &mut dyn crate::vm::ActorVmCallbacks,
+    op_name: Option<&str>,
+    constants: &[crate::bytecode::Constant],
+    regs: &[crate::vm::Value],
+) -> Option<crate::vm::Value> {
+    fn resolve(constants: &[crate::bytecode::Constant], value: crate::vm::Value) -> String {
+        crate::vm::resolve_value_string(constants, value)
+    }
+    match op_name {
+        Some("broadcast") => {
+            let room = resolve(constants, *regs.first()?);
+            let message = resolve(constants, *regs.get(1)?);
+            crate::runtime::http_server::realtime_broadcast(&room, &message);
+            Some(crate::vm::Value::unit())
+        }
+        _ => None,
+    }
+}
 
 /// Bridges the standalone VM to a real `Runtime`.
 ///
@@ -470,6 +712,10 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let actor_id = rt.current_actor;
             return rt.perform_actor_builtin(actor_id, op_name, constants, regs);
         }
+        if effect_name == "Grain" {
+            let mut rt = self.runtime.borrow_mut();
+            return rt.perform_grain_builtin(op_name, constants, regs);
+        }
         if effect_name == "IO" {
             if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
                 let msg = crate::vm::resolve_value_string(constants, *first);
@@ -486,6 +732,12 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             let actor_id = rt.current_actor;
             return rt.perform_crdt_builtin(actor_id, op_name, constants, regs);
+        }
+        if effect_name == "Web" {
+            return perform_web_builtin(self, op_name, constants, regs);
+        }
+        if effect_name == "Realtime" {
+            return perform_realtime_builtin(self, op_name, constants, regs);
         }
         self.perform_effect(effect_name, regs)
     }
@@ -804,7 +1056,16 @@ pub(crate) struct BytecodeRuntimeCallbacks {
     actor_id: u64,
 }
 
+// SAFETY: `runtime` is a transient borrow of the executing `Runtime` that
+// is valid for the duration of the behavior invocation. The scheduler
+// guarantees that a `Runtime` (and thus each callback instance wrapping a
+// pointer to it) is only driven from one thread at a time, so no two
+// threads can alias the `&mut Runtime` produced by dereferencing `runtime`.
 unsafe impl Send for BytecodeRuntimeCallbacks {}
+// SAFETY: shared references only grant access through `Sync` if methods can
+// be called concurrently; all callback methods mutate through the raw
+// pointer and are only invoked while the owning thread is executing the
+// behavior, so cross-thread concurrent use cannot occur by construction.
 unsafe impl Sync for BytecodeRuntimeCallbacks {}
 
 impl BytecodeRuntimeCallbacks {
@@ -1015,6 +1276,10 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 );
             }
 
+            if effect_name == "Grain" {
+                return (*self.runtime).perform_grain_builtin(op_name, constants, regs);
+            }
+
             if effect_name == "Crdt" {
                 return (*self.runtime).perform_crdt_builtin(
                     Some(self.actor_id),
@@ -1182,6 +1447,12 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     println!("{}", msg);
                     return Some(crate::vm::Value::unit());
                 }
+            }
+            if effect_name == "Web" {
+                return perform_web_builtin(self, op_name, constants, regs);
+            }
+            if effect_name == "Realtime" {
+                return perform_realtime_builtin(self, op_name, constants, regs);
             }
             self.perform_effect(effect_name, regs)
         }

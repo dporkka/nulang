@@ -488,6 +488,7 @@ impl AddressResolver {
         sender_actor: u64,
         priority: MessagePriority,
         string_table: Vec<String>,
+        object_table: Vec<(u64, Vec<u8>)>,
         content_hash: Option<[u8; 32]>,
         trace_id: Option<String>,
     ) -> Packet {
@@ -497,6 +498,7 @@ impl AddressResolver {
             content_hash,
             payload,
             string_table,
+            object_table,
             sender_actor,
             sender_node: NodeId(self.local_node.0),
             priority,
@@ -521,7 +523,14 @@ impl AddressResolver {
     pub fn parse_packet(
         &mut self,
         packet: Packet,
-    ) -> Option<(u64, String, Message, Vec<String>, Option<[u8; 32]>)> {
+    ) -> Option<(
+        u64,
+        String,
+        Message,
+        Vec<String>,
+        Vec<(u64, Vec<u8>)>,
+        Option<[u8; 32]>,
+    )> {
         match packet {
             Packet::ActorMessage {
                 target_actor,
@@ -529,6 +538,7 @@ impl AddressResolver {
                 content_hash,
                 payload,
                 string_table,
+                object_table,
                 sender_actor,
                 sender_node,
                 priority,
@@ -545,7 +555,14 @@ impl AddressResolver {
                     priority,
                     trace_id,
                 };
-                Some((target_actor, behavior_name, msg, string_table, content_hash))
+                Some((
+                    target_actor,
+                    behavior_name,
+                    msg,
+                    string_table,
+                    object_table,
+                    content_hash,
+                ))
             }
             // Non-actor-message packets are not parsed here.
             _ => None,
@@ -778,6 +795,20 @@ pub fn send_distributed(
                     return;
                 }
             };
+            // Object-store refs must cross the wire with their byte payloads:
+            // object ids are local to each node's store.
+            let (payload, object_table) = match resolve_wire_objects(runtime, &payload) {
+                Some(resolved) => resolved,
+                None => {
+                    warn!(
+                        "nulang-net: dropping message to actor {} on node {:?}: object ref not found in local store",
+                        actor_id, node_id
+                    );
+                    let sender = runtime.current_actor.unwrap_or(0);
+                    notify_delivery_failed(runtime, sender, "object ref unresolvable");
+                    return;
+                }
+            };
             // Remote sends carry the behavior name and an optional content
             // hash; the receiving node resolves the name and MAY verify the
             // hash against its own behavior table on delivery.
@@ -794,6 +825,7 @@ pub fn send_distributed(
                 runtime.current_actor.unwrap_or(0),
                 MessagePriority::Normal,
                 string_table,
+                object_table,
                 content_hash,
                 trace_id,
             );
@@ -826,7 +858,8 @@ pub fn send_distributed(
 /// Delivers a system message (behavior 0) to the sender actor with a
 /// failure code in the payload: `[failure_code: Int, _reserved: Nil]`.
 /// Codes: 0=unresolvable, 1=node left cluster, 2=string payload unresolvable,
-/// 3=string intern failed on receiver, 4=target actor not found, 5=unknown.
+/// 3=string intern failed on receiver, 4=target actor not found,
+/// 6=object ref unresolvable, 7=object intern failed on receiver, 5=unknown.
 /// Non-existent senders (id 0) are silently skipped.
 pub(crate) fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
     if sender_id == 0 {
@@ -848,6 +881,8 @@ fn delivery_failure_code(reason: &str) -> i64 {
         "string payload unresolvable" => 2,
         "string intern failed on receiver" => 3,
         "target actor not found" => 4,
+        "object ref unresolvable" => 6,
+        "object intern failed on receiver" => 7,
         _ => 5,
     }
 }
@@ -1055,6 +1090,7 @@ pub fn process_network_packets(
                                 m.sender,
                                 crate::runtime::mailbox::MessagePriority::Normal,
                                 m.string_table,
+                                m.object_table,
                                 content_hash,
                                 m.trace_id,
                             );
@@ -1170,7 +1206,13 @@ pub fn process_network_packets(
                             // Retry any messages that were waiting for this bytecode
                             let pending = runtime.pending_fetched_messages.remove(&content_hash);
                             if let Some(messages) = pending {
-                                for (target_actor, behavior_name, mut msg, string_table) in messages
+                                for (
+                                    target_actor,
+                                    behavior_name,
+                                    mut msg,
+                                    string_table,
+                                    object_table,
+                                ) in messages
                                 {
                                     // Hot-reload the newly cached module into the target actor
                                     let cached = match runtime.behavior_cache.get(&content_hash) {
@@ -1208,7 +1250,7 @@ pub fn process_network_packets(
                                         );
                                         continue;
                                     }
-                                    // Intern string payloads and deliver
+                                    // Intern string and object payloads, then deliver
                                     let mut payload_vec = (*msg.payload).clone();
                                     if !intern_wire_strings(
                                         runtime,
@@ -1220,6 +1262,18 @@ pub fn process_network_packets(
                                             runtime,
                                             msg.sender,
                                             "string intern failed on retry",
+                                        );
+                                        continue;
+                                    }
+                                    if !intern_wire_objects(
+                                        runtime,
+                                        &mut payload_vec,
+                                        &object_table,
+                                    ) {
+                                        notify_delivery_failed(
+                                            runtime,
+                                            msg.sender,
+                                            "object intern failed on retry",
                                         );
                                         continue;
                                     }
@@ -1245,7 +1299,7 @@ pub fn process_network_packets(
                             // Drop pending messages for this hash on deserialize failure
                             let pending = runtime.pending_fetched_messages.remove(&content_hash);
                             if let Some(messages) = pending {
-                                for (_, _, msg, _) in messages {
+                                for (_, _, msg, _, _) in messages {
                                     notify_delivery_failed(
                                         runtime,
                                         msg.sender,
@@ -1259,7 +1313,7 @@ pub fn process_network_packets(
                     // Sender didn't have the requested bytecode; drain and notify
                     let pending = runtime.pending_fetched_messages.remove(&content_hash);
                     if let Some(messages) = pending {
-                        for (_, _, msg, _) in messages {
+                        for (_, _, msg, _, _) in messages {
                             notify_delivery_failed(runtime, msg.sender, "bytecode fetch failed: sender does not have the requested behavior");
                         }
                     }
@@ -1376,8 +1430,14 @@ pub fn process_network_packets(
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             _ => {
-                if let Some((target_actor, behavior_name, mut msg, string_table, content_hash)) =
-                    resolver.parse_packet(incoming.packet)
+                if let Some((
+                    target_actor,
+                    behavior_name,
+                    mut msg,
+                    string_table,
+                    object_table,
+                    content_hash,
+                )) = resolver.parse_packet(incoming.packet)
                 {
                     // Record the wire sender (bare id → node) so the
                     // recipient can reply BY VALUE (RFC-0007): a later
@@ -1445,6 +1505,7 @@ pub fn process_network_packets(
                                         behavior_name.clone(),
                                         msg.clone(),
                                         string_table.clone(),
+                                        object_table.clone(),
                                     ));
                                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
                                 continue;
@@ -1470,6 +1531,17 @@ pub fn process_network_packets(
                             runtime,
                             msg.sender,
                             "string intern failed on receiver",
+                        );
+                    }
+                    if !intern_wire_objects(runtime, &mut payload_vec, &object_table) {
+                        warn!(
+                            "nulang-net: dropping message to actor {}: object payload cannot be interned (object table mismatch)",
+                            target_actor
+                        );
+                        notify_delivery_failed(
+                            runtime,
+                            msg.sender,
+                            "object intern failed on receiver",
                         );
                     }
                     msg.payload = Arc::new(payload_vec);
@@ -1741,7 +1813,8 @@ fn ensure_actor_module_idx(runtime: &mut Runtime, actor_id: u64) -> Option<usize
     }
     let vm = runtime.vm.as_mut().expect("VM was just ensured");
     let idx = vm.modules.len();
-    vm.load_module(module);
+    vm.load_module(module.clone());
+    runtime.register_module_grains(&module);
     if let Some(actor) = runtime.actors.get_mut(&actor_id) {
         actor.bytecode_module_idx = Some(idx);
     }
@@ -1762,6 +1835,62 @@ fn intern_pool_string(vm: &mut crate::vm::VM, module_idx: usize, content: &str) 
         }
     }
     vm.add_runtime_string(module_idx, content.to_string())
+}
+
+/// Resolve object-store ids in `args` to byte payloads.
+///
+/// Returns the payload with object ids rewritten to packet-local indices, plus
+/// the table of byte payloads.  Object ids that do not exist in the local
+/// `ObjectStore` are dropped (the packet is rejected).
+pub(crate) fn resolve_wire_objects(
+    runtime: &Runtime,
+    args: &[Value],
+) -> Option<(Vec<Value>, Vec<(u64, Vec<u8>)>)> {
+    let mut payload = args.to_vec();
+    let mut table: Vec<(u64, Vec<u8>)> = Vec::new();
+    for value in payload.iter_mut() {
+        let Some(id) = value.as_object_id() else {
+            continue;
+        };
+        let entry = runtime.object_store.get(id)?;
+        let bytes = entry.as_bytes().to_vec();
+        // Reuse a table entry for repeated ids within one packet.
+        let idx = match table.iter().position(|(tid, _)| *tid == id) {
+            Some(i) => i,
+            None => {
+                table.push((id, bytes));
+                table.len() - 1
+            }
+        };
+        *value = Value::object(idx as u64);
+    }
+    Some((payload, table))
+}
+
+/// Intern object payloads of a received remote message into the local
+/// `ObjectStore`, rewriting each object-id value from a packet object-table
+/// index to its new local object id.  Returns `true` on success; `false` when
+/// a payload id falls outside the table, in which case the caller drops the
+/// message.
+fn intern_wire_objects(
+    runtime: &mut Runtime,
+    payload: &mut [Value],
+    object_table: &[(u64, Vec<u8>)],
+) -> bool {
+    if !payload.iter().any(|v| v.is_object()) {
+        return true;
+    }
+    for value in payload.iter_mut() {
+        let Some(idx) = value.as_object_id() else {
+            continue;
+        };
+        let Some((_, bytes)) = object_table.get(idx as usize) else {
+            return false;
+        };
+        let local_id = runtime.object_store.put(bytes.clone().into_boxed_slice());
+        *value = Value::object(local_id);
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -2046,7 +2175,8 @@ mod tests {
             100, // sender_actor
             MessagePriority::Normal,
             vec!["hello".to_string()],
-            None, // content_hash
+            vec![], // object_table
+            None,   // content_hash
             Some(trace.to_string()),
         );
         match packet {
@@ -2090,6 +2220,7 @@ mod tests {
             content_hash: None,
             payload: vec![Value::int(123)],
             string_table: vec![],
+            object_table: vec![],
             sender_actor: 88,
             sender_node: NodeId(9),
             priority: MessagePriority::System,
@@ -2098,7 +2229,8 @@ mod tests {
         let result = resolver.parse_packet(packet);
         assert!(result.is_some());
 
-        let (target, behavior_name, msg, string_table, content_hash) = result.unwrap();
+        let (target, behavior_name, msg, string_table, _object_table, content_hash) =
+            result.unwrap();
         assert_eq!(target, 77);
         assert_eq!(behavior_name, "inc");
         assert_eq!(content_hash, None);

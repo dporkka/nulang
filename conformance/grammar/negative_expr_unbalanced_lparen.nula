@@ -1,0 +1,2 @@
+// Negative case: neg_expr_unbalanced_lparen — must be rejected by the parser.
+fn f() { (1 }

@@ -1,72 +1,50 @@
-# Nulang VS Code Extension
+# Nulang for VS Code
 
-Syntax highlighting, diagnostics, and LSP features for the [Nulang](https://nulang.org) programming language.
+Language support for [Nulang](https://github.com/nulang-org/nulang) in Visual Studio Code: syntax highlighting, language essentials (comments, brackets, indentation, folding), and snippets.
 
 ## Features
 
-- **Syntax highlighting** — keywords, types, strings, numbers, comments
-- **Diagnostics** — parse errors, type errors, effect errors on save
-- **Go-to-definition** — jump to function/type/variable definitions
-- **References** — find all usages of a symbol
-- **Hover** — type information on hover
-- **Completion** — keyword and built-in effect suggestions
-- **Rename** — project-wide symbol rename
-- **Formatting** — indentation support
+- **Syntax highlighting** for `.nula` files via a TextMate grammar covering:
+  - Keywords: `fn`, `let`, `const`, `type`, `alias`, `effect`, `actor`, `behavior`, `state`, `spawn`, `send`, `receive`, `handle`, `perform`, `resume`, `match`, `case`, `if`/`else`, `for`, `while`, `loop`, `return`, `import`, `pub`, `extern`, and more
+  - Reference capabilities: `iso`, `trn`, `ref`, `val`, `box`, `tag`, `lineariso` (including `@cap` annotations)
+  - Primitive and standard types, effect names (`IO`, `Http`, `Json`, `LLM`, ...), user-defined types
+  - Strings with escape sequences, character literals, comments (`//` and `/* */`), numbers (int, float, hex, binary, octal), and operators (`->`, `=>`, `|>`, `!`, `<-`, `..`, ...)
+  - Declaration highlighting: function, actor, behavior, type, and effect names
+- **Language configuration**: comment toggling (line + block), bracket matching, auto-closing pairs, indentation rules, and region folding (`// #region` / `// #endregion`)
+- **Snippets** for common forms: `fn`, `actor`, `behavior`, `spawn`, `send`, `handle`, `match`, `effect`, loops, and more
 
 ## Installation
 
-### From .vsix (recommended)
+### From a `.vsix`
 
-```bash
-# Build from source (requires Node.js):
+```sh
 cd editors/vscode
-npm install
 npx @vscode/vsce package
-
-# Install:
 code --install-extension nulang-0.1.0.vsix
 ```
 
-### Manual install
+### Manual (development)
 
-```bash
-cp -r editors/vscode ~/.vscode/extensions/nulang/
+Symlink or copy this directory into your VS Code extensions folder:
+
+```sh
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/nulang
 ```
 
-### From the Marketplace
+Then reload VS Code.
 
-Search for "Nulang" in the VS Code Extensions view (coming soon).
+## Usage
 
-## Requirements
+Open any `.nula` file — the grammar activates automatically. Try the
+[examples](https://github.com/nulang-org/nulang/tree/main/examples) in the main
+repository.
 
-- **Nulang compiler** installed and on your PATH (or set `NULANG_PATH` env var)
-- Build from source: `git clone https://github.com/dporkka/nulang && cd nulang && cargo build --release`
+## Scope
 
-## Configuration
-
-Set `NULANG_PATH` to the full path of the `nulang` binary if it's not on your PATH:
-
-```json
-{
-  "nulang.serverPath": "/path/to/nulang"
-}
-```
-
-## Commands
-
-- **Nulang: Restart Language Server** — restart the LSP server after updating the compiler
-
-## Development
-
-The extension is minimal: `extension.js` launches `nulang --lsp` as a stdio language server.
-The LSP server (`src/lsp/mod.rs`) provides 12 features including hover, goto-definition, references,
-rename, signature help, inlay hints, completion, and diagnostics.
+This extension provides TextMate-based highlighting and language essentials
+only. A language server (diagnostics, hover, goto-definition) is planned
+separately and is not part of this package.
 
 ## License
 
-Apache-2.0
-
-## Before marketplace publish
-
-Add a 128×128 PNG `icon.png` and an `"icon": "icon.png"` field to
-`package.json` (the Marketplace does not accept SVG icons).
+Apache-2.0, same as the Nulang repository. See [LICENSE](./LICENSE).

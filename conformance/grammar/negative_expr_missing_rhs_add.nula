@@ -1,0 +1,2 @@
+// Negative case: neg_expr_missing_rhs_add — must be rejected by the parser.
+fn f() { 1 + }

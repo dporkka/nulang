@@ -1,0 +1,2 @@
+// Negative case: neg_expr_pipe_missing_target — must be rejected by the parser.
+fn f() { 1 |> }

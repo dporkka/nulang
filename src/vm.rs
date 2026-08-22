@@ -156,6 +156,21 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// Return the number of elements in an array allocated on the actor heap.
     fn array_len(&self, ptr: *mut u8) -> Option<usize>;
 
+    /// Allocate a fresh heap string via `self.alloc`, copy `s` into it,
+    /// and null-terminate. Default implementation works for any callback
+    /// with a working `alloc`; callers may override for specialization.
+    fn alloc_string(&mut self, s: &str) -> Value {
+        let bytes = s.as_bytes();
+        match self.alloc(bytes.len() + 1, HeapTypeTag::String) {
+            Some(ptr) => unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+                Value::ptr(ptr)
+            },
+            None => Value::nil(),
+        }
+    }
+
     /// Spawn a real actor from `module.actor_metadata`.
     ///
     /// `behavior_idx` is the behavior table index embedded in the `Spawn`
@@ -348,6 +363,9 @@ pub(crate) struct StandaloneVmCallbacks {
     /// Test hook: when set, `IO.print` output is recorded here instead of
     /// written to stdout.
     io_output: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    /// Routes registered by `perform Web.route(...)` during this VM run.
+    /// Collected by the dev server after the entry point finishes.
+    routes: Vec<crate::runtime::WebRoute>,
 }
 
 impl StandaloneVmCallbacks {
@@ -358,6 +376,7 @@ impl StandaloneVmCallbacks {
             heap,
             gc: crate::runtime::OrcaGc::new(0),
             io_output: None,
+            routes: Vec::new(),
         }
     }
 }
@@ -461,6 +480,14 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         }
         if effect_name == "Timer" {
             return Some(Value::unit());
+        }
+        if effect_name == "Web" {
+            return crate::runtime::callbacks::perform_web_builtin(self, op_name, constants, regs);
+        }
+        if effect_name == "Realtime" {
+            return crate::runtime::callbacks::perform_realtime_builtin(
+                self, op_name, constants, regs,
+            );
         }
         if effect_name == "Int" && op_name == Some("to_string") {
             let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
@@ -1171,6 +1198,23 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         module: &CodeModule,
         regs: &[Value],
     ) -> Option<Value> {
+        if effect_name == "Web" && op_name == Some("route") {
+            let method = regs.get(0).copied();
+            let path = regs.get(1).copied();
+            let handler = regs.get(2).copied();
+            if let (Some(m), Some(p), Some(h)) = (method, path, handler) {
+                if let Some(route) = crate::runtime::WebRoute::from_registers(
+                    m,
+                    p,
+                    h,
+                    &module.constants,
+                    module.clone(),
+                ) {
+                    self.routes.push(route);
+                }
+            }
+            return Some(Value::unit());
+        }
         if effect_name == "Http" && op_name == Some("serve") {
             let port = regs.first().and_then(|v| v.as_int()).unwrap_or(0) as u16;
             let func_idx = match regs.get(1) {
@@ -1227,8 +1271,8 @@ pub struct Value {
 }
 
 use crate::value_layout::{
-    is_float_raw, sext48, PAYLOAD_MASK, TAG_ACTOR, TAG_BOOL, TAG_CLOSURE, TAG_INT, TAG_MASK,
-    TAG_NIL, TAG_PTR, TAG_STRING, TAG_UNIT,
+    is_float_raw, sext48, tag_object, PAYLOAD_MASK, TAG_ACTOR, TAG_BOOL, TAG_CLOSURE, TAG_INT,
+    TAG_MASK, TAG_NIL, TAG_OBJECT, TAG_PTR, TAG_STRING, TAG_UNIT,
 };
 
 impl Value {
@@ -1274,6 +1318,13 @@ impl Value {
     pub fn closure(id: u64) -> Self {
         Value {
             raw: TAG_CLOSURE | (id & PAYLOAD_MASK),
+        }
+    }
+
+    /// Create an object-store reference.
+    pub fn object(id: u64) -> Self {
+        Value {
+            raw: tag_object(id),
         }
     }
 
@@ -1364,6 +1415,17 @@ impl Value {
     pub fn is_closure(&self) -> bool {
         (self.raw & TAG_MASK) == TAG_CLOSURE
     }
+    pub fn is_object(&self) -> bool {
+        (self.raw & TAG_MASK) == TAG_OBJECT
+    }
+
+    pub fn as_object_id(&self) -> Option<u64> {
+        if self.is_object() {
+            Some(self.raw & PAYLOAD_MASK)
+        } else {
+            None
+        }
+    }
 
     pub fn as_string_id(&self) -> Option<u32> {
         if self.is_string() {
@@ -1409,6 +1471,8 @@ impl Value {
             b.to_string()
         } else if self.is_actor_ref() {
             format!("#Actor:{}", self.as_actor_id().unwrap())
+        } else if let Some(oid) = self.as_object_id() {
+            format!("#Object:{}", oid)
         } else {
             format!("#Value({:x})", self.raw)
         }
@@ -1811,6 +1875,39 @@ pub fn is_debug_pause(err: &NuError) -> bool {
     matches!(err, NuError::VMError { msg, .. } if msg.split('\n').next() == Some(DEBUG_PAUSE_MSG))
 }
 
+/// Runtime error for integer arithmetic overflowing the 48-bit tagged range.
+/// Used by the compiled-code runtime helpers (`src/jit/runtime.rs`), which
+/// cannot unwind and report the error via `record_arith_error`.
+pub fn int_overflow_error(op: &str, a: i64, b: i64) -> NuError {
+    NuError::runtime_error(
+        format!(
+            "integer overflow: `{}` on {} and {} exceeds the 48-bit range \
+             [{}, {}] supported by the VM encoding \
+             (spec: Int is i64; wider encoding is a known limitation)",
+            op,
+            a,
+            b,
+            crate::value_layout::INT48_MIN,
+            crate::value_layout::INT48_MAX
+        ),
+        Span::default(),
+    )
+}
+
+/// Runtime error for arithmetic on operands of the wrong type.
+/// Used by the compiled-code runtime helpers (`src/jit/runtime.rs`).
+pub fn arith_type_error(op: &str, a: Value, b: Value) -> NuError {
+    NuError::runtime_error(
+        format!(
+            "type error: arithmetic `{}` requires numeric operands, got {} and {}",
+            op,
+            a.to_string_repr(),
+            b.to_string_repr()
+        ),
+        Span::default(),
+    )
+}
+
 /// Captured environment of a closure: the lifted function it wraps plus the
 /// values captured at creation time.
 #[derive(Debug, Clone)]
@@ -2123,6 +2220,18 @@ impl VM {
     /// the known unbounded-retention limitation documented on `closure_envs`.
     pub fn closure_env_count(&self) -> usize {
         self.closure_envs.len()
+    }
+
+    /// Take routes registered by `perform Web.route(...)` during the most
+    /// recent run. Only populated when the VM is using `StandaloneVmCallbacks`.
+    pub fn take_web_routes(&mut self) -> Vec<crate::runtime::WebRoute> {
+        if let Some(callbacks) = (&mut *self.actor_callbacks as &mut dyn std::any::Any)
+            .downcast_mut::<StandaloneVmCallbacks>()
+        {
+            std::mem::take(&mut callbacks.routes)
+        } else {
+            Vec::new()
+        }
     }
     /// Get a closure environment by index.
     pub fn closure_env(&self, idx: usize) -> Option<&ClosureEnv> {
@@ -3402,36 +3511,6 @@ impl VM {
         self.frames[frame_idx].regs[instr.op3 as usize] = val;
         Ok(())
     }
-    fn step_call(
-        &mut self,
-        frame_idx: usize,
-        module_idx: usize,
-        instr: Instruction,
-    ) -> NuResult<()> {
-        let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
-        let argc = instr.op2;
-        let dst = instr.op3;
-        let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
-        let code_offset = self
-            .modules
-            .get(module_idx)
-            .and_then(|m| m.function_table.get(func_idx))
-            .copied()
-            .ok_or_else(|| NuError::VMError {
-                msg: format!("Function {} not found", func_idx),
-                span: Span::default(),
-            })?;
-        let mut new_frame = Frame::new(Some(frame_idx), module_idx);
-        new_frame.pc = code_offset;
-        for i in 0..(argc as usize).min(256) {
-            new_frame.regs[i] = self.frames[frame_idx].regs[i];
-        }
-        new_frame.return_dst = dst;
-        new_frame.closure_env = closure_env;
-        self.frames.push(new_frame);
-        self.current_frame_idx = Some(self.frames.len() - 1);
-        Ok(())
-    }
     fn step_spawn(
         &mut self,
         frame_idx: usize,
@@ -3760,16 +3839,19 @@ impl VM {
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
         // Default 10M steps — long-running actors (servers, processors) may need more.
+        // Check every 64 steps to reduce branch overhead (safety limit, not precise).
         self.step_count += 1;
-        let limit = Self::step_limit();
-        if self.step_count > limit {
-            return Err(NuError::VMError {
-                msg: format!(
-                    "Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.",
-                    self.step_count
-                ),
-                span: Span::default(),
-            });
+        if self.step_count & 63 == 0 {
+            let limit = Self::step_limit();
+            if self.step_count > limit {
+                return Err(NuError::VMError {
+                    msg: format!(
+                        "Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.",
+                        self.step_count
+                    ),
+                    span: Span::default(),
+                });
+            }
         }
 
         let frame_idx = self.current_frame_idx.ok_or_else(|| NuError::VMError {
@@ -3787,25 +3869,23 @@ impl VM {
             return Ok(());
         }
 
-        // Fetch instruction
+        // Fetch instruction - cache frame and module references to avoid repeated indexing
         let module_idx = self.frames[frame_idx].module_idx;
         let pc = self.frames[frame_idx].pc;
-        let instr = {
-            let module = self
-                .modules
-                .get(module_idx)
-                .ok_or_else(|| NuError::VMError {
-                    msg: format!("Module {} not found", module_idx),
-                    span: Span::default(),
-                })?;
-            *module
-                .instructions
-                .get(pc)
-                .ok_or_else(|| NuError::VMError {
-                    msg: format!("PC {} out of bounds in module {}", pc, module_idx),
-                    span: Span::default(),
-                })?
-        };
+        let module = self
+            .modules
+            .get(module_idx)
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("Module {} not found", module_idx),
+                span: Span::default(),
+            })?;
+        let instr = *module
+            .instructions
+            .get(pc)
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("PC {} out of bounds in module {}", pc, module_idx),
+                span: Span::default(),
+            })?;
 
         // Debugger checkpoint: invoked before the instruction executes, so a
         // pause leaves `pc` pointing at the current instruction (resume
@@ -3837,14 +3917,42 @@ impl VM {
 
         self.frames[frame_idx].pc += 1;
 
+        // Cache a mutable reference to the current frame for the duration of
+        // this instruction. The reference is derived from a raw pointer so it
+        // does not conflict with other borrows of `self` inside the opcode
+        // arms. It remains valid because arms that grow/shrink the frame
+        // vector (Call, ClosureCall, Ret, RetVal) return immediately and do
+        // not use the cached reference after mutating the vector.
+        let frame = unsafe { &mut *self.frames.as_mut_ptr().add(frame_idx) };
+        let constants = &module.constants;
+
         match instr.opcode {
             // -- Frame-manipulating opcodes --
             OpCode::Call => {
-                self.step_call(frame_idx, module_idx, instr)?;
+                let func_val = frame.regs[instr.op1 as usize];
+                let argc = instr.op2;
+                let dst = instr.op3;
+                let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
+                let code_offset = self
+                    .modules
+                    .get(module_idx)
+                    .and_then(|m| m.function_table.get(func_idx))
+                    .copied()
+                    .ok_or_else(|| NuError::VMError {
+                        msg: format!("Function {} not found", func_idx),
+                        span: Span::default(),
+                    })?;
+                let mut new_frame = Frame::new(Some(frame_idx), module_idx);
+                new_frame.pc = code_offset;
+                new_frame.regs[..argc as usize].copy_from_slice(&frame.regs[..argc as usize]);
+                new_frame.return_dst = dst;
+                new_frame.closure_env = closure_env;
+                self.frames.push(new_frame);
+                self.current_frame_idx = Some(self.frames.len() - 1);
                 return Ok(());
             }
             OpCode::TailCall => {
-                let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let func_val = frame.regs[instr.op1 as usize];
                 let func_idx = func_val.as_int().ok_or_else(|| NuError::VMError {
                     msg: "Invalid function reference".to_string(),
                     span: Span::default(),
@@ -3858,13 +3966,13 @@ impl VM {
                         msg: format!("Function {} not found", func_idx),
                         span: Span::default(),
                     })?;
-                self.frames[frame_idx].pc = code_offset;
+                frame.pc = code_offset;
                 return Ok(());
             }
             OpCode::Ret => {
-                let ret_val = self.frames[frame_idx].regs[0];
-                if let Some(caller_idx) = self.frames[frame_idx].caller_idx {
-                    let dst = self.frames[frame_idx].return_dst;
+                let ret_val = frame.regs[0];
+                if let Some(caller_idx) = frame.caller_idx {
+                    let dst = frame.return_dst;
                     self.frames[caller_idx].regs[dst as usize] = ret_val;
                     self.frames.pop();
                     self.current_frame_idx = Some(caller_idx);
@@ -3873,16 +3981,16 @@ impl VM {
                 // No caller frame: halt so that run/run_from stop at the end
                 // of a top-level behavior handler instead of falling through
                 // into the next compiled code region.
-                self.frames[frame_idx].regs[0] = ret_val;
+                frame.regs[0] = ret_val;
                 return Err(NuError::VMError {
                     msg: "Halt".to_string(),
                     span: Span::default(),
                 });
             }
             OpCode::RetVal => {
-                let ret_val = self.frames[frame_idx].regs[instr.op1 as usize];
-                if let Some(caller_idx) = self.frames[frame_idx].caller_idx {
-                    let dst = self.frames[frame_idx].return_dst;
+                let ret_val = frame.regs[instr.op1 as usize];
+                if let Some(caller_idx) = frame.caller_idx {
+                    let dst = frame.return_dst;
                     self.frames[caller_idx].regs[dst as usize] = ret_val;
                     self.frames.pop();
                     self.current_frame_idx = Some(caller_idx);
@@ -3891,14 +3999,14 @@ impl VM {
                 // No caller frame: halt so that run/run_from stop at the end
                 // of a top-level behavior handler instead of falling through
                 // into the next compiled code region.
-                self.frames[frame_idx].regs[0] = ret_val;
+                frame.regs[0] = ret_val;
                 return Err(NuError::VMError {
                     msg: "Halt".to_string(),
                     span: Span::default(),
                 });
             }
             OpCode::ClosureCall => {
-                let closure_val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let closure_val = frame.regs[instr.op1 as usize];
                 let dst = instr.op3;
                 let (func_idx, closure_env) = self.resolve_function(closure_val, module_idx)?;
                 let code_offset = self
@@ -3912,7 +4020,16 @@ impl VM {
                     })?;
                 let mut new_frame = Frame::new(Some(frame_idx), module_idx);
                 new_frame.pc = code_offset;
-                new_frame.regs = self.frames[frame_idx].regs;
+                // Bounded copy: only copy registers the callee will read.
+                // local_count covers LOCAL_BASE + all callee locals, which
+                // includes the staging zone (r0..r11) where call args live.
+                let local_count = self.modules[module_idx]
+                    .function_local_counts
+                    .get(func_idx)
+                    .copied()
+                    .unwrap_or(256);
+                let copy_n = local_count.min(256);
+                new_frame.regs[..copy_n].copy_from_slice(&frame.regs[..copy_n]);
                 new_frame.return_dst = dst;
                 new_frame.closure_env = closure_env;
                 self.frames.push(new_frame);
@@ -3923,8 +4040,8 @@ impl VM {
                 self.step_fficall(instr, frame_idx, module_idx)?;
             }
             OpCode::Panic => {
-                let pc = self.frames[frame_idx].pc.saturating_sub(1);
-                let r0_repr = self.frames[frame_idx].regs[0].to_string_repr();
+                let pc = frame.pc.saturating_sub(1);
+                let r0_repr = frame.regs[0].to_string_repr();
                 return Err(NuError::VMError {
                     msg: format!("Panic at PC {}: r0={}", pc, r0_repr),
                     span: Span::default(),
@@ -3937,7 +4054,7 @@ impl VM {
                 return Ok(());
             }
             OpCode::Send => {
-                let actor_val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let actor_val = frame.regs[instr.op1 as usize];
                 let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
                 let (param_count, behavior_id) = self
                     .modules
@@ -3945,15 +4062,13 @@ impl VM {
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, behavior_idx as u16))
                     .unwrap_or((0, 0));
-                let args: Vec<Value> = (0..param_count)
-                    .map(|i| self.frames[frame_idx].regs[i])
-                    .collect();
+                let args: Vec<Value> = (0..param_count).map(|i| frame.regs[i]).collect();
                 self.actor_callbacks
                     .send_message(actor_val, behavior_id, &args);
                 return Ok(());
             }
             OpCode::Ask => {
-                let actor_val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let actor_val = frame.regs[instr.op1 as usize];
                 let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
                 let (param_count, behavior_id) = self
                     .modules
@@ -3961,38 +4076,33 @@ impl VM {
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, behavior_idx as u16))
                     .unwrap_or((0, 0));
-                let args: Vec<Value> = (0..param_count)
-                    .map(|i| self.frames[frame_idx].regs[i])
-                    .collect();
+                let args: Vec<Value> = (0..param_count).map(|i| frame.regs[i]).collect();
                 let result = self
                     .actor_callbacks
                     .ask_actor(actor_val, behavior_id, &args);
-                self.frames[frame_idx].regs[instr.op1 as usize] = result;
+                frame.regs[instr.op1 as usize] = result;
                 return Ok(());
             }
             OpCode::SelfOp => {
                 let actor_id = self.actor_callbacks.current_actor_id().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op1 as usize] = Value::actor_ref(actor_id);
+                frame.regs[instr.op1 as usize] = Value::actor_ref(actor_id);
             }
             OpCode::StateGet => {
                 let field_idx = instr.imm16() as usize;
                 let field = self.module_const_string(module_idx, field_idx);
-                self.frames[frame_idx].regs[instr.op3 as usize] =
-                    self.actor_callbacks.get_state_field(&field);
+                frame.regs[instr.op3 as usize] = self.actor_callbacks.get_state_field(&field);
             }
             OpCode::StateSet => {
                 let field_idx = instr.imm16() as usize;
                 let field = self.module_const_string(module_idx, field_idx);
-                let val = self.frames[frame_idx].regs[instr.op3 as usize];
+                let val = frame.regs[instr.op3 as usize];
                 self.actor_callbacks.set_state_field(&field, val);
             }
             OpCode::Emit => {
                 let event_idx = instr.imm16() as usize;
                 let event = self.module_const_string(module_idx, event_idx);
                 let arg_count = instr.op3 as usize;
-                let args: Vec<Value> = (0..arg_count)
-                    .map(|i| self.frames[frame_idx].regs[i])
-                    .collect();
+                let args: Vec<Value> = (0..arg_count).map(|i| frame.regs[i]).collect();
                 self.actor_callbacks.emit_event(&event, &args);
             }
             OpCode::SignalWait => {
@@ -4001,14 +4111,14 @@ impl VM {
                 let dst = instr.op3;
                 match self.actor_callbacks.wait_signal(&name) {
                     SignalWaitResult::Ready(v) => {
-                        self.frames[frame_idx].regs[dst as usize] = v;
+                        frame.regs[dst as usize] = v;
                     }
                     SignalWaitResult::NotReady => {
                         self.suspended_signal_name = Some(name.clone());
                         // Leave the PC pointing at the SignalWait instruction so
                         // resumption re-executes it and can write the result into
                         // the destination register once the signal is received.
-                        self.frames[frame_idx].pc -= 1;
+                        frame.pc -= 1;
                         return Err(NuError::Suspended(VmSuspension::SignalWait));
                     }
                 }
@@ -4022,20 +4132,18 @@ impl VM {
 
             // -- Constants --
             OpCode::Const0 => {
-                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(0);
+                frame.regs[instr.op1 as usize] = Value::int(0);
             }
             OpCode::Const1 => {
-                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(1);
+                frame.regs[instr.op1 as usize] = Value::int(1);
             }
             OpCode::Const2 => {
-                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(2);
+                frame.regs[instr.op1 as usize] = Value::int(2);
             }
             OpCode::ConstU => {
                 let idx = instr.imm16() as usize;
-                let val = self
-                    .modules
-                    .get(module_idx)
-                    .and_then(|m| m.constants.get(idx))
+                let val = constants
+                    .get(idx)
                     .map(|c| match *c {
                         Constant::Int(n) => Value::int(n),
                         Constant::Float(f) => Value::float(f),
@@ -4046,11 +4154,11 @@ impl VM {
                         _ => Value::nil(),
                     })
                     .unwrap_or(Value::nil());
-                self.frames[frame_idx].regs[instr.op3 as usize] = val;
+                frame.regs[instr.op3 as usize] = val;
             }
             OpCode::Closure => {
                 let func_idx = instr.imm16() as u64;
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::closure(func_idx);
+                frame.regs[instr.op3 as usize] = Value::closure(func_idx);
             }
             OpCode::CapStore => {
                 self.step_capstore(instr, frame_idx)?;
@@ -4064,8 +4172,8 @@ impl VM {
 
             // -- Arithmetic --
             OpCode::IAdd => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
                 // String concatenation fallback: when the compiler could not
                 // determine operand types at compile time (e.g. unannotated
                 // function parameters), the IAdd opcode is emitted instead of
@@ -4078,36 +4186,36 @@ impl VM {
                     let s1 = sa.unwrap_or_else(|| a.to_string_repr());
                     let s2 = sb.unwrap_or_else(|| b.to_string_repr());
                     let result = format!("{}{}", s1, s2);
-                    self.frames[frame_idx].regs[instr.op3 as usize] = self.allocate_string(&result);
+                    frame.regs[instr.op3 as usize] = self.allocate_string(&result);
                 } else if a.is_float() && b.is_float() {
-                    self.frames[frame_idx].regs[instr.op3 as usize] =
+                    frame.regs[instr.op3 as usize] =
                         Value::float(a.as_float().unwrap() + b.as_float().unwrap());
                 } else {
-                    self.frames[frame_idx].regs[instr.op3 as usize] =
+                    frame.regs[instr.op3 as usize] =
                         Value::int(a.as_int().unwrap_or(0) + b.as_int().unwrap_or(0));
                 }
             }
             OpCode::ISub => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
                 if a.is_float() && b.is_float() {
-                    self.frames[frame_idx].regs[instr.op3 as usize] =
+                    frame.regs[instr.op3 as usize] =
                         Value::float(a.as_float().unwrap() - b.as_float().unwrap());
                 } else {
-                    self.frames[frame_idx].regs[instr.op3 as usize] =
+                    frame.regs[instr.op3 as usize] =
                         Value::int(a.as_int().unwrap_or(0) - b.as_int().unwrap_or(0));
                 }
             }
             OpCode::IMul => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
                 if a.is_float() && b.is_float() {
-                    self.frames[frame_idx].regs[instr.op3 as usize] =
+                    frame.regs[instr.op3 as usize] =
                         Value::float(a.as_float().unwrap() * b.as_float().unwrap());
                 } else {
                     // wrapping_mul: 48-bit operands can overflow i64 when
                     // multiplied; the result is masked to 48 bits by Value::int.
-                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(
+                    frame.regs[instr.op3 as usize] = Value::int(
                         a.as_int()
                             .unwrap_or(0)
                             .wrapping_mul(b.as_int().unwrap_or(0)),
@@ -4124,60 +4232,38 @@ impl VM {
                 self.step_ipow(frame_idx, instr)?;
             }
             OpCode::Xor => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a ^ b);
+                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
+                frame.regs[instr.op3 as usize] = Value::int(a ^ b);
             }
             OpCode::Shl => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0);
+                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
                 let shift = (b as u64) & 0x3f;
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a << shift);
+                frame.regs[instr.op3 as usize] = Value::int(a << shift);
             }
             OpCode::Shr => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0);
+                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
                 let shift = (b as u64) & 0x3f;
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a >> shift);
+                frame.regs[instr.op3 as usize] = Value::int(a >> shift);
             }
             OpCode::BitAnd => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a & b);
+                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
+                frame.regs[instr.op3 as usize] = Value::int(a & b);
             }
             OpCode::BitOr => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a | b);
+                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
+                frame.regs[instr.op3 as usize] = Value::int(a | b);
             }
             OpCode::INeg => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let a = frame.regs[instr.op1 as usize];
                 if a.is_float() {
-                    self.frames[frame_idx].regs[instr.op2 as usize] =
-                        Value::float(-a.as_float().unwrap());
+                    frame.regs[instr.op2 as usize] = Value::float(-a.as_float().unwrap());
                 } else {
-                    self.frames[frame_idx].regs[instr.op2 as usize] =
-                        Value::int(-a.as_int().unwrap_or(0));
+                    frame.regs[instr.op2 as usize] = Value::int(-a.as_int().unwrap_or(0));
                 }
             }
             // IInc/IDec mirror the JIT helpers `nulang_iinc`/`nulang_idec`
@@ -4186,89 +4272,63 @@ impl VM {
             // and the result is re-tagged as an int.
             OpCode::IInc => {
                 let reg = instr.op1 as usize;
-                let a = sext48(self.frames[frame_idx].regs[reg].as_raw() & PAYLOAD_MASK);
-                self.frames[frame_idx].regs[reg] = Value::int(a + 1);
+                let a = sext48(frame.regs[reg].as_raw() & PAYLOAD_MASK);
+                frame.regs[reg] = Value::int(a + 1);
             }
             OpCode::IDec => {
                 let reg = instr.op1 as usize;
-                let a = sext48(self.frames[frame_idx].regs[reg].as_raw() & PAYLOAD_MASK);
-                self.frames[frame_idx].regs[reg] = Value::int(a - 1);
+                let a = sext48(frame.regs[reg].as_raw() & PAYLOAD_MASK);
+                frame.regs[reg] = Value::int(a - 1);
             }
 
             // -- Float arithmetic --
             OpCode::FAdd => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a + b);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::float(a + b);
             }
             OpCode::FSub => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a - b);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::float(a - b);
             }
             OpCode::FMul => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a * b);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::float(a * b);
             }
             OpCode::FDiv => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(1.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0.0 {
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(1.0);
+                frame.regs[instr.op3 as usize] = if b != 0.0 {
                     Value::float(a / b)
                 } else {
                     Value::nil()
                 };
             }
             OpCode::FPow => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a.powf(b));
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::float(a.powf(b));
             }
             OpCode::FMod => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(1.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0.0 {
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(1.0);
+                frame.regs[instr.op3 as usize] = if b != 0.0 {
                     Value::float(a % b)
                 } else {
                     Value::nil()
                 };
             }
             OpCode::FNeg => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(-a);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::float(-a);
             }
             // -- Comparison --
             OpCode::ICmpEq => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
+                frame.regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(
                         (a.as_float().unwrap() - b.as_float().unwrap()).abs() < f64::EPSILON,
                     )
@@ -4300,9 +4360,9 @@ impl VM {
                 };
             }
             OpCode::ICmpLt => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
+                frame.regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() < b.as_float().unwrap())
                 } else if a.is_int() && b.is_int() {
                     Value::bool(a.as_int().unwrap() < b.as_int().unwrap())
@@ -4315,9 +4375,9 @@ impl VM {
                 };
             }
             OpCode::ICmpGt => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
+                frame.regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() > b.as_float().unwrap())
                 } else if a.is_int() && b.is_int() {
                     Value::bool(a.as_int().unwrap() > b.as_int().unwrap())
@@ -4330,9 +4390,9 @@ impl VM {
                 };
             }
             OpCode::ICmpLe => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
+                frame.regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() <= b.as_float().unwrap())
                 } else if a.is_int() && b.is_int() {
                     Value::bool(a.as_int().unwrap() <= b.as_int().unwrap())
@@ -4345,9 +4405,9 @@ impl VM {
                 };
             }
             OpCode::ICmpGe => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
+                frame.regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() >= b.as_float().unwrap())
                 } else if a.is_int() && b.is_int() {
                     Value::bool(a.as_int().unwrap() >= b.as_int().unwrap())
@@ -4360,36 +4420,23 @@ impl VM {
                 };
             }
             OpCode::FCmpEq => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] =
-                    Value::bool((a - b).abs() < f64::EPSILON);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::bool((a - b).abs() < f64::EPSILON);
             }
             OpCode::FCmpLt => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a < b);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::bool(a < b);
             }
             OpCode::FCmpGt => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_float()
-                    .unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a > b);
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::bool(a > b);
             }
             OpCode::SCmpEq => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                let a = frame.regs[instr.op1 as usize];
+                let b = frame.regs[instr.op2 as usize];
                 let eq = match (
                     self.string_operand(module_idx, a),
                     self.string_operand(module_idx, b),
@@ -4397,16 +4444,14 @@ impl VM {
                     (Some(sa), Some(sb)) => sa == sb,
                     _ => false,
                 };
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(eq);
+                frame.regs[instr.op3 as usize] = Value::bool(eq);
             }
 
             // -- Arrays (actor-heap backed; no longer leaked) --
             OpCode::ArrAlloc => {
-                let len = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0) as usize;
+                let len = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
                 let size = len.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op2 as usize] =
+                frame.regs[instr.op2 as usize] =
                     if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Array) {
                         unsafe {
                             let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, len);
@@ -4426,7 +4471,7 @@ impl VM {
                 self.step_arrstore(frame_idx, instr)?;
             }
             OpCode::ArrLen => {
-                let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+                let arr_ptr = frame.regs[instr.op1 as usize]
                     .as_ptr()
                     .unwrap_or(std::ptr::null_mut());
                 let len = if !arr_ptr.is_null() {
@@ -4434,7 +4479,7 @@ impl VM {
                 } else {
                     0
                 };
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(len);
+                frame.regs[instr.op2 as usize] = Value::int(len);
             }
 
             // -- Records (flat array indexed by module field id) --
@@ -4443,7 +4488,7 @@ impl VM {
                 let size = slot_count
                     .checked_mul(std::mem::size_of::<Value>())
                     .unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op2 as usize] = if let Some(ptr) =
+                frame.regs[instr.op2 as usize] = if let Some(ptr) =
                     self.actor_callbacks.alloc(size, HeapTypeTag::Record)
                 {
                     unsafe {
@@ -4471,7 +4516,7 @@ impl VM {
             OpCode::TupleMk => {
                 let count = instr.op1 as usize;
                 let size = count.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op2 as usize] =
+                frame.regs[instr.op2 as usize] =
                     if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Tuple) {
                         unsafe {
                             let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, count);
@@ -4493,33 +4538,23 @@ impl VM {
 
             // -- Boolean logic --
             OpCode::And => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a && b);
+                let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                let b = frame.regs[instr.op2 as usize].as_bool().unwrap_or(false);
+                frame.regs[instr.op3 as usize] = Value::bool(a && b);
             }
             OpCode::Or => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a || b);
+                let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                let b = frame.regs[instr.op2 as usize].as_bool().unwrap_or(false);
+                frame.regs[instr.op3 as usize] = Value::bool(a || b);
             }
             OpCode::Not => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::bool(!a);
+                let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                frame.regs[instr.op2 as usize] = Value::bool(!a);
             }
 
             // -- Type checks --
             OpCode::IsTag => {
-                let val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let val = frame.regs[instr.op1 as usize];
                 let tag_id = instr.op2;
                 let result = match tag_id {
                     0x01 => val.is_nil(),
@@ -4535,53 +4570,46 @@ impl VM {
                     0x0B => false, // tuple
                     _ => false,
                 };
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(result);
+                frame.regs[instr.op3 as usize] = Value::bool(result);
             }
 
             // -- Register moves --
             OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
-                let src = self.frames[frame_idx].regs[instr.op1 as usize];
-                self.frames[frame_idx].regs[instr.op2 as usize] = src;
+                let src = frame.regs[instr.op1 as usize];
+                frame.regs[instr.op2 as usize] = src;
             }
             OpCode::Swap => {
                 let a = instr.op1 as usize;
                 let b = instr.op2 as usize;
-                let tmp = self.frames[frame_idx].regs[a];
-                self.frames[frame_idx].regs[a] = self.frames[frame_idx].regs[b];
-                self.frames[frame_idx].regs[b] = tmp;
+                let tmp = frame.regs[a];
+                frame.regs[a] = frame.regs[b];
+                frame.regs[b] = tmp;
             }
 
             // -- Control flow (non-consuming) --
             OpCode::Jmp => {
                 let offset = instr.imm16() as i16;
-                self.frames[frame_idx].pc =
-                    (self.frames[frame_idx].pc as i64 + offset as i64 - 1) as usize;
+                frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
             }
             OpCode::JmpT => {
-                let cond = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
+                let cond = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 if cond {
                     let offset = instr.offset16() as i16;
-                    self.frames[frame_idx].pc =
-                        (self.frames[frame_idx].pc as i64 + offset as i64 - 1) as usize;
+                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                 }
             }
             OpCode::JmpF => {
-                let cond = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_bool()
-                    .unwrap_or(false);
+                let cond = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 if !cond {
                     let offset = instr.offset16() as i16;
-                    self.frames[frame_idx].pc =
-                        (self.frames[frame_idx].pc as i64 + offset as i64 - 1) as usize;
+                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                 }
             }
 
             // -- Algebraic Effects --
             OpCode::Handle => {
                 let handler_table_idx = instr.op1 as usize;
-                let resume_pc = self.frames[frame_idx].pc; // already incremented past Handle
+                let resume_pc = frame.pc; // already incremented past Handle
                 let resume_dst = instr.op2;
                 self.handler_stack.push(HandlerFrame::new(
                     handler_table_idx,
@@ -4597,7 +4625,7 @@ impl VM {
                 self.step_perform_direct(instr, frame_idx, module_idx)?;
             }
             OpCode::Resume => {
-                let val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let val = frame.regs[instr.op1 as usize];
                 // The continuation lives on the innermost *matching* handler
                 // frame (Perform uses rposition), which is not necessarily the
                 // top of the stack when nested handlers bind different effects.
@@ -4609,9 +4637,9 @@ impl VM {
                     .find(|hf| hf.single_shot_state.is_some())
                 {
                     if let Some(state) = hf.single_shot_state.take() {
-                        self.frames[frame_idx].regs = state.regs;
-                        self.frames[frame_idx].regs[state.resume_dst as usize] = val;
-                        self.frames[frame_idx].pc = state.resume_pc;
+                        frame.regs = state.regs;
+                        frame.regs[state.resume_dst as usize] = val;
+                        frame.pc = state.resume_pc;
                         self.step_count = state.step_count;
                         return Ok(());
                     }
@@ -4660,33 +4688,25 @@ impl VM {
                     .as_ref()
                     .map(|cb| cb.node_id())
                     .unwrap_or(self.node_id);
-                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(node_id as i64);
+                frame.regs[instr.op1 as usize] = Value::int(node_id as i64);
             }
             OpCode::Migrate => {
-                let actor_id = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_int()
-                    .unwrap_or(0) as u64;
-                let target_node_id = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0) as u64;
+                let actor_id = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
+                let target_node_id = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as u64;
                 self.pending_migrations.push((actor_id, target_node_id));
                 if let Some(ref mut cb) = self.distributed_callbacks {
                     cb.migrate(actor_id, target_node_id);
                 }
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::unit();
+                frame.regs[instr.op3 as usize] = Value::unit();
             }
             OpCode::RAsk => {
                 // The target register holds an actor-ref VALUE (TAG_ACTOR)
                 // when the actor expression is a real ref (e.g. a spawn@node
                 // handle); accept the payload directly, with a plain-int
                 // fallback for hand-assembled modules.
-                let target_actor = self.frames[frame_idx].regs[instr.op1 as usize]
+                let target_actor = frame.regs[instr.op1 as usize]
                     .as_actor_id()
-                    .or_else(|| {
-                        self.frames[frame_idx].regs[instr.op1 as usize]
-                            .as_int()
-                            .map(|v| v as u64)
-                    })
+                    .or_else(|| frame.regs[instr.op1 as usize].as_int().map(|v| v as u64))
                     .unwrap_or(0);
                 // behavior_idx is a 16-bit behavior table index split across
                 // op2 (high) + op3 (low), same encoding as OpCode::Ask.
@@ -4697,10 +4717,8 @@ impl VM {
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, b.name.clone()))
                     .unwrap_or((0, String::new()));
-                let args: Vec<Value> = (0..param_count)
-                    .map(|i| self.frames[frame_idx].regs[i])
-                    .collect();
-                let timeout_ms = self.frames[frame_idx].regs[12].as_int().unwrap_or(5_000) as u64;
+                let args: Vec<Value> = (0..param_count).map(|i| frame.regs[i]).collect();
+                let timeout_ms = frame.regs[12].as_int().unwrap_or(5_000) as u64;
                 let result = if let Some(ref mut cb) = self.distributed_callbacks {
                     cb.remote_ask(target_actor, &behavior_name, &args, timeout_ms)
                 } else {
@@ -4708,7 +4726,7 @@ impl VM {
                 };
                 // Write result to op1 (matching local Ask's convention) so the
                 // codegen's `Move FUNC_VALUE_REG -> dst` picks it up correctly.
-                self.frames[frame_idx].regs[instr.op1 as usize] = result;
+                frame.regs[instr.op1 as usize] = result;
             }
             OpCode::Gossip => {
                 let message_const_idx = instr.op1 as usize;
@@ -4719,30 +4737,30 @@ impl VM {
                 } else {
                     Value::unit()
                 };
-                self.frames[frame_idx].regs[instr.op3 as usize] = result;
+                frame.regs[instr.op3 as usize] = result;
             }
 
             OpCode::SConcat => {
                 self.step_sconcat(frame_idx, module_idx, instr)?;
             }
             OpCode::SPrint => {
-                self.emit_output(&self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr());
+                self.emit_output(&frame.regs[instr.op1 as usize].to_string_repr());
             }
             OpCode::SRead => {
                 self.step_sread(frame_idx, module_idx, instr)?;
             }
             OpCode::FOpen => {
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::nil();
+                frame.regs[instr.op2 as usize] = Value::nil();
             }
             OpCode::FRead => {
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::nil();
+                frame.regs[instr.op2 as usize] = Value::nil();
             }
             OpCode::FWrite => {}
             OpCode::FClose => {}
             OpCode::Print => {
                 self.emit_output(&format!(
                     "{}\n",
-                    self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr()
+                    frame.regs[instr.op1 as usize].to_string_repr()
                 ));
             }
 
@@ -4753,10 +4771,7 @@ impl VM {
                 for i in (0..256).step_by(8) {
                     let mut line = format!("R{:03}-R{:03}: ", i, i + 7);
                     for j in 0..8 {
-                        line.push_str(&format!(
-                            "{:>20} ",
-                            self.frames[frame_idx].regs[i + j].to_string_repr()
-                        ));
+                        line.push_str(&format!("{:>20} ", frame.regs[i + j].to_string_repr()));
                     }
                     eprintln!("{}", line);
                 }
@@ -4781,10 +4796,10 @@ impl VM {
                 }
             }
             OpCode::MetaType => {
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0);
+                frame.regs[instr.op2 as usize] = Value::int(0);
             }
             OpCode::MetaCap => {
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0);
+                frame.regs[instr.op2 as usize] = Value::int(0);
             }
 
             // -- Register spilling for large functions --
@@ -4796,13 +4811,13 @@ impl VM {
                     .get(spill_idx as usize)
                     .copied()
                     .unwrap_or(Value::nil());
-                self.frames[frame_idx].regs[dst] = val;
+                frame.regs[dst] = val;
             }
             OpCode::SpillStore => {
                 let spill_idx = ((instr.op2 as u16) << 8) | (instr.op3 as u16);
                 let src = instr.op1 as usize;
-                let val = self.frames[frame_idx].regs[src];
-                let spilled = &mut self.frames[frame_idx].spilled;
+                let val = frame.regs[src];
+                let spilled = &mut frame.spilled;
                 if spill_idx as usize >= spilled.len() {
                     spilled.resize(spill_idx as usize + 1, Value::nil());
                 }
@@ -4814,7 +4829,7 @@ impl VM {
 
             // -- Reference counting / deallocation --
             OpCode::Drop => {
-                let reg = &mut self.frames[frame_idx].regs[instr.op1 as usize];
+                let reg = &mut frame.regs[instr.op1 as usize];
                 let val = *reg;
                 // Clear the register first so a duplicate Drop of the same
                 // register (e.g. a last-use drop followed by a redefinition
@@ -4881,7 +4896,7 @@ impl VM {
 
             // -- Constants (cont.) --
             OpCode::ConstM1 => {
-                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(-1);
+                frame.regs[instr.op1 as usize] = Value::int(-1);
             }
             OpCode::ConstL => {
                 // Reserved for constant pools >= 65536 entries. No current
@@ -4910,7 +4925,7 @@ impl VM {
 
             // -- Conversions --
             OpCode::IToF => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let a = frame.regs[instr.op1 as usize];
                 let int_val = if a.is_int() {
                     a.as_int().unwrap_or(0)
                 } else if a.is_float() {
@@ -4918,15 +4933,15 @@ impl VM {
                 } else {
                     sext48(a.as_raw() & PAYLOAD_MASK)
                 };
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::float(int_val as f64);
+                frame.regs[instr.op2 as usize] = Value::float(int_val as f64);
             }
             OpCode::FToI => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let a = frame.regs[instr.op1 as usize];
                 let float_val = a.as_float().unwrap_or(0.0);
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(float_val as i64);
+                frame.regs[instr.op2 as usize] = Value::int(float_val as i64);
             }
             OpCode::FToS => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let a = frame.regs[instr.op1 as usize];
                 let s = if let Some(f) = a.as_float() {
                     if f.fract() == 0.0 && f.is_finite() {
                         format!("{:.1}", f)
@@ -4936,7 +4951,7 @@ impl VM {
                 } else {
                     "0.0".to_string()
                 };
-                self.frames[frame_idx].regs[instr.op2 as usize] = self.allocate_string(&s);
+                frame.regs[instr.op2 as usize] = self.allocate_string(&s);
             }
 
             // -- Control Flow (cont.) --

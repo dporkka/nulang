@@ -1,0 +1,2 @@
+// Negative case: neg2_fstring_bad_expr — must be rejected by the parser (round 2).
+fn f() { f"{1 +}" }

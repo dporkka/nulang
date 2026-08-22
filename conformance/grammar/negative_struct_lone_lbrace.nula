@@ -1,0 +1,2 @@
+// Negative case: neg_struct_lone_lbrace — must be rejected by the parser.
+{

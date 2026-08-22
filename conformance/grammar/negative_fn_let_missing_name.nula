@@ -1,0 +1,2 @@
+// Negative case: neg_fn_let_missing_name — must be rejected by the parser.
+fn f() { let = 1 }

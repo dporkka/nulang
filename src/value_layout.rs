@@ -69,6 +69,8 @@ pub const TAG_ACTOR: u64 = 0x7FFD_0000_0000_0000;
 pub const TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
 /// Tag for closure references.
 pub const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
+/// Tag for shared object-store references (immutable `val` buffers).
+pub const TAG_OBJECT: u64 = 0x7FF5_0000_0000_0000;
 
 // ---------------------------------------------------------------------------
 // Integer range
@@ -180,6 +182,30 @@ pub fn tag_ptr(offset: u32) -> u64 {
     TAG_PTR | (offset as u64)
 }
 
+/// Pack an object-store id into a tagged object reference value.
+#[inline]
+pub fn tag_object(id: u64) -> u64 {
+    TAG_OBJECT | (id & PAYLOAD_MASK)
+}
+
+/// True when a **full pointer address** fits in the 48-bit payload without
+/// truncation.
+///
+/// The modern `TAG_PTR` encoding stores a 32-bit heap *offset* (see
+/// [`tag_ptr`]/[`as_ptr_raw`]), which is portable everywhere. However, the
+/// legacy `Value::ptr`/`Value::as_ptr` path in `vm.rs` stores the raw
+/// pointer address masked with [`PAYLOAD_MASK`]. On platforms with virtual
+/// address spaces wider than 48 bits (x86-64 LA57 5-level paging, AArch64
+/// with 52-bit VA, or any allocator returning high addresses), that masking
+/// silently truncates the address and produces a dangling pointer.
+///
+/// Pointer-producing code on the legacy path should check this predicate
+/// (or `debug_assert!` it) before packing an address into a value.
+#[inline]
+pub fn ptr_fits_payload(addr: u64) -> bool {
+    addr & !PAYLOAD_MASK == 0
+}
+
 /// Pack a raw u64 bit pattern into a tagged closure value.
 #[inline]
 pub fn tag_closure(payload: u64) -> u64 {
@@ -234,6 +260,7 @@ mod tests {
             TAG_ACTOR,
             TAG_STRING,
             TAG_CLOSURE,
+            TAG_OBJECT,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
@@ -256,6 +283,7 @@ mod tests {
             (TAG_ACTOR, "actor"),
             (TAG_STRING, "string"),
             (TAG_CLOSURE, "closure"),
+            (TAG_OBJECT, "object"),
         ];
         let mut seen = std::collections::HashSet::new();
         for &(tag, name) in tags {
@@ -313,10 +341,30 @@ mod tests {
     }
 
     #[test]
+    fn test_ptr_fits_payload() {
+        assert!(ptr_fits_payload(0));
+        assert!(ptr_fits_payload(0x0000_7FFF_FFFF_FFF8)); // typical x86-64 user VA
+        assert!(ptr_fits_payload(PAYLOAD_MASK));
+        // LA57 / AArch64-52 style addresses above 2^48 would be truncated
+        // by the legacy `Value::ptr` masking path.
+        assert!(!ptr_fits_payload(0x0001_0000_0000_0000));
+        assert!(!ptr_fits_payload(0x00FF_FFFF_FFFF_FFFF));
+    }
+
+    #[test]
     fn test_tag_closure() {
         let raw = tag_closure(0x5555);
         assert_eq!(raw & TAG_MASK, TAG_CLOSURE);
         assert_eq!(raw & PAYLOAD_MASK, 0x5555);
+    }
+
+    #[test]
+    fn test_tag_object() {
+        let raw = tag_object(0x1234_5678_9ABC);
+        assert_eq!(raw & TAG_MASK, TAG_OBJECT);
+        assert_eq!(raw & PAYLOAD_MASK, 0x1234_5678_9ABC); // already fits in 48 bits
+        let raw2 = tag_object(0xABCD_1234_5678_9ABC);
+        assert_eq!(raw2 & PAYLOAD_MASK, 0x1234_5678_9ABC); // truncated to 48 bits
     }
 
     #[test]
@@ -335,7 +383,7 @@ mod tests {
         assert!(!is_float_raw(0x7FF5_0000_0000_0000)); // NaN, not a tag, still NaN
         assert!(!is_float_raw(0x7FF8_0000_0000_0000)); // hardware quiet NaN == TAG_NIL
         assert!(!is_float_raw(0xFFF9_DEAD_BEEF_0000)); // arbitrary negative NaN
-        // The single reserved canonical NaN pattern IS a float.
+                                                       // The single reserved canonical NaN pattern IS a float.
         assert!(is_float_raw(CANONICAL_NAN_BITS));
     }
 
@@ -353,6 +401,7 @@ mod tests {
             TAG_ACTOR,
             TAG_STRING,
             TAG_CLOSURE,
+            TAG_OBJECT,
         ] {
             assert_ne!(upper, tag >> TAG_SHIFT, "canonical NaN aliases a tag");
         }
@@ -376,8 +425,14 @@ mod tests {
         assert!(hw_nan.is_nan());
         assert_eq!(float_bits(hw_nan), CANONICAL_NAN_BITS);
         assert_eq!(float_bits(0.0 * f64::INFINITY), CANONICAL_NAN_BITS);
-        assert_eq!(float_bits(f64::from_bits(0x7FF8_0000_0000_0000)), CANONICAL_NAN_BITS);
-        assert_eq!(float_bits(f64::from_bits(0x7FFC_0000_0000_0042)), CANONICAL_NAN_BITS);
+        assert_eq!(
+            float_bits(f64::from_bits(0x7FF8_0000_0000_0000)),
+            CANONICAL_NAN_BITS
+        );
+        assert_eq!(
+            float_bits(f64::from_bits(0x7FFC_0000_0000_0042)),
+            CANONICAL_NAN_BITS
+        );
     }
 
     #[test]

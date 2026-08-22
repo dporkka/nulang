@@ -1,0 +1,2 @@
+// Negative case: neg_state_toplevel — must be rejected by the parser.
+state n = 0

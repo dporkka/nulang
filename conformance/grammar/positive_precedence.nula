@@ -1,0 +1,48 @@
+// Positive cases: operator precedence surfaces (Pratt table in
+// src/parser.rs:30-46). Parse-conformance only — these cases pin that the
+// combined forms are *accepted*; the documented grouping quirk is noted in
+// docs/SPEC_RECONCILIATION.md §6 item 3.
+
+// case 01: term binds looser than factor: 1 + 2 * 3
+fn pr_term_factor() { 1 + 2 * 3 }
+// case 02: factor binds tighter than term on the left
+fn pr_factor_term() { 1 * 2 + 3 }
+// case 03: cmp binds looser than add
+fn pr_cmp_add() { 1 + 2 < 3 + 4 }
+// case 04: eq binds looser than cmp
+fn pr_eq_cmp() { 1 < 2 == true }
+// case 05: and binds looser than eq
+fn pr_and_eq() { 1 == 1 && 2 == 2 }
+// case 06: or binds looser than and
+fn pr_or_and() { true || false && false }
+// case 07: range binds between pipe and or
+fn pr_range_or() { true || 1 == 1 }
+// case 08: pipe binds looser than range
+fn pr_pipe_range() { x |> f }
+// case 09: DOCUMENTED QUIRK — bitwise binds TIGHTER than arithmetic:
+// `1 + 2 & 3` parses as `1 + (2 & 3)` (src/parser.rs:41-46).
+fn pr_quirk_bitand_over_add() { 1 + 2 & 3 }
+// case 10: quirk with xor
+fn pr_quirk_bitxor_over_sub() { 1 - 2 ^ 3 }
+// case 11: quirk with shifts over factor
+fn pr_quirk_shift_over_mul() { 2 * 3 << 1 }
+// case 12: quirk with ||| over addition
+fn pr_quirk_bitor_over_add() { 1 + 2 ||| 3 }
+// case 13: power binds tighter than unary minus: -2 ** 2 parses
+fn pr_pow_unary() { -2 ** 2 }
+// case 14: unary applies to a full binary operand
+fn pr_unary_binary() { !true == false }
+// case 15: assignment is right-associative
+fn pr_assign_right() { let x = 1; let y = 2; x = y = 3 }
+// case 16: deeply nested arithmetic (parser recursion, 64 levels)
+fn pr_deep_nest() {
+    ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+}
+// case 17: left-associativity of subtraction surface
+fn pr_left_assoc_sub() { 10 - 5 - 2 }
+// case 18: left-associativity of division surface
+fn pr_left_assoc_div() { 100 / 10 / 2 }
+// case 19: comparison chained with arithmetic both sides
+fn pr_cmp_both_sides() { 1 * 2 + 3 <= 4 + 5 * 6 }
+// case 20: unary not on parenthesized comparison
+fn pr_not_paren_cmp() { !(1 < 2) }

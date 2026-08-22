@@ -2,13 +2,11 @@
 
 use crate::bytecode::Constant;
 use crate::value_layout::{
-    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_CLOSURE, TAG_INT, TAG_MASK, TAG_PTR,
-    TAG_STRING,
+    is_float_raw, sext48, tag_int, INT48_MAX, INT48_MIN, PAYLOAD_MASK, TAG_CLOSURE, TAG_INT,
+    TAG_MASK, TAG_PTR, TAG_STRING,
 };
 use crate::vm::Value;
 use std::cell::{Cell, UnsafeCell};
-use std::ffi::CStr;
-
 // is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).
 
 /// Coerce a raw Nulang value to its string representation: the string content
@@ -34,6 +32,9 @@ fn raw_is_string(raw: u64) -> bool {
         if ptr.is_null() {
             return false;
         }
+        // SAFETY: TAG_PTR values reaching the JIT runtime are produced by
+        // `alloc_obj` on this thread's actor heap, so `ptr` is a live
+        // payload pointer and `header_of` recovers its valid header.
         unsafe {
             let header = &*ActorHeap::header_of(ptr);
             header.type_tag == HeapTypeTag::String
@@ -46,10 +47,18 @@ fn raw_is_string(raw: u64) -> bool {
 /// Allocate a heap string holding `s` and return its tagged pointer value.
 fn alloc_string_value(s: String) -> u64 {
     let bytes = s.into_bytes();
+    // SAFETY: `alloc_obj` returns a fresh payload of `bytes.len() + 1`
+    // bytes, so the copy plus trailing NUL fit exactly. The NUL satisfies
+    // the heap-string null-termination invariant relied on by
+    // `heap_string_payload` and other string readers.
     unsafe {
         if let Some(ptr) = alloc_obj(bytes.len() + 1, HeapTypeTag::String) {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
             *ptr.add(bytes.len()) = 0;
+            debug_assert!(
+                crate::value_layout::ptr_fits_payload(ptr as u64),
+                "heap pointer exceeds 48-bit value payload; address would be truncated"
+            );
             Value::ptr(ptr).as_raw()
         } else {
             Value::nil().as_raw()
@@ -182,11 +191,29 @@ pub extern "C" fn nulang_bitor(a: u64, b: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_ineg(a: u64) -> u64 {
+    // Match the interpreter's INeg: floats negate; ints negate with a
+    // 48-bit overflow check at INT48_MIN; anything else is a type error.
     if is_float_raw(a) {
         Value::float(-f64::from_bits(a)).as_raw()
     } else {
-        tag_int(-as_int_or_zero(a))
+        let v = Value::from_raw(a);
+        match v.as_int() {
+            Some(x) if x != INT48_MIN => Value::int(-x).as_raw(),
+            Some(x) => record_arith_error(crate::vm::int_overflow_error("neg", x, 0)),
+            None => record_arith_error(crate::vm::arith_type_error("neg", v, v)),
+        }
     }
+}
+
+/// Record an arithmetic runtime error for the AOT driver and yield nil
+/// (compiled code cannot unwind; see `AOT_PENDING_ERROR`).
+fn record_arith_error(e: crate::types::NuError) -> u64 {
+    let msg = match e {
+        crate::types::NuError::RuntimeError { msg, .. } => msg,
+        other => other.to_string(),
+    };
+    aot_set_pending_error(msg);
+    Value::nil().as_raw()
 }
 
 #[no_mangle]
@@ -355,15 +382,17 @@ pub extern "C" fn nulang_itof(a: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_ftoi(a: u64) -> u64 {
-    Value::int(f64::from_bits(a) as i64).as_raw()
+    // `as i64` saturates; clamp to the 48-bit payload range (see Value::int).
+    let n = (f64::from_bits(a) as i64).clamp(INT48_MIN, INT48_MAX);
+    Value::int(n).as_raw()
 }
 
-/// Float negate, matching the interpreter's `as_float().unwrap_or(0.0)`:
-/// any NaN bit pattern (i.e. any tagged value) negates to -0.0.
+/// Float negate, matching the interpreter's `FNeg`: floats negate (NaN stays
+/// NaN, canonicalized); any tagged (non-float) value maps to -0.0.
 #[no_mangle]
 pub extern "C" fn nulang_fneg(a: u64) -> u64 {
     let f = f64::from_bits(a);
-    let v = if f.is_nan() { 0.0 } else { f };
+    let v = if is_float_raw(a) { f } else { 0.0 };
     Value::float(-v).as_raw()
 }
 
@@ -401,6 +430,30 @@ impl CbPair {
 
 thread_local! {
     static JIT_CALLBACKS: UnsafeCell<CbPair> = UnsafeCell::new(CbPair::NULL);
+}
+
+thread_local! {
+    /// Pending runtime-error message set by arithmetic helpers (pow/neg/...)
+    /// when the interpreter would raise (48-bit overflow, type error).
+    /// JIT-compiled code cannot unwind, so the helper records the error here
+    /// and returns nil; `AotModule::run` (which CAN return an error) checks
+    /// this after the compiled entry point returns, keeping the AOT backend
+    /// in lockstep with the interpreter's checked arithmetic.
+    static AOT_PENDING_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record a runtime error for retrieval by the AOT driver (no-op semantics
+/// for the tiered JIT, which never inspects this slot).
+pub fn aot_set_pending_error(msg: String) {
+    AOT_PENDING_ERROR.with(|e| {
+        *e.borrow_mut() = Some(msg);
+    });
+}
+
+/// Take (and clear) the pending AOT runtime error, if any.
+pub fn aot_take_pending_error() -> Option<String> {
+    AOT_PENDING_ERROR.with(|e| e.borrow_mut().take())
 }
 
 pub unsafe fn set_jit_callbacks(cb: *mut dyn crate::vm::ActorVmCallbacks) {
@@ -476,19 +529,10 @@ fn resolve_jit_string(raw: u64) -> Option<String> {
         if ptr.is_null() {
             return None;
         }
-        // SAFETY: ptr is a valid ActorHeap allocation with a header.
-        // We check the type tag to ensure it's a string.
-        unsafe {
-            let header = &*ActorHeap::header_of(ptr);
-            if header.type_tag != HeapTypeTag::String {
-                return None;
-            }
-            Some(
-                CStr::from_ptr(ptr as *const std::ffi::c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
+        // SAFETY: ptr is a valid ActorHeap allocation with a header;
+        // `heap_string_payload` re-checks the type tag and bounds the scan
+        // for the NUL terminator by the recorded payload size.
+        unsafe { heap_string_payload(ptr) }
     } else {
         None
     }
@@ -875,19 +919,40 @@ pub fn resolve_string_coerce(raw: u64) -> Option<String> {
         if ptr.is_null() {
             return None;
         }
+        // SAFETY: TAG_PTR values reaching the JIT runtime are produced by
+        // `alloc_obj` on this thread's actor heap; `heap_string_payload`
+        // re-checks the type tag and bounds the NUL scan.
         unsafe {
-            let header = &*ActorHeap::header_of(ptr);
-            if header.type_tag != HeapTypeTag::String {
-                return None;
-            }
-            return Some(
-                std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+            return heap_string_payload(ptr);
         }
     }
     None
+}
+
+/// Read the string content of a heap string payload, or `None` when `ptr`
+/// does not point at a `HeapTypeTag::String` allocation.
+///
+/// Unlike a bare `CStr::from_ptr`, the scan for the NUL terminator is
+/// bounded by the payload size recorded in the object header, so a missing
+/// terminator (heap corruption or a foreign-constructed value) cannot read
+/// past the allocation.
+///
+/// # Safety
+/// `ptr` must be a live payload pointer returned by `alloc_obj` (or the
+/// equivalent actor-heap allocation) on this thread.
+unsafe fn heap_string_payload(ptr: *mut u8) -> Option<String> {
+    let header = &*ActorHeap::header_of(ptr);
+    if header.type_tag != HeapTypeTag::String {
+        return None;
+    }
+    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+    // SAFETY: `ptr..ptr+payload_size` is inside this live allocation.
+    let bytes = std::slice::from_raw_parts(ptr, payload_size);
+    // Find the NUL terminator within the allocation; fall back to the full
+    // payload (matching `to_string_lossy` behavior for unterminated data)
+    // instead of reading out of bounds.
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 #[no_mangle]
@@ -896,38 +961,42 @@ pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
     alloc_string_value(result)
 }
 
-/// Power operation: float pow when both operands are floats, else int pow.
-/// Int overflow wraps (wrapping_mul, matching the interpreter); a negative
-/// int exponent returns nil.
+/// Power operation: float pow when both operands are floats; int pow when both
+/// are ints. Integer exponentiation uses wrapping multiplication (matching the
+/// interpreter's `step_ipow`); a negative int exponent returns nil; anything
+/// else is a type error.
 #[no_mangle]
 pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
-    // Match the interpreter's step_ipow: both floats → powf; else int pow
-    // with wrapping_mul (negative exponent → nil).
     if is_float_raw(a) && is_float_raw(b) {
         let af = f64::from_bits(a);
         let bf = f64::from_bits(b);
         return Value::float(af.powf(bf)).as_raw();
     }
-    let base = as_int_or_zero(a);
-    let exp = as_int_or_zero(b);
-    if exp < 0 {
-        return Value::nil().as_raw();
-    }
-    // Binary exponentiation with wrapping_mul, matching the interpreter (so
-    // overflow wraps instead of nil — e.g. 1000000000 ** 1000000000 == 0).
-    let mut result: i64 = 1;
-    let mut base = base;
-    let mut exp = exp;
-    while exp > 0 {
-        if exp & 1 != 0 {
-            result = result.wrapping_mul(base);
+    let va = Value::from_raw(a);
+    let vb = Value::from_raw(b);
+    if va.is_int() && vb.is_int() {
+        let base = va.as_int().unwrap();
+        let exp = vb.as_int().unwrap();
+        if exp < 0 {
+            return Value::nil().as_raw();
         }
-        exp >>= 1;
-        if exp > 0 {
-            base = base.wrapping_mul(base);
+        // Binary exponentiation with wrapping_mul, bit-for-bit the
+        // interpreter's algorithm.
+        let mut result: i64 = 1;
+        let mut base = base;
+        let mut exp = exp;
+        while exp > 0 {
+            if exp & 1 != 0 {
+                result = result.wrapping_mul(base);
+            }
+            exp >>= 1;
+            if exp > 0 {
+                base = base.wrapping_mul(base);
+            }
         }
+        return Value::int(result).as_raw();
     }
-    Value::int(result).as_raw()
+    record_arith_error(crate::vm::arith_type_error("pow", va, vb))
 }
 
 /// # Safety

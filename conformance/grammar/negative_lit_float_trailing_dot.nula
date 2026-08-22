@@ -1,0 +1,2 @@
+// Negative case: neg_lit_float_trailing_dot — must be rejected by the parser.
+fn f() { 1. }
