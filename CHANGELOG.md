@@ -45,6 +45,38 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-22 (vscode extension)
+
+- **VS Code extension 0.2.0 — language server client** (`editors/vscode/`).
+  The extension now activates `nulang --lsp` over stdio and exposes the full
+  server surface: diagnostics, hover, go-to-definition, references, document
+  symbols, rename, signature help, formatting, semantic tokens, code actions,
+  inlay hints, completion, code lens, and document links. New commands:
+  **Nulang: Compile** (`--emit-nbc`), **Run**, **Type Check** (`--check`),
+  **Restart Language Server**. New `nulang.path` setting (explicit setting >
+  `NULANG_PATH` > `PATH`). Integration test suite drives a real VS Code
+  instance against the real server (language registration, diagnostics on
+  open, hover).
+- **TextMate grammar extracted to `nulang-org/nulang-syntax`** — the grammar
+  (`source.nulang`) now lives in its own repo (tagged `v0.1.0`) and is
+  consumed by the extension as an npm dependency; single source of truth for
+  GitHub linguist submission and other TextMate-compatible editors.
+- **Publishing pipeline** — `.github/workflows/vscode-extension.yml` builds
+  and packages the `.vsix` on PR/main, runs the integration tests, and
+  publishes to the VS Code Marketplace and Open VSX on `ext-v*` tags
+  (secrets: `VSCE_PAT`, `OVSX_TOKEN`).
+- **LSP server stdout purity** (`src/main.rs`, `src/observability.rs`) —
+  tracing now writes to stderr, never stdout. `nulang --lsp` previously
+  interleaved tower-lsp's error logs into the JSON-RPC stdout stream,
+  corrupting framing for every LSP client (any unimplemented request
+  produced a non-framed `ERROR ...` line on stdout).
+- **LSP: removed false `diagnosticProvider` advertisement**
+  (`src/lsp/mod.rs`) — pull diagnostics (`textDocument/diagnostic`) are not
+  implemented; advertising them made clients (VS Code's
+  vscode-languageclient) send requests that failed with MethodNotFound and
+  triggered the stdout corruption above. Diagnostics remain push-only via
+  `publishDiagnostics`.
+
 ### Added since 1.0.0-frozen — 2026-08-22
 
 - **`--json` structured diagnostics** (experimental; `src/json_diagnostics.rs`,

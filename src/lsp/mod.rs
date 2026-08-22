@@ -6,7 +6,7 @@
 //!
 //! | Feature | Description |
 //! |---------|-------------|
-//! | `textDocument/diagnostic` | Parse/type/effect/capability diagnostics |
+//! | `textDocument/publishDiagnostics` (push) | Parse/type/effect/capability diagnostics |
 //! | `textDocument/hover` | Function signatures, effects, types, doc comments |
 //! | `textDocument/definition` | Go to definition for all declaration types |
 //! | `textDocument/references` | Find all usages of a symbol |
@@ -158,14 +158,12 @@ impl LanguageServer for NulangLanguageServer {
                         })),
                     },
                 )),
-                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
-                    DiagnosticOptions {
-                        identifier: Some("nulang".to_string()),
-                        inter_file_dependencies: false,
-                        workspace_diagnostics: false,
-                        work_done_progress_options: WorkDoneProgressOptions::default(),
-                    },
-                )),
+                // No `diagnostic_provider`: pull diagnostics
+                // (`textDocument/diagnostic`) are NOT implemented, and
+                // advertising them makes clients send requests that fail
+                // with MethodNotFound (and, worse, tower-lsp logs that
+                // failure to stdout, corrupting the JSON-RPC framing).
+                // Diagnostics are push-only via `publishDiagnostics`.
                 ..ServerCapabilities::default()
             },
             ..InitializeResult::default()
