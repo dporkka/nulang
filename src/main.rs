@@ -338,6 +338,7 @@ fn main() {
                 }
             }
             "--ffi-sandbox" => opts.ffi_sandbox = true,
+            "--iso-arena" => opts.iso_arena = true,
             "--ffi-allow" => {
                 if i + 1 < args.len() {
                     opts.ffi_allow.push(args[i + 1].clone());
@@ -517,7 +518,7 @@ fn main() {
                     .filter(|k| levenshtein_distance(arg, k) <= 3);
                 eprint!("Error: Unknown option: {}", arg);
                 if let Some(sug) = suggestion {
-                    eprint!(". Did you mean '{}'?", sug);
+                    eprint!(". Did you mean '{}' ?", sug);
                 }
                 eprintln!();
                 eprintln!("Run with --help for usage information.");
@@ -530,6 +531,14 @@ fn main() {
 
     // Resolve color mode once after all args are parsed.
     let use_color = color_enabled(&opts);
+
+    // Wave D4: --iso-arena enables the VM's per-activation arena path for
+    // every VM created in this process (the VM also honors the env var
+    // directly; set_var keeps runtimes that construct VMs internally in
+    // sync without threading a flag through every constructor).
+    if opts.iso_arena {
+        std::env::set_var("NULANG_ISO_ARENA", "1");
+    }
 
     // Apply FFI policy
     if opts.ffi_sandbox {
@@ -924,6 +933,9 @@ struct Options {
     metrics_port: Option<u16>,
     ffi_sandbox: bool,
     ffi_allow: Vec<String>,
+    /// Wave D4: enable the per-activation iso-arena allocation path in the
+    /// bytecode VM (same as `NULANG_ISO_ARENA=1`). Default off.
+    iso_arena: bool,
     /// Resource-capability grants for `--with=` (fs, net, os). Empty = no
     /// gate (standalone programs run with full access).
     with_capabilities: Vec<String>,
@@ -961,6 +973,7 @@ impl Default for Options {
             metrics_port: None,
             ffi_sandbox: false,
             ffi_allow: Vec::new(),
+            iso_arena: false,
             with_capabilities: Vec::new(),
             target: "native".to_string(),
             store_path: None,
