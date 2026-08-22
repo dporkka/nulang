@@ -85,6 +85,33 @@ jobs:
         working-directory: editors/vscode
         run: npm ci
 
+      - name: Cache VS Code download
+        uses: actions/cache@v4
+        with:
+          path: editors/vscode/.vscode-test
+          key: vscode-test-1.96.0
+
+      # @vscode/test-electron downloads VS Code itself; the 142 MB download
+      # from update.code.visualstudio.com is flaky on runners (ECONNRESET).
+      # Pre-download with resilient curl into the exact cache layout
+      # (vscode-<platform>-<version>/ + is-complete marker) so the test
+      # runner skips its own download entirely.
+      - name: Pre-download VS Code
+        working-directory: editors/vscode
+        run: |
+          DIR=".vscode-test/vscode-linux-x64-1.96.0"
+          if [ ! -f "$DIR/is-complete" ]; then
+            rm -rf "$DIR" /tmp/vscode-dl
+            mkdir -p /tmp/vscode-dl
+            curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
+              -o /tmp/vscode-dl/vscode.tar.gz \
+              "https://update.code.visualstudio.com/1.96.0/linux-x64/stable?released=true"
+            tar -xzf /tmp/vscode-dl/vscode.tar.gz -C /tmp/vscode-dl
+            mkdir -p .vscode-test
+            mv /tmp/vscode-dl/VSCode-linux-x64 "$DIR"
+            touch "$DIR/is-complete"
+          fi
+
       - name: Run integration tests
         working-directory: editors/vscode
         env:
