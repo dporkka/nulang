@@ -51,6 +51,7 @@ use nulang::vm::VM;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -1315,6 +1316,7 @@ fn exit_code(err: &NuError) -> i32 {
 
 /// Redirect stdout and stderr to /dev/null.
 /// Returns saved file descriptors for later restoration.
+#[cfg(unix)]
 fn suppress_stdout_stderr() -> (i32, i32) {
     extern "C" {
         fn dup(oldfd: i32) -> i32;
@@ -1337,6 +1339,7 @@ fn suppress_stdout_stderr() -> (i32, i32) {
     (saved_out, saved_err)
 }
 
+#[cfg(unix)]
 fn restore_stdout_stderr(saved_out: i32, saved_err: i32) {
     extern "C" {
         fn dup2(oldfd: i32, newfd: i32) -> i32;
@@ -1355,6 +1358,15 @@ fn restore_stdout_stderr(saved_out: i32, saved_err: i32) {
         }
     }
 }
+
+/// Windows: no fd redirection — benchmark runs keep visible output.
+#[cfg(not(unix))]
+fn suppress_stdout_stderr() -> (i32, i32) {
+    (0, 0)
+}
+
+#[cfg(not(unix))]
+fn restore_stdout_stderr(_saved_out: i32, _saved_err: i32) {}
 
 fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
