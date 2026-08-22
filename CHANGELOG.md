@@ -47,6 +47,10 @@ two major versions.*
 
 ### Added since 1.0.0-frozen — 2026-08-22
 
+- **Registry worker version ordering** (tooling): the registry worker now
+  sorts package versions with proper semver comparison instead of
+  lexicographic string sort, so `1.0.10` lists after `1.0.2`
+  (`registry-worker/src/index.ts`).
 - **Registry seed packages** (experimental; `src/registry`, `src/package`,
   `packages/`). The `nula` package manager ships a set of seed packages
   (`packages/*`) that can be published to a registry and used as
