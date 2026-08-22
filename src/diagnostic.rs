@@ -70,7 +70,9 @@ impl NuError {
     }
 
     /// The primary source span of this error, if the variant carries one.
-    fn primary_span(&self) -> Option<Span> {
+    /// Public so the JSON diagnostics view (`crate::json_diagnostics`) can
+    /// resolve it to line/col without forking the pipeline.
+    pub fn primary_span(&self) -> Option<Span> {
         match self {
             NuError::LexError { span, .. }
             | NuError::ParseError { span, .. }
@@ -185,7 +187,7 @@ impl NuError {
 /// missing effects, capability explanations, similar-name suggestions).
 /// These mirror the extra lines emitted by `Display`/`format_rich` so no
 /// diagnostic content is lost in the ariadne path.
-fn diagnostic_notes(err: &NuError) -> Vec<String> {
+pub fn diagnostic_notes(err: &NuError) -> Vec<String> {
     let mut notes = Vec::new();
     match err {
         NuError::ParseError {

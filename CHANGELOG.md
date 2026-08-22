@@ -47,6 +47,12 @@ two major versions.*
 
 ### Added since 1.0.0-frozen — 2026-08-22
 
+- **`--json` structured diagnostics** (experimental; `src/json_diagnostics.rs`,
+  schema v1). `nulang --check --json`, `nula build --json`, and
+  `nula test --json` emit machine-readable diagnostics (errors, warnings,
+  spans with line/column) on stdout while progress stays on stderr; without
+  the flag, human output is byte-identical. `tests/cli_json.rs` covers the
+  schema.
 - **Registry worker version ordering** (tooling): the registry worker now
   sorts package versions with proper semver comparison instead of
   lexicographic string sort, so `1.0.10` lists after `1.0.2`
