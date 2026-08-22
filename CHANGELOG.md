@@ -51,6 +51,19 @@ two major versions.*
   sorts package versions with proper semver comparison instead of
   lexicographic string sort, so `1.0.10` lists after `1.0.2`
   (`registry-worker/src/index.ts`).
+- **Registry seed packages** (experimental; `src/registry`, `src/package`,
+  `packages/`). The `nula` package manager ships a set of seed packages
+  (`packages/*`) that can be published to a registry and used as
+  dependencies:
+  - `nula registry seed` installs/registers the seed packages with the
+    configured registry (`src/registry/seed.rs`).
+  - Bare module imports (`import lib`) resolve against the package's own
+    `src/` directory when not found next to the importing file
+    (`src/resolver.rs`), so `tests/*.nula` can import the package's modules
+    under `nula test`.
+  - `--with` capability grants are honored in the `--emit-nbc` path
+    (`src/main.rs`), matching `--check`/`--eval`.
+  - Seed packages declare no capabilities and run under default-deny.
 
 ### Added since 1.0.0-frozen — 2026-08-21
 
