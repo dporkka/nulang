@@ -128,6 +128,7 @@ export default defineConfig({
           items: [
             { label: 'Terms of Service', link: 'terms/' },
             { label: 'Privacy Policy', link: 'privacy/' },
+            { label: 'Contact', link: 'contact/' },
           ],
         },
       ],

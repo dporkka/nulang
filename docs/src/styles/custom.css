@@ -1002,3 +1002,89 @@ html[data-theme="light"] starlight-theme-select label::before {
     display: flex;
   }
 }
+
+/* ── Contact form ── */
+.contact-form-section {
+  margin: 2rem 0 3rem;
+  padding: 1.75rem;
+  border: 1px solid var(--nu-border);
+  border-radius: 0.875rem;
+  background: var(--nu-surface);
+}
+
+.contact-form-lead {
+  color: var(--nu-text-secondary);
+  margin-bottom: 1.5rem;
+}
+
+.contact-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.contact-field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.contact-field label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--nu-text);
+}
+
+.contact-field input,
+.contact-field textarea {
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--nu-border);
+  background: var(--nu-bg);
+  color: var(--nu-text);
+  font: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.contact-field input:focus,
+.contact-field textarea:focus {
+  outline: none;
+  border-color: var(--nu-blue);
+  box-shadow: 0 0 0 3px var(--nu-blue-glow);
+}
+
+.contact-status {
+  min-height: 1.25rem;
+  font-size: 0.9rem;
+  color: var(--nu-text-secondary);
+}
+
+.contact-status.is-success {
+  color: #16a34a;
+}
+
+.contact-status.is-error {
+  color: #dc2626;
+}
+
+.contact-submit {
+  justify-self: start;
+  padding: 0.7rem 1.25rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: var(--nu-accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.contact-submit:hover:not(:disabled) {
+  background: var(--nu-accent-hover);
+  transform: translateY(-1px);
+}
+
+.contact-submit:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
