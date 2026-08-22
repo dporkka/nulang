@@ -106,6 +106,8 @@ pub struct FunctionDef {
     pub cap: Capability,
     pub body: Body,
     pub public: bool,
+    /// Web framework compile-time placement hint (None = infer from effect row).
+    pub placement: Option<crate::types::Placement>,
     pub span: Span,
 }
 
@@ -626,6 +628,7 @@ mod tests {
             cap: Capability::Ref,
             body: Body::default(),
             public: true,
+            placement: None,
             span: Span::default(),
         };
         assert_eq!(def.name, "f");

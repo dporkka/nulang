@@ -4,6 +4,7 @@
     clippy::missing_transmute_annotations
 )]
 
+pub mod agent;
 pub mod aot;
 pub mod ast;
 pub mod backends;
@@ -72,4 +73,5 @@ pub mod wasm_types;
 pub mod wasmfx_backend;
 #[cfg(feature = "wasmfx-backend")]
 pub mod wasmfx_runtime;
+pub mod web;
 pub mod witgen;

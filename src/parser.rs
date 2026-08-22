@@ -121,6 +121,14 @@ pub struct Parser {
     handler_registry: FxHashMap<String, Vec<EffectHandler>>,
 }
 
+/// Parsed app block; kept private to the parser and desugared into
+/// ordinary functions before the AST leaves the parser.
+struct ParsedApp {
+    _name: String,
+    routes: Vec<(String, String, String)>,
+    span: Span,
+}
+
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         let mut parser = Self::new_raw(tokens);
@@ -186,11 +194,18 @@ impl Parser {
         self.diagnostics.clear();
         let mut decls = Vec::new();
         let mut pending_lets: Vec<Decl> = Vec::new();
+        let mut app_decls: Vec<ParsedApp> = Vec::new();
         self.skip_newlines();
         while !self.is_at_end() {
             self.skip_newlines();
             if self.is_at_end() {
                 break;
+            }
+
+            // App blocks are handled before other declarations.
+            if self.match_token(&TokenKind::App) {
+                app_decls.push(self.parse_app_decl()?);
+                continue;
             }
 
             // Try declaration first, then expression
@@ -463,6 +478,8 @@ impl Parser {
         if !self.diagnostics.is_empty() {
             return Err(NuError::Multiple(std::mem::take(&mut self.diagnostics)));
         }
+        self.check_route_params(&app_decls, &decls)?;
+        decls.extend(self.desugar_app_decls(app_decls));
         let decls = Self::expand_contracts(Self::expand_derives(decls));
         Ok(AstModule {
             name: "main".to_string(),
@@ -767,6 +784,7 @@ impl Parser {
             TokenKind::Let => self.parse_module_let(public),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Given => self.parse_given(public),
+            TokenKind::Signal => self.parse_signal(),
             TokenKind::Eof => Err(NuError::parse_error(
                 "Unexpected end of file in declaration".to_string(),
                 self.current_span(),
@@ -846,6 +864,27 @@ impl Parser {
                         .map(|(k, v)| if k.is_empty() { v } else { k })
                         .collect();
                     annotations.push(FunctionAnnotation::Derive(names));
+                }
+                "placement" => {
+                    let value = fields.remove("").unwrap_or_default();
+                    let placement = match value.as_str() {
+                        "static" => crate::types::Placement::Static,
+                        "server" => crate::types::Placement::Server,
+                        "edge" => crate::types::Placement::Edge,
+                        "client" => crate::types::Placement::Client,
+                        "actor" => crate::types::Placement::Actor,
+                        "workflow" => crate::types::Placement::Workflow,
+                        other => {
+                            return Err(NuError::parse_error(
+                                format!(
+                                    "Unknown placement '{}'; expected 'static', 'server', 'edge', 'client', 'actor', or 'workflow'",
+                                    other
+                                ),
+                                self.current_span(),
+                            ))
+                        }
+                    };
+                    annotations.push(FunctionAnnotation::Placement(placement));
                 }
                 _ => {
                     return Err(NuError::parse_error(
@@ -2469,12 +2508,28 @@ impl Parser {
     fn parse_import(&mut self) -> NuResult<Decl> {
         let span = self.current_span();
         self.advance(); // consume 'import'
-                        // Parse import path: ident | ident :: ident | ident :: ident :: ident ...
-        let mut path = self.expect_ident("import path")?;
-        while self.consume_if(&TokenKind::DoubleColon) {
-            path.push_str("::");
-            path.push_str(&self.expect_ident("module name")?);
-        }
+
+        // Parse import path:
+        //   - stdlib::set::... or stdlib::web::types
+        //   - @nulang/auth or @nulang/auth/session
+        //   - plain ident (relative file)
+        let path = if self.consume_if(&TokenKind::At) {
+            let mut p = "@".to_string();
+            p.push_str(&self.expect_ident("module name")?);
+            while self.consume_if(&TokenKind::Slash) {
+                p.push('/');
+                p.push_str(&self.expect_ident("module name")?);
+            }
+            p
+        } else {
+            let mut p = self.expect_ident("import path")?;
+            while self.consume_if(&TokenKind::DoubleColon) {
+                p.push_str("::");
+                p.push_str(&self.expect_ident("module name")?);
+            }
+            p
+        };
+
         // Helpful error for dot-separated imports (e.g. `import stdlib.list`)
         if self.match_token(&TokenKind::Dot) {
             return Err(NuError::parse_error(
@@ -2571,6 +2626,22 @@ impl Parser {
             name,
             ty,
             value,
+            span,
+        })
+    }
+
+    fn parse_signal(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'signal'
+        let name = self.expect_ident("signal name")?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        self.expect(TokenKind::Assign)?;
+        let init = self.parse_expr()?;
+        Ok(Decl::Signal {
+            name,
+            ty,
+            init,
             span,
         })
     }
@@ -3361,6 +3432,7 @@ impl Parser {
                         }
                     }
                     TokenKind::SelfKw => self.parse_self_ref(),
+                    TokenKind::Lt => self.parse_html_expr(),
 
                     _ => Err(NuError::parse_error(
                         format!("Unexpected token in expression: {}", kind),
@@ -4137,6 +4209,250 @@ impl Parser {
         Ok(Expr::Emit { event, args, span })
     }
 
+    // -----------------------------------------------------------------------
+    // JSX / HTML expressions (desugared to `el(tag, attrs, children)`)
+    // -----------------------------------------------------------------------
+
+    /// True for tokens that are reserved keywords (anything that is not a
+    /// literal, identifier, operator, or delimiter). Used by JSX parsing so
+    /// keywords like `class` can appear as tag/attribute names.
+    fn is_keyword_token(kind: &TokenKind) -> bool {
+        match kind {
+            TokenKind::IntLit(_)
+            | TokenKind::FloatLit(_)
+            | TokenKind::StringLit(_)
+            | TokenKind::FStringLit(_)
+            | TokenKind::BoolLit(_)
+            | TokenKind::NilLit
+            | TokenKind::UnitLit
+            | TokenKind::Ident(_)
+            | TokenKind::UpperIdent(_)
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Star2
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::Eq
+            | TokenKind::Ne
+            | TokenKind::Lt
+            | TokenKind::Le
+            | TokenKind::Gt
+            | TokenKind::Ge
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Not
+            | TokenKind::Ampersand
+            | TokenKind::Pipe
+            | TokenKind::PipeOp
+            | TokenKind::Pipe3
+            | TokenKind::Caret
+            | TokenKind::Tilde
+            | TokenKind::Shl
+            | TokenKind::Shr
+            | TokenKind::Assign
+            | TokenKind::PlusAssign
+            | TokenKind::MinusAssign
+            | TokenKind::Arrow
+            | TokenKind::FatArrow
+            | TokenKind::ThinArrow
+            | TokenKind::ThinArrowQuestion
+            | TokenKind::Dot
+            | TokenKind::DotDot
+            | TokenKind::Colon
+            | TokenKind::DoubleColon
+            | TokenKind::At
+            | TokenKind::Bang
+            | TokenKind::Question
+            | TokenKind::LParen
+            | TokenKind::RParen
+            | TokenKind::LBrace
+            | TokenKind::RBrace
+            | TokenKind::LBracket
+            | TokenKind::RBracket
+            | TokenKind::Comma
+            | TokenKind::Semicolon
+            | TokenKind::Newline
+            | TokenKind::Comment(_)
+            | TokenKind::DocComment(_)
+            | TokenKind::Eof => false,
+            _ => true,
+        }
+    }
+
+    fn expect_html_ident(&mut self, msg: &str) -> NuResult<String> {
+        let span = self.current_span();
+        match self.peek_kind().clone() {
+            TokenKind::Ident(s) | TokenKind::UpperIdent(s) => {
+                self.advance();
+                Ok(s)
+            }
+            other if Self::is_keyword_token(&other) => {
+                self.advance();
+                Ok(other.to_string())
+            }
+            other => Err(NuError::parse_error(
+                format!("Expected {}, found {}", msg, other),
+                span,
+            )),
+        }
+    }
+
+    /// Parse a JSX/HTML element: `<tag attrs>children</tag>` or `<tag attrs />`.
+    /// Desugars to `el("tag", attrs, children)` where `attrs` and `children`
+    /// are arrays. Text children are wrapped in `text("...")` calls.
+    fn parse_html_expr(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.expect(TokenKind::Lt)?; // consume '<'
+        let tag = self.expect_html_ident("HTML tag name")?;
+
+        let mut attrs: Vec<Expr> = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.consume_if(&TokenKind::Slash) {
+                self.expect(TokenKind::Gt)?;
+                return Ok(self.html_el(&tag, attrs, Vec::new(), span));
+            }
+            if self.consume_if(&TokenKind::Gt) {
+                let children = self.parse_html_children(&tag, span)?;
+                return Ok(self.html_el(&tag, attrs, children, span));
+            }
+
+            // Attribute: name="value" or name={expr} or boolean name
+            let attr_name = self.expect_html_ident("HTML attribute name")?;
+            let attr_val = if self.consume_if(&TokenKind::Assign) {
+                if self.consume_if(&TokenKind::LBrace) {
+                    let expr = self.parse_expr()?;
+                    self.expect(TokenKind::RBrace)?;
+                    expr
+                } else {
+                    let s = self.expect_string("HTML attribute value")?;
+                    self.html_text(&s, span)
+                }
+            } else {
+                self.html_text(&attr_name, span)
+            };
+            attrs.push(Expr::Tuple(
+                vec![Expr::Literal(Literal::String(attr_name), span), attr_val],
+                span,
+            ));
+        }
+    }
+
+    fn html_el(&self, tag: &str, attrs: Vec<Expr>, children: Vec<Expr>, span: Span) -> Expr {
+        Expr::App {
+            func: Box::new(Expr::Var("el".to_string(), span)),
+            args: vec![
+                Expr::Literal(Literal::String(tag.to_string()), span),
+                Expr::Array(attrs, span),
+                Expr::Array(children, span),
+            ],
+            span,
+        }
+    }
+
+    fn html_text(&self, s: &str, span: Span) -> Expr {
+        Expr::App {
+            func: Box::new(Expr::Var("text".to_string(), span)),
+            args: vec![Expr::Literal(Literal::String(s.to_string()), span)],
+            span,
+        }
+    }
+
+    fn parse_html_children(&mut self, close_tag: &str, span: Span) -> NuResult<Vec<Expr>> {
+        let mut children: Vec<Expr> = Vec::new();
+        while !self.is_at_end() {
+            self.skip_newlines();
+
+            // Closing tag: </close_tag>
+            if self.peek_kind() == &TokenKind::Lt {
+                let saved = self.pos;
+                self.advance(); // '<'
+                if self.consume_if(&TokenKind::Slash) {
+                    let closing = self.expect_html_ident("closing tag name")?;
+                    if closing == close_tag {
+                        self.expect(TokenKind::Gt)?;
+                        return Ok(children);
+                    } else {
+                        return Err(NuError::parse_error(
+                            format!(
+                                "Expected closing tag </{}>, found </{}>",
+                                close_tag, closing
+                            ),
+                            self.current_span(),
+                        ));
+                    }
+                }
+                // Not a closing tag: restore and parse nested element
+                self.pos = saved;
+                children.push(self.parse_html_expr()?);
+                continue;
+            }
+
+            // Interpolated expression: {expr}
+            if self.consume_if(&TokenKind::LBrace) {
+                let expr = self.parse_expr()?;
+                self.expect(TokenKind::RBrace)?;
+                children.push(expr);
+                continue;
+            }
+
+            if self.peek_kind() == &TokenKind::Eof {
+                break;
+            }
+
+            // Text node: consume the next token as literal text
+            let text = self.html_token_text()?;
+            children.push(self.html_text(&text, span));
+        }
+        Err(NuError::parse_error(
+            format!("Unclosed HTML tag <{}>", close_tag),
+            span,
+        ))
+    }
+
+    fn html_token_text(&mut self) -> NuResult<String> {
+        let span = self.current_span();
+        match self.peek_kind().clone() {
+            TokenKind::Ident(s) | TokenKind::UpperIdent(s) => {
+                self.advance();
+                Ok(s)
+            }
+            other if Self::is_keyword_token(&other) => {
+                self.advance();
+                Ok(other.to_string())
+            }
+            TokenKind::IntLit(n) => {
+                self.advance();
+                Ok(n.to_string())
+            }
+            TokenKind::FloatLit(n) => {
+                self.advance();
+                Ok(n.to_string())
+            }
+            TokenKind::StringLit(s) => {
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::BoolLit(b) => {
+                self.advance();
+                Ok(b.to_string())
+            }
+            TokenKind::NilLit => {
+                self.advance();
+                Ok("nil".to_string())
+            }
+            TokenKind::UnitLit => {
+                self.advance();
+                Ok("unit".to_string())
+            }
+            other => Err(NuError::parse_error(
+                format!("Unexpected token in HTML text: {}", other),
+                span,
+            )),
+        }
+    }
+
     // === Helper Methods ===
 
     fn is_at_end(&self) -> bool {
@@ -4393,6 +4709,7 @@ impl Parser {
                 | TokenKind::True
                 | TokenKind::False
                 | TokenKind::Unit
+                | TokenKind::Lt
         )
     }
 
@@ -5369,6 +5686,37 @@ impl Parser {
                     }
                     path
                 }
+                TokenKind::At => {
+                    let mut path = "@".to_string();
+                    j += 1;
+                    if j < self.tokens.len() {
+                        if let TokenKind::Ident(seg) = &self.tokens[j].kind {
+                            path.push_str(seg);
+                            j += 1;
+                        } else {
+                            i += 1;
+                            continue;
+                        }
+                    } else {
+                        i += 1;
+                        continue;
+                    }
+                    while j < self.tokens.len() && self.tokens[j].kind == TokenKind::Slash {
+                        j += 1;
+                        if j < self.tokens.len() {
+                            if let TokenKind::Ident(seg) = &self.tokens[j].kind {
+                                path.push('/');
+                                path.push_str(seg);
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    path
+                }
                 _ => {
                     i += 1;
                     continue;
@@ -5384,7 +5732,8 @@ impl Parser {
                         // Scan the imported tokens for type declarations.
                         let mut k = 0;
                         while k < imported_tokens.len() {
-                            if imported_tokens[k].kind != TokenKind::Type {
+                            let is_opaque = imported_tokens[k].kind == TokenKind::Opaque;
+                            if imported_tokens[k].kind != TokenKind::Type && !is_opaque {
                                 k += 1;
                                 continue;
                             }
@@ -5396,6 +5745,21 @@ impl Parser {
                                 )
                             {
                                 m += 1;
+                            }
+                            // For opaque type declarations, skip the 'type' keyword before the name.
+                            if is_opaque
+                                && m < imported_tokens.len()
+                                && imported_tokens[m].kind == TokenKind::Type
+                            {
+                                m += 1;
+                                while m < imported_tokens.len()
+                                    && matches!(
+                                        imported_tokens[m].kind,
+                                        TokenKind::Newline | TokenKind::DocComment(_)
+                                    )
+                                {
+                                    m += 1;
+                                }
                             }
                             // Skip optional 'alias' keyword.
                             if m < imported_tokens.len()
@@ -5434,17 +5798,280 @@ impl Parser {
         Ok(None)
     }
 
+    /// Parse an `app` block: `app "name" { route "GET" "/" -> handler }`.
+    fn parse_app_decl(&mut self) -> NuResult<ParsedApp> {
+        let span = self.current_span();
+        self.advance(); // consume 'app'
+        let name = self.expect_string("app name")?;
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut routes: Vec<(String, String, String)> = Vec::new();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            // Contextual keyword 'route' inside an app block.
+            if let TokenKind::Ident(s) = self.peek_kind() {
+                if s == "route" {
+                    self.advance();
+                    let method = self.expect_string("route method")?;
+                    let path = self.expect_string("route path")?;
+                    self.expect(TokenKind::Arrow)?;
+                    let handler = self.expect_ident("route handler")?;
+                    routes.push((method, path, handler));
+                    continue;
+                }
+            }
+            return Err(NuError::parse_error(
+                "Expected route declaration inside app block".to_string(),
+                self.current_span(),
+            ));
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(ParsedApp {
+            _name: name,
+            routes,
+            span,
+        })
+    }
+
+    /// Desugar all collected app blocks into a single `web_main` and a `main`
+    /// entrypoint. This is parser-level sugar so no separate runtime path is needed.
+    fn desugar_app_decls(&self, apps: Vec<ParsedApp>) -> Vec<Decl> {
+        if apps.is_empty() {
+            return Vec::new();
+        }
+        // Flatten all app blocks into a single web_main.
+        let mut route_exprs: Vec<Expr> = Vec::new();
+        for app in &apps {
+            for (method, path, handler) in &app.routes {
+                route_exprs.push(Expr::Perform {
+                    effect: "Web".to_string(),
+                    op: "route".to_string(),
+                    args: vec![
+                        Expr::Literal(Literal::String(method.clone()), app.span),
+                        Expr::Literal(Literal::String(path.clone()), app.span),
+                        Expr::Var(handler.clone(), app.span),
+                    ],
+                    span: app.span,
+                });
+            }
+        }
+        let span = apps[0].span;
+        let serve_static = Expr::Perform {
+            effect: "Web".to_string(),
+            op: "serve_static".to_string(),
+            args: vec![Expr::Literal(Literal::String("public".to_string()), span)],
+            span,
+        };
+        let mut web_main_body = vec![serve_static];
+        web_main_body.extend(route_exprs);
+        let web_main = Decl::Function {
+            name: "web_main".to_string(),
+            type_params: vec![],
+            type_param_constraints: vec![],
+            params: vec![],
+            default_values: vec![],
+            using_params: vec![],
+            ret_type: Some(Type::unit()),
+            error_type: None,
+            effect: Some(EffectRow::Closed(vec![Effect::Web])),
+            cap: None,
+            requires: vec![],
+            ensures: vec![],
+            body: Expr::Block {
+                exprs: web_main_body,
+                span,
+            },
+            annotations: vec![],
+            public: false,
+            span,
+        };
+        let main_body = Expr::Block {
+            exprs: vec![Expr::App {
+                func: Box::new(Expr::Var("web_main".to_string(), span)),
+                args: vec![],
+                span,
+            }],
+            span,
+        };
+        let main = Decl::Function {
+            name: "main".to_string(),
+            type_params: vec![],
+            type_param_constraints: vec![],
+            params: vec![],
+            default_values: vec![],
+            using_params: vec![],
+            ret_type: Some(Type::unit()),
+            error_type: None,
+            effect: None,
+            cap: None,
+            requires: vec![],
+            ensures: vec![],
+            body: main_body,
+            annotations: vec![],
+            public: false,
+            span,
+        };
+        vec![web_main, main]
+    }
+
+    /// Check that every route parameter declared in an app route pattern is
+    /// read by the handler via `perform Web.param("name")`. This is a basic
+    /// static check; it does not follow calls into helper functions or imported
+    /// handlers.
+    fn check_route_params(&self, apps: &[ParsedApp], decls: &[Decl]) -> NuResult<()> {
+        for app in apps {
+            for (method, path, handler) in &app.routes {
+                for param in Self::route_param_names(path) {
+                    let found = decls.iter().any(|decl| match decl {
+                        Decl::Function { name, body, .. } if name == handler => {
+                            Self::expr_uses_param(body, &param)
+                        }
+                        _ => false,
+                    });
+                    if !found {
+                        return Err(NuError::parse_error(
+                            format!(
+                                "Route {} {} declares parameter ':{}' but handler '{}' never calls perform Web.param(\"{}\")",
+                                method, path, param, handler, param
+                            ),
+                            app.span,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn route_param_names(path: &str) -> Vec<String> {
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            return Vec::new();
+        }
+        path.split('/')
+            .filter(|seg| seg.starts_with(':'))
+            .map(|seg| seg[1..].to_string())
+            .collect()
+    }
+
+    fn expr_uses_param(expr: &Expr, param: &str) -> bool {
+        match expr {
+            Expr::Perform {
+                effect, op, args, ..
+            } if effect == "Web" && op == "param" && !args.is_empty() => {
+                if let Expr::Literal(Literal::String(name), _) = &args[0] {
+                    if name == param {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Recurse into child expressions.
+        match expr {
+            Expr::Literal(_, _) | Expr::Var(_, _) | Expr::SelfRef(_) => false,
+            Expr::Lambda { body, .. } => Self::expr_uses_param(body, param),
+            Expr::App { func, args, .. } => {
+                Self::expr_uses_param(func, param)
+                    || args.iter().any(|e| Self::expr_uses_param(e, param))
+            }
+            Expr::Let { value, body, .. } => {
+                Self::expr_uses_param(value, param) || Self::expr_uses_param(body, param)
+            }
+            Expr::LetRec { value, body, .. } => {
+                Self::expr_uses_param(value, param) || Self::expr_uses_param(body, param)
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_uses_param(cond, param)
+                    || Self::expr_uses_param(then_branch, param)
+                    || else_branch
+                        .as_ref()
+                        .map(|e| Self::expr_uses_param(e, param))
+                        .unwrap_or(false)
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                Self::expr_uses_param(scrutinee, param)
+                    || arms.iter().any(|(_, guard, body)| {
+                        Self::expr_uses_param(body, param)
+                            || guard
+                                .as_ref()
+                                .map(|g| Self::expr_uses_param(g, param))
+                                .unwrap_or(false)
+                    })
+            }
+            Expr::Block { exprs, .. } | Expr::Par { exprs, .. } => {
+                exprs.iter().any(|e| Self::expr_uses_param(e, param))
+            }
+            Expr::Tuple(exprs, _) | Expr::Array(exprs, _) => {
+                exprs.iter().any(|e| Self::expr_uses_param(e, param))
+            }
+            Expr::Record(fields, _) | Expr::RecordUpdate { fields, .. } => {
+                fields.iter().any(|(_, e)| Self::expr_uses_param(e, param))
+            }
+            Expr::FieldAccess { expr, .. } => Self::expr_uses_param(expr, param),
+            Expr::Index { arr, idx, .. } => {
+                Self::expr_uses_param(arr, param) || Self::expr_uses_param(idx, param)
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_uses_param(left, param) || Self::expr_uses_param(right, param)
+            }
+            Expr::Unary { expr, .. } => Self::expr_uses_param(expr, param),
+            Expr::Assign { target, value, .. } => {
+                Self::expr_uses_param(target, param) || Self::expr_uses_param(value, param)
+            }
+            Expr::Spawn {
+                actor_type, init, ..
+            } => {
+                Self::expr_uses_param(actor_type, param)
+                    || init.iter().any(|(_, e)| Self::expr_uses_param(e, param))
+            }
+            Expr::Send { actor, args, .. } | Expr::Ask { actor, args, .. } => {
+                Self::expr_uses_param(actor, param)
+                    || args.iter().any(|e| Self::expr_uses_param(e, param))
+            }
+            Expr::Receive { arms, after, .. } => {
+                arms.iter().any(|(_, _, guard, body)| {
+                    Self::expr_uses_param(body, param)
+                        || guard
+                            .as_ref()
+                            .map(|g| Self::expr_uses_param(g, param))
+                            .unwrap_or(false)
+                }) || after
+                    .as_ref()
+                    .map(|(t, b)| {
+                        Self::expr_uses_param(t, param) || Self::expr_uses_param(b, param)
+                    })
+                    .unwrap_or(false)
+            }
+            Expr::Emit { args, .. } => args.iter().any(|e| Self::expr_uses_param(e, param)),
+            Expr::Perform { args, .. } => args.iter().any(|e| Self::expr_uses_param(e, param)),
+            Expr::GrainRef { key, .. } => Self::expr_uses_param(key, param),
+            _ => false,
+        }
+    }
+
     /// Resolve an import path to a file path. Handles stdlib:: prefix.
     fn resolve_import_path(&self, import_path: &str) -> Option<std::path::PathBuf> {
         if let Some(module) = import_path.strip_prefix("stdlib::") {
+            let module_path = module.replace("::", std::path::MAIN_SEPARATOR_STR);
             // Try NULANG_STDLIB env var first.
             if let Ok(dir) = std::env::var("NULANG_STDLIB") {
-                return Some(std::path::PathBuf::from(dir).join(format!("{}.nula", module)));
+                return Some(std::path::PathBuf::from(dir).join(format!("{}.nula", module_path)));
             }
             // Try relative to executable.
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(exe_dir) = exe.parent() {
-                    let candidate = exe_dir.join("stdlib").join(format!("{}.nula", module));
+                    let candidate = exe_dir.join("stdlib").join(format!("{}.nula", module_path));
                     if candidate.exists() {
                         return Some(candidate);
                     }
@@ -5455,7 +6082,7 @@ impl Parser {
                 let dev_path = cwd
                     .join("src")
                     .join("stdlib")
-                    .join(format!("{}.nula", module));
+                    .join(format!("{}.nula", module_path));
                 if dev_path.exists() {
                     return Some(dev_path);
                 }
@@ -5463,9 +6090,39 @@ impl Parser {
             // Last resort.
             return Some(std::path::PathBuf::from(format!(
                 "src/stdlib/{}.nula",
-                module
+                module_path
             )));
         }
+
+        // @nulang/auth or @nulang/auth/session -> resolved via NULANG_MODULE_PATH.
+        if let Some(module) = import_path.strip_prefix("@nulang/") {
+            let entries = std::env::var("NULANG_MODULE_PATH").unwrap_or_default();
+            for entry in entries.split(';') {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                if let Some((name, dir)) = entry.split_once('=') {
+                    let name = name.trim();
+                    let dir = dir.trim();
+                    if name.is_empty() || dir.is_empty() {
+                        continue;
+                    }
+                    let bare_name = name.strip_prefix("@nulang/").unwrap_or(name);
+                    if module == bare_name || module.starts_with(&format!("{}/", bare_name)) {
+                        let rest = module.strip_prefix(bare_name).unwrap_or(module);
+                        let rest = rest.trim_start_matches('/');
+                        let subpath = if rest.is_empty() {
+                            "lib.nula"
+                        } else {
+                            &format!("{}.nula", rest.replace('/', std::path::MAIN_SEPARATOR_STR))
+                        };
+                        return Some(std::path::PathBuf::from(dir).join(subpath));
+                    }
+                }
+            }
+        }
+
         None
     }
 

@@ -389,6 +389,7 @@ impl ModuleCtx {
 
 fn lower_function_def(ctx: &mut ModuleCtx, f: &hir::FunctionDef) -> NuResult<mir::Function> {
     let mut lowerer = FnLowerer::new(ctx, &f.name, Some(f.ret.clone()));
+    lowerer.b.set_placement(f.placement);
     for (name, ty) in &f.params {
         let id = lowerer.b.add_param(name.clone(), ty.clone());
         lowerer.bind(name, id);

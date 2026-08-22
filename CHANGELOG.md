@@ -47,12 +47,35 @@ two major versions.*
 
 ### Added since 1.0.0-frozen — 2026-08-21
 
+- **Full-stack web framework** (experimental; `src/web`, `src/runtime`,
+  `src/package`, `src/stdlib/web`). Adds language support, compiler pipeline,
+  and runtime for web applications:
+  - `signal name: Type = init` declarations for reactive state
+    (`src/parser.rs`, `src/ast.rs`, `src/web/reactivity.rs`).
+  - JSX/HTML expression parsing (`<tag attr={expr}>...</tag>`), desugared to
+    `el("tag", attrs, children)` with `text("...")` nodes; reserved keywords
+    may be used as tag/attribute names.
+  - `@nulang/*` package namespace and module graph resolution
+    (`src/web/modules.rs`, `src/web/ir.rs`, `src/package/manifest.rs`).
+  - `nula build --web` IR generation with capability, middleware, route
+    placement, and cloud-config extraction (`src/package/commands.rs`).
+  - Server runtime with SSR, HTML host routing, redirects, and reactive signal
+    hydration (`src/runtime/http_server.rs`, `src/runtime/callbacks.rs`).
+  - Adaptive VM optimizer: cached frame/constant references and inlined hot
+    frame opcodes (`Call`, `TailCall`, `Ret`, `RetVal`, `ClosureCall`) in
+    `src/vm.rs`.
+  - Web standard library modules (`src/stdlib/web/{host,html,realtime,types}.nula`),
+    example apps (`examples/{docs-web,hello-web,chat-web}`), shared packages
+    (`packages/nulang-auth`), and 18 conformance tests
+    (`conformance/behavior/web_*`).
 - **Windows x86_64 release binary** (tooling): the release workflow now
   builds `nulang-windows-x86_64.tar.gz` on `windows-latest`
   (`x86_64-pc-windows-msvc`). `build.rs` gates its libpython symlink
   workaround to `cfg(unix)` (the API does not exist on Windows; pyo3
   links the Python import lib directly there). No OpenSSL needed on
-  Windows — `native-tls` uses SChannel.
+  Windows — `native-tls` uses SChannel. `src/main.rs` gates the
+  `--bench` stdout/stderr fd redirection (`dup`/`dup2`/`/dev/null`) to
+  `cfg(unix)` with a no-op fallback on Windows.
 - **VM call-path performance work** (interpreter + JIT tiering):
   - Per-function register counts (`CodeModule.function_local_counts`,
     `src/bytecode.rs`, `src/mir_codegen.rs`): parallel to `function_table`,

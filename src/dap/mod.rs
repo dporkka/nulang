@@ -243,12 +243,12 @@ fn compile_source(source: &str, file_path: Option<&str>, name: &str) -> NuResult
     ast.decls = pd;
 
     // 2. Import resolution.
-    let base_dir = Path::new(file_path.unwrap_or("."))
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
     let mut visited = HashSet::new();
-    crate::resolver::resolve_imports(&mut ast, &base_dir, &mut visited)?;
+    crate::resolver::resolve_imports(
+        &mut ast,
+        std::path::Path::new(file_path.unwrap_or(".")),
+        &mut visited,
+    )?;
 
     // 3. Type check.
     let mut type_checker = TypeChecker::new();
