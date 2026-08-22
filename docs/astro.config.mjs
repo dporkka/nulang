@@ -29,6 +29,7 @@ export default defineConfig({
         Footer: './src/components/Footer.astro',
         Header: './src/components/Header.astro',
         Head: './src/components/Head.astro',
+        SiteTitle: './src/components/SiteTitle.astro',
       },
       editLink: {
         baseUrl: 'https://github.com/nulang-org/nulang/edit/main/docs/',

@@ -6,6 +6,7 @@ import Search from 'virtual:starlight/components/Search';
 import SiteTitle from 'virtual:starlight/components/SiteTitle';
 import SocialIcons from 'virtual:starlight/components/SocialIcons';
 import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+import MobileNav from './MobileNav.astro';
 
 /**
  * Render the `Search` component if Pagefind is enabled or the default search component has been overridden.
@@ -22,13 +23,20 @@ const shouldRenderSearch =
 		{shouldRenderSearch && <Search />}
 	</div>
 	<div class="sl-flex print:hidden right-group">
-		<nav class="header-nav" aria-label="Main navigation">
+		<MobileNav />
+		<nav class="header-nav desktop-nav" aria-label="Main navigation">
 			<a href="/getting-started/installation/" class="nav-link">
 				<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
 					<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
 				</svg>
 				<span class="nav-label">Docs</span>
+			</a>
+			<a href="https://www.nulang.cloud" class="nav-link" target="_blank" rel="noopener">
+				<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+				</svg>
+				<span class="nav-label">Cloud</span>
 			</a>
 			<a href="https://github.com/nulang-org/nulang" class="nav-link" target="_blank" rel="noopener">
 				<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
@@ -45,42 +53,6 @@ const shouldRenderSearch =
 	</div>
 </div>
 
-  <script is:inline>
-    // Highlight "Nu" in blue and rest in accent-high to match nulang.cloud branding
-    (function highlightHeaderNu() {
-      const title = document.querySelector('.site-title');
-      if (!title || title.querySelector('.nu-blue')) return;
-
-      // Find the first text node that starts with "Nu" (may be inside a span with logo present)
-      let targetNode = null;
-      const walker = document.createTreeWalker(title, NodeFilter.SHOW_TEXT, null);
-      while (walker.nextNode()) {
-        const text = walker.currentNode.textContent || '';
-        if (/^nu/i.test(text.trim())) {
-          targetNode = walker.currentNode;
-          break;
-        }
-      }
-
-      if (!targetNode) return;
-      const text = targetNode.textContent || '';
-      const leading = text.match(/^nu/i)?.[0] || text.slice(0, 2);
-      const remainder = text.slice(leading.length);
-
-      const nuSpan = document.createElement('span');
-      nuSpan.className = 'nu-blue';
-      nuSpan.textContent = leading;
-
-      if (remainder) {
-        const restSpan = document.createElement('span');
-        restSpan.className = 'nu-accent-high';
-        restSpan.textContent = remainder;
-        targetNode.replaceWith(nuSpan, restSpan);
-      } else {
-        targetNode.replaceWith(nuSpan);
-      }
-    })();
-  </script>
 
 <style>
 	@layer starlight.core {
@@ -183,8 +155,5 @@ const shouldRenderSearch =
 				align-items: center;
 			}
 		}
-.nu-accent-high {
-  color: var(--nu-accent-high);
-}
 	}
 </style>
