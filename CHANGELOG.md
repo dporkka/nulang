@@ -45,6 +45,13 @@ version + migration.*
 *Breaking changes require an accepted RFC and a deprecation cycle of at least
 two major versions.*
 
+### Added since 1.0.0-frozen — 2026-08-22
+
+- **Registry worker version ordering** (tooling): the registry worker now
+  sorts package versions with proper semver comparison instead of
+  lexicographic string sort, so `1.0.10` lists after `1.0.2`
+  (`registry-worker/src/index.ts`).
+
 ### Added since 1.0.0-frozen — 2026-08-21
 
 - **Full-stack web framework** (experimental; `src/web`, `src/runtime`,
